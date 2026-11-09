@@ -6,6 +6,13 @@
   [string]$Phase = 'remove-old-program-files',
   [string]$Operation,
   [string]$FailedPath,
+  [string]$ErrorSource,
+  [string]$OutputPath,
+  [string]$CleanupReportPath,
+  [string]$CleanupExitCode,
+  [string]$CleanupOutputPath,
+  [string]$MessagePath,
+  [ValidateSet('failed', 'recovered')][string]$Outcome = 'failed',
   [int]$NativeErrorCode = -1,
   [ValidateSet('unknown', 'succeeded', 'failed')][string]$MoveBack = 'unknown',
   [string]$ExitCode,
@@ -41,6 +48,34 @@ if ($Action -eq 'record') {
         errors = @()
       }
     }
+    if ($Phase -ne 'remove-old-program-files') { $report.phase = $Phase }
+    if ($ErrorSource) {
+      $report | Add-Member -Force NoteProperty errorSource $ErrorSource
+      $report | Add-Member -Force NoteProperty exitCode $ExitCode
+      $report | Add-Member -Force NoteProperty installationIncomplete $true
+      if (!$report.PSObject.Properties['diagnosticId']) {
+        $report | Add-Member NoteProperty diagnosticId ([Guid]::NewGuid().ToString('N'))
+      }
+    }
+    if ($OutputPath -and [IO.File]::Exists($OutputPath)) {
+      $toolOutput = [IO.File]::ReadAllText($OutputPath, [Text.Encoding]::Unicode)
+      $report | Add-Member -Force NoteProperty output $toolOutput
+      if ($ErrorSource -eq 'robocopy') {
+        # Robocopy's process code is a bitmask, not a Win32 error. Its per-file error line
+        # includes an invariant hexadecimal Windows code even on localized systems. Only
+        # that explicit evidence identifies a Windows reason and the failing file.
+        $copyErrors = @()
+        foreach ($match in [regex]::Matches($toolOutput, '(?m)^.*\(0x([0-9A-Fa-f]{8})\)[^\r\n]*?([A-Za-z]:\\[^\r\n]+)')) {
+          $copyErrors += [pscustomobject]@{
+            operation = 'copy-payload-entry'; path = $match.Groups[2].Value.TrimEnd()
+            errorSource = 'robocopy-reported-win32'
+            windowsErrorCode = [Convert]::ToUInt32($match.Groups[1].Value, 16)
+            nativeErrorCode = $null; message = $match.Value
+          }
+        }
+        $report.errors = $copyErrors
+      }
+    }
     if ($Operation) {
       $evidence = [pscustomobject]@{
         operation = $Operation
@@ -66,13 +101,25 @@ if ($Action -eq 'record') {
 }
 
 $savedPath = $null
+if ($report -and $Outcome -eq 'recovered') {
+  $report | Add-Member -Force NoteProperty finalOutcome 'recovered'
+  $report | Add-Member -Force NoteProperty installationIncomplete $false
+  $report.status = 'recovered'
+  try { [IO.File]::WriteAllText($ReportPath, ($report | ConvertTo-Json -Depth 16), [Text.UTF8Encoding]::new($false)) } catch {
+    [Console]::Error.WriteLine("Could not update recovered installer diagnostic: $($_.Exception.Message)")
+  }
+}
 try {
   if (!$LogDirectory) {
     $LogDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Open-Science\logs\installer'
   }
   [IO.Directory]::CreateDirectory($LogDirectory) | Out-Null
-  $candidate = Join-Path $LogDirectory ('install-failure-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N') + '.log')
-  $text = "$ProductName installer diagnostic`r`nversion=$AppVersion`r`ntime=$([DateTime]::UtcNow.ToString('o'))`r`nphase=$Phase`r`nexitCode=$ExitCode`r`ninstallPath=$InstallPath`r`nfinalReport=$ReportPath`r`n"
+  # A copy Retry/Cancel notice can precede temporary cleanup. Refresh that same attempt's log
+  # after cancellation instead of leaving the user with a stale cleanup outcome or two notices.
+  $id = if ($report -and $report.PSObject.Properties['diagnosticId'] -and $report.diagnosticId -match '^[a-f0-9]{32}$') { $report.diagnosticId } else { [Guid]::NewGuid().ToString('N') }
+  $candidate = Join-Path $LogDirectory ('install-failure-' + $id + '.log')
+  $text = "$ProductName installer diagnostic`r`nversion=$AppVersion`r`ntime=$([DateTime]::UtcNow.ToString('o'))`r`nphase=$Phase`r`nexitCode=$ExitCode`r`noutcome=$Outcome`r`ninstallPath=$InstallPath`r`nfinalReport=$ReportPath`r`n"
+  if ($CleanupExitCode) { $text += "temporaryCleanupExitCode=$CleanupExitCode`r`n" }
   if ($ReportsDirectory -and [IO.Directory]::Exists($ReportsDirectory)) {
     foreach ($path in [IO.Directory]::GetFiles($ReportsDirectory, 'cleanup-attempt-*.json') | Sort-Object) {
       $text += "`r`n--- $([IO.Path]::GetFileName($path)) ---`r`n" + [IO.File]::ReadAllText($path) + "`r`n"
@@ -82,6 +129,12 @@ try {
     $text += $report | ConvertTo-Json -Depth 16
   }
   if (!$report) { $text += "`r`nFinal child report missing or unreadable. Recovery state unknown.`r`n" }
+  if ($CleanupReportPath -and [IO.File]::Exists($CleanupReportPath)) {
+    $text += "`r`n--- Temporary payload cleanup (independent of original failure) ---`r`n" + [IO.File]::ReadAllText($CleanupReportPath) + "`r`n"
+  }
+  if ($CleanupOutputPath -and [IO.File]::Exists($CleanupOutputPath)) {
+    $text += "`r`n--- Temporary payload cleanup output ---`r`n" + [IO.File]::ReadAllText($CleanupOutputPath, [Text.Encoding]::Unicode) + "`r`n"
+  }
   [IO.File]::WriteAllText($candidate, $text, [Text.UTF8Encoding]::new($false))
   if ([IO.File]::Exists($candidate)) { $savedPath = $candidate }
 } catch {
@@ -156,5 +209,81 @@ if ($Language -eq 2052) {
   $log = if ($savedPath) { "診斷檔案：$savedPath" } else { '診斷未能儲存。' }
 }
 $message = @($title, $recovery, $reason, $file, $advice, $log) | Where-Object { $_ }
-[Console]::Write(($message -join "`r`n`r`n"))
+# Publication has already crossed the old-file deletion boundary. Never imply that old files
+# were restored, nor treat an extractor/robocopy status as a Win32 file-occupancy error.
+if ($Phase -like '*-new-program-files' -or $Phase -eq 'cleanup-payload-staging') {
+  $windowsFailure = $errors | Where-Object { $null -ne $_.nativeErrorCode -or $null -ne $_.windowsErrorCode } | Select-Object -First 1
+  $windowsCode = if ($windowsFailure -and $null -ne $windowsFailure.nativeErrorCode) { $windowsFailure.nativeErrorCode } elseif ($windowsFailure) { $windowsFailure.windowsErrorCode } else { $null }
+  $cause = ''
+  $stage = switch ($Phase) {
+    'prepare-new-program-files' { 'preparing the new application files' }
+    'extract-new-program-files' { 'extracting the new application files' }
+    'publish-new-program-files' { 'publishing the new application files' }
+    'copy-new-program-files' { 'copying the new application files' }
+    default { 'removing the temporary payload files' }
+  }
+  $reason = "Failed while $stage."
+  $advice = 'Check the reported path, available disk space and security software records, then run the same official installer again. If the archive is damaged, download it again from the official source.'
+  $state = 'Installation is incomplete. The application may not start.'
+  if ($windowsCode -eq 32 -or $windowsCode -eq 33) {
+    $cause = 'Windows reports that an application file or directory is in use.'
+    $advice = 'Close tasks using this file or directory, then run the same official installer again. If it persists, restart Windows and retry.'
+  } elseif ($windowsCode -eq 5) {
+    $cause = 'Windows denied access to the reported path.'
+    $advice = 'Check access permissions and security software records, then run the same official installer again. Use administrator access only if this folder requires it.'
+  } elseif ($windowsCode -eq 112) {
+    $cause = 'Windows reports insufficient disk space.'
+    $advice = 'Free space on the installation and temporary-file drives, then run the same official installer again.'
+  }
+  if ($Language -eq 2052) {
+    $stage = switch ($Phase) {
+      'prepare-new-program-files' { '准备新应用文件' }
+      'extract-new-program-files' { '解压新应用文件' }
+      'publish-new-program-files' { '发布新应用文件' }
+      'copy-new-program-files' { '复制新应用文件' }
+      default { '清理临时安装文件' }
+    }
+    $reason = "$stage 时失败。"
+    $state = '安装尚未完成，应用可能无法启动。'
+    $advice = '请检查所报路径、磁盘空间及安全软件记录，解决问题后重新运行同一个官方安装包。如安装包损坏，请从官方来源重新下载。'
+    if ($windowsCode -eq 32 -or $windowsCode -eq 33) {
+      $cause = 'Windows 报告应用文件或目录正在被占用。'
+      $advice = '请关闭使用此文件或目录的任务，然后重新运行同一个官方安装包。若仍失败，请重启 Windows 后重试。'
+    } elseif ($windowsCode -eq 5) {
+      $cause = 'Windows 拒绝访问所报路径。'
+      $advice = '请检查访问权限及安全软件记录，然后重新运行同一个官方安装包。仅在目录需要管理员权限时，以管理员身份运行。'
+    } elseif ($windowsCode -eq 112) {
+      $cause = 'Windows 报告磁盘空间不足。'
+      $advice = '请清理安装目录和临时文件所在磁盘的空间，然后重新运行同一个官方安装包。'
+    }
+  } elseif ($Language -eq 1028) {
+    $stage = switch ($Phase) {
+      'prepare-new-program-files' { '準備新應用程式檔案' }
+      'extract-new-program-files' { '解壓縮新應用程式檔案' }
+      'publish-new-program-files' { '發佈新應用程式檔案' }
+      'copy-new-program-files' { '複製新應用程式檔案' }
+      default { '清理暫存安裝檔案' }
+    }
+    $reason = "$stage 時失敗。"
+    $state = '安裝尚未完成，應用程式可能無法啟動。'
+    $advice = '請檢查所報路徑、磁碟空間及安全軟體記錄，解決問題後重新執行同一個官方安裝程式。如安裝程式損壞，請從官方來源重新下載。'
+    if ($windowsCode -eq 32 -or $windowsCode -eq 33) {
+      $cause = 'Windows 報告應用程式檔案或目錄正在使用中。'
+      $advice = '請關閉使用此檔案或目錄的工作，然後重新執行同一個官方安裝程式。若仍失敗，請重新啟動 Windows 後再試。'
+    } elseif ($windowsCode -eq 5) {
+      $cause = 'Windows 拒絕存取所報路徑。'
+      $advice = '請檢查存取權限及安全軟體記錄，然後重新執行同一個官方安裝程式。僅在目錄需要管理員權限時，以管理員身分執行。'
+    } elseif ($windowsCode -eq 112) {
+      $cause = 'Windows 報告磁碟空間不足。'
+      $advice = '請清理安裝目錄和暫存檔案所在磁碟的空間，然後重新執行同一個官方安裝程式。'
+    }
+  }
+  $message = @($title, $state, $reason, $cause, $file, $advice, $log) | Where-Object { $_ }
+}
+$messageText = $message -join "`r`n`r`n"
+if ($MessagePath) {
+  try { [IO.File]::WriteAllText($MessagePath, $messageText, [Text.UnicodeEncoding]::new($false, $false)) } catch {
+    [Console]::Error.WriteLine("Could not save installer notice: $($_.Exception.Message)")
+  }
+} else { [Console]::Write($messageText) }
 exit 0

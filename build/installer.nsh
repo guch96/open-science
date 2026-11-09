@@ -62,6 +62,7 @@
 # receipt at each explicit failure exit so the detached presentation can become dismissible.
 !macro quitFailedUpdate
   Call cleanupInstallPublication
+  Call showInstallPublicationFailure
   Push "failed"
   Call writeUpdateReceipt
   SetErrorLevel 2
