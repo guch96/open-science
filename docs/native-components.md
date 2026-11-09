@@ -226,6 +226,10 @@ diagnostics without adding retries. A log-write failure cannot stop recovery or 
 failure, and a missing child report must not reuse a preceding attempt's cause. Temporary reports
 stay inside the parent installer context; the persistent text is local and is not uploaded.
 
+Extraction reports distinguish script/process failures from actual 7-Zip exit codes and retain
+the failed operation and known path. Errors from draining other children remain separate from the
+original failure; the outer installer preserves that source and records its wrapper exit source.
+
 The notice uses the installer's product name and selected language (Simplified/Traditional Chinese,
 with English fallback). Its PowerShell resource retains a UTF-8 BOM for Windows PowerShell 5.1.
 Run `scripts/windows-program-cleanup.test.ts` with `NSIS_TEST_COMPILER` or `OPEN_SCIENCE_MAKENSIS`

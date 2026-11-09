@@ -50,8 +50,12 @@ if ($Action -eq 'record') {
     }
     if ($Phase -ne 'remove-old-program-files') { $report.phase = $Phase }
     if ($ErrorSource) {
-      $report | Add-Member -Force NoteProperty errorSource $ErrorSource
+      # The wrapper's exit status must not replace the extractor's proven failure source.
+      if ($ErrorSource -ne 'powershell-extractor' -or !$report.errorSource) {
+        $report | Add-Member -Force NoteProperty errorSource $ErrorSource
+      }
       $report | Add-Member -Force NoteProperty exitCode $ExitCode
+      $report | Add-Member -Force NoteProperty exitCodeSource $ErrorSource
       $report | Add-Member -Force NoteProperty installationIncomplete $true
       if (!$report.PSObject.Properties['diagnosticId']) {
         $report | Add-Member NoteProperty diagnosticId ([Guid]::NewGuid().ToString('N'))
@@ -153,7 +157,8 @@ $code = if ($failure) { $failure.nativeErrorCode } else { $null }
 # Preserve tool results as tool results; they do not identify a Windows file error.
 $source = if ($report.errorSource) { $report.errorSource } elseif ($Phase -eq 'remove-old-program-files') { 'uninstaller' } else { 'installer' }
 $result = if ($report.exitCode) { $report.exitCode } else { $ExitCode }
-$toolFailure = if ($report) { $report.toolFailures | Where-Object { $_.errorSource -and $null -ne $_.toolExitCode } | Select-Object -First 1 }
+# A secondary child's tool failure cannot replace an earlier script or process error.
+$toolFailure = if ($report -and $source -eq '7za') { $report.toolFailures | Where-Object { $_.errorSource -eq $source -and $null -ne $_.toolExitCode } | Select-Object -First 1 }
 if ($toolFailure) { $source = $toolFailure.errorSource; $result = $toolFailure.toolExitCode }
 $sourceResult = ''
 if ($null -ne $result -and [string]$result -ne '') {

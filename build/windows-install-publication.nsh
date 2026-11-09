@@ -174,6 +174,7 @@ FunctionEnd
   # not a work budget, so do not kill a valid large extraction merely because it is quiet.
   !ifdef APP_64
     ${If} ${IsNativeAMD64}
+      StrCpy $publicationSource "powershell-extractor"
       nsExec::ExecToStack '"$publicationPowerShell" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\windows-extract-payload.ps1" -Extractor "$PLUGINSDIR\7za.exe" -Archive "${FILE}" -Target "$publicationDirectory" -ListDirectory "$PLUGINSDIR" -ReportPath "$publicationReport"'
     ${Else}
   !endif

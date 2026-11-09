@@ -193,8 +193,9 @@ try {
       $source = [IO.Path]::Combine($stage, $name)
       if (![IO.Directory]::Exists($source)) { continue }
       $destination = [IO.Path]::Combine($root, $name)
-      $diagnosticOperation = 'move-payload-directory'; $diagnosticPath = $source
+      $diagnosticOperation = 'validate-payload-destination'; $diagnosticPath = $destination
       if (Test-Path -LiteralPath $destination) { throw "Publication destination already exists: $destination" }
+      $diagnosticOperation = 'move-payload-directory'; $diagnosticPath = $source
       [IO.Directory]::Move($source, $destination)
       [Console]::Out.WriteLine("Published $name by directory move")
     }

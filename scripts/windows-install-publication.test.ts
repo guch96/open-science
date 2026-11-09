@@ -182,6 +182,33 @@ describe.skipIf(process.platform !== 'win32')('real Windows payload publication'
   }, 30_000)
 
   it.skipIf(process.env.OPEN_SCIENCE_INSTALL_PUBLICATION_NATIVE !== '1')(
+    'reports the conflicting publication destination without moving either directory',
+    () => {
+      const f = fixture()
+      setFixtureAcl(f.install)
+      expect(action(f, 'prepare').status).toBe(0)
+      const state = JSON.parse(readFileSync(f.state, 'utf8'))
+      expect(state.useMove).toBe(true)
+      copyFixture(f.payload, state.stage)
+      const destination = join(f.install, 'resources')
+      mkdirSync(destination)
+      writeFileSync(join(destination, 'keep.txt'), 'existing destination')
+
+      expect(action(f, 'publish').status).toBe(20)
+      const report = JSON.parse(readFileSync(join(f.root, 'publish-evidence.json'), 'utf8'))
+      expect(report.errors[0]).toMatchObject({
+        operation: 'validate-payload-destination',
+        path: destination
+      })
+      expect(readFileSync(join(destination, 'keep.txt'), 'utf8')).toBe('existing destination')
+      expect(readFileSync(join(state.stage, 'resources/backend/index.js'), 'utf8')).toBe(
+        'synthetic backend'
+      )
+      expect(action(f, 'cleanup').status).toBe(0)
+    },
+    30_000
+  )
+  it.skipIf(process.env.OPEN_SCIENCE_INSTALL_PUBLICATION_NATIVE !== '1')(
     'retries the remaining directory after a locked second directory fails publication',
     async () => {
       const f = fixture()
@@ -691,6 +718,17 @@ try {
           if (mode === 'truncated' || mode === 'corrupt') {
             expect(diagnostic).toContain('extract-new-program-files')
             expect(diagnostic).toContain('7za')
+          }
+          if (
+            mode === 'launch-failure' &&
+            readFileSync(join(f.root, 'native-amd64.txt'), 'utf8') === 'true'
+          ) {
+            expect(diagnostic).toMatch(/"errorSource":\s*"powershell-extractor"/)
+            expect(diagnostic).toMatch(/"operation":\s*"start-extractor"/)
+            expect(diagnostic).toContain('7za.exe')
+            const notice = readFileSync(join(f.root, 'notice.txt'), 'utf16le')
+            expect(notice).toContain('Error source: powershell-extractor; result: 1.')
+            expect(notice).not.toContain('Error source: 7za;')
           }
           if (mode === 'prepare-failure') {
             expect(diagnostic).toContain('prepare-new-program-files')
