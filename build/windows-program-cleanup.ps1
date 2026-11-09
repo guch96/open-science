@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$StagingPath,
-  [string]$ReportPath
+  [string]$ReportPath,
+  [switch]$Upgrade
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +55,38 @@ function Write-CleanupReport {
   }
 }
 
+function Test-RecoverableSharingError([Exception]$Error) {
+  foreach ($key in @('deletionCancellation', 'attributeRestoration')) {
+    if ($Error.Data.Contains($key) -and $Error.Data[$key] -ne 'succeeded') { return $false }
+  }
+  if ($Error -is [ComponentModel.Win32Exception] -and $Error.NativeErrorCode -notin @(32, 33)) { return $false }
+  if ($Error -is [AggregateException]) {
+    foreach ($key in @('deletionCancellation', 'attributeRestoration')) {
+      if (!$Error.Data.Contains($key)) { return $false }
+    }
+    if (!$Error.InnerExceptions.Count) { return $false }
+    foreach ($inner in $Error.InnerExceptions) {
+      if (!(Test-RecoverableSharingError $inner)) { return $false }
+    }
+    return $true
+  }
+  if ($Error.InnerException) { return (Test-RecoverableSharingError $Error.InnerException) }
+  return ($Error -is [ComponentModel.Win32Exception])
+}
+
+function Save-CleanupAttempt([int]$Number, [int]$Delay) {
+  $script:report.attempts += [ordered]@{
+    number = $Number
+    timestamp = [DateTime]::UtcNow.ToString('o')
+    status = $script:report.status
+    deletionCancellation = $script:report.deletionCancellation
+    attributeRestoration = $script:report.attributeRestoration
+    errors = $script:report.errors
+    retryDelaySeconds = $Delay
+  }
+  Write-CleanupReport
+}
+
 $report = [ordered]@{
   timestamp = [DateTime]::UtcNow.ToString('o')
   phase = 'remove-staged-program-files'
@@ -63,16 +96,54 @@ $report = [ordered]@{
   attributeRestoration = 'unknown'
   fileMoveBack = 'unknown'
   errors = @()
+  attempts = @()
 }
 
+$directoryHandle = $null
 try {
   Add-Type -Path (Join-Path $PSScriptRoot 'windows-install-publication.dll')
-  [InstallDirectory]::RemoveStagedProgramFiles($StagingPath)
-  $report.status = 'succeeded'
-  $report.deletionCancellation = 'not-needed'
-  $report.attributeRestoration = 'not-needed'
-  Write-CleanupReport
-  exit 0
+  for ($attempt = 1; $attempt -le 4; $attempt++) {
+    $report.deletionCancellation = 'unknown'
+    $report.attributeRestoration = 'unknown'
+    try {
+      if (!$directoryHandle) {
+        $protectedPath = $StagingPath
+        if (!$protectedPath.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+          $protectedPath = if ($protectedPath.StartsWith('\\', [StringComparison]::Ordinal)) {
+            '\\?\UNC\' + $protectedPath.Substring(2)
+          } else { '\\?\' + $protectedPath }
+        }
+        try { $directoryHandle = [InstallDirectory]::HoldForProgramCleanup($protectedPath) }
+        catch {
+          $_.Exception.Data['operation'] = 'hold-staging-directory'
+          $_.Exception.Data['path'] = $StagingPath
+          throw
+        }
+      }
+      # Keep the no-delete-sharing directory handle across all calls and waits. The staging
+      # name cannot be replaced between otherwise independently protected helper calls.
+      [InstallDirectory]::RemoveStagedProgramFiles($StagingPath)
+      $report.status = 'succeeded'
+      $report.errors = @()
+      $report.deletionCancellation = 'not-needed'
+      $report.attributeRestoration = 'not-needed'
+      Save-CleanupAttempt $attempt 0
+      [Console]::WriteLine("Open-Science program cleanup attempt=$attempt result=succeeded")
+      exit 0
+    } catch {
+      $report.errors = @(Get-ErrorEvidence $_.Exception)
+      $delay = 0
+      if ($Upgrade -and $attempt -lt 4 -and
+          $report.deletionCancellation -eq 'succeeded' -and $report.attributeRestoration -eq 'succeeded' -and
+          (Test-RecoverableSharingError $_.Exception)) { $delay = $attempt }
+      Save-CleanupAttempt $attempt $delay
+      [Console]::Error.WriteLine("Open-Science program cleanup attempt=$attempt result=failed deletionCancellation=$($report.deletionCancellation) attributeRestoration=$($report.attributeRestoration) $(Format-ErrorDetails $_.Exception)")
+      [Console]::Error.WriteLine($_.Exception.ToString())
+      if (!$delay) { exit 2 }
+      [Console]::WriteLine("Open-Science program cleanup retry: waiting $delay second(s), next attempt=$($attempt + 1)")
+      Start-Sleep -Seconds $delay
+    }
+  }
 } catch {
   $report.errors = @(Get-ErrorEvidence $_.Exception)
   Write-CleanupReport
@@ -81,4 +152,6 @@ try {
   )
   [Console]::Error.WriteLine($_.Exception.ToString())
   exit 2
+} finally {
+  if ($directoryHandle) { $directoryHandle.Dispose() }
 }

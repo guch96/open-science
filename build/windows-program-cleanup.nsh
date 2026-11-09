@@ -17,6 +17,7 @@ Var programMoveOperation
 Var programMoveError
 Var programMovePath
 Var programOwnDiagnostic
+Var programCleanupArguments
 
 Function un.persistCleanupFailure
   ${if} $programOwnDiagnostic == "1"
@@ -358,7 +359,14 @@ FunctionEnd
   !insertmacro stageProgramEntry "${UNINSTALL_FILENAME}"
   # Hold all deletion dispositions until the complete program payload can be removed. A late
   # access/sharing failure cancels earlier dispositions, leaving every byte available to restore.
-  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\windows-program-cleanup.ps1" -StagingPath "$programStagingDirectory" -ReportPath "$cleanupReport"'
+  StrCpy $programCleanupArguments ""
+  !ifdef isUpdated
+    ${if} ${isUpdated}
+      StrCpy $programCleanupArguments "-Upgrade"
+    ${endif}
+  !endif
+  # Silent manual uninstalls retain one attempt. Only the explicit update flag opts in.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\windows-program-cleanup.ps1" -StagingPath "$programStagingDirectory" -ReportPath "$cleanupReport" $programCleanupArguments'
   Pop $R0
   ${if} $R0 != 0
     DetailPrint `Open-Science windows-program-cleanup.ps1 exit code=$R0 phase=remove-staged-program-files`

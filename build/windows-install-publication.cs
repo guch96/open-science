@@ -181,8 +181,16 @@ public static class InstallDirectory {
     if (!CreateDirectory(path, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
   }
   public static SafeFileHandle Hold(string path) {
+    return Hold(path, 0);
+  }
+  public static SafeFileHandle HoldForProgramCleanup(string path) {
+    // Metadata-only opens do not participate in delete sharing. Directory-list access keeps
+    // the cleanup root from being renamed/replaced between retries, including while idle.
+    return Hold(path, 1);
+  }
+  static SafeFileHandle Hold(string path, uint access) {
     // No delete sharing: the installation ancestors cannot be renamed while this action runs.
-    var handle = CreateFile(path, 0, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+    var handle = CreateFile(path, access, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
     if (handle.IsInvalid) {
       var error = Marshal.GetLastWin32Error();
       handle.Dispose(); throw new Win32Exception(error);
