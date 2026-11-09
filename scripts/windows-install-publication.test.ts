@@ -708,6 +708,7 @@ try {
             expect(diagnostic).toMatch(new RegExp('"toolExitCode":\\s*' + mode.slice(5)))
             const notice = readFileSync(join(f.root, 'notice.txt'), 'utf16le')
             expect(notice).toContain('extracting the new application files')
+            expect(notice).toContain(`Error source: 7za; result: ${mode.slice(5)}.`)
             expect(notice).not.toContain('An application file is in use')
             expect(notice).toContain('Installation is incomplete')
           }

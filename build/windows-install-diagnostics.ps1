@@ -150,6 +150,17 @@ if ($file -and $file.Length -gt 80) { $file = $file.Substring(0, 77) + '...' }
 $incomplete = $report -and ($report.deletionCancellation -eq 'failed' -or $report.attributeRestoration -eq 'failed' -or $report.fileMoveBack -eq 'failed')
 $unknown = !$report -or $report.fileMoveBack -eq 'unknown'
 $code = if ($failure) { $failure.nativeErrorCode } else { $null }
+# Preserve tool results as tool results; they do not identify a Windows file error.
+$source = if ($report.errorSource) { $report.errorSource } elseif ($Phase -eq 'remove-old-program-files') { 'uninstaller' } else { 'installer' }
+$result = if ($report.exitCode) { $report.exitCode } else { $ExitCode }
+$toolFailure = if ($report) { $report.toolFailures | Where-Object { $_.errorSource -and $null -ne $_.toolExitCode } | Select-Object -First 1 }
+if ($toolFailure) { $source = $toolFailure.errorSource; $result = $toolFailure.toolExitCode }
+$sourceResult = ''
+if ($null -ne $result -and [string]$result -ne '') {
+  $sourceResult = "Error source: $source; result: $result."
+  if ($Language -eq 2052) { $sourceResult = "错误来源：${source}；结果：${result}。" }
+  elseif ($Language -eq 1028) { $sourceResult = "錯誤來源：${source}；結果：${result}。" }
+}
 $reason = 'Windows could not remove the old application files.'
 $advice = 'Check the reported path, available disk space and security software records, then run the official installer again.'
 if ($code -eq 32 -or $code -eq 33) {
@@ -208,7 +219,8 @@ if ($Language -eq 2052) {
   }
   $log = if ($savedPath) { "診斷檔案：$savedPath" } else { '診斷未能儲存。' }
 }
-$message = @($title, $recovery, $reason, $file, $advice, $log) | Where-Object { $_ }
+$fallback = if ($code -notin @(5, 32, 33)) { $sourceResult } else { '' }
+$message = @($title, $recovery, $reason, $fallback, $file, $advice, $log) | Where-Object { $_ }
 # Publication has already crossed the old-file deletion boundary. Never imply that old files
 # were restored, nor treat an extractor/robocopy status as a Win32 file-occupancy error.
 if ($Phase -like '*-new-program-files' -or $Phase -eq 'cleanup-payload-staging') {
@@ -278,7 +290,8 @@ if ($Phase -like '*-new-program-files' -or $Phase -eq 'cleanup-payload-staging')
       $advice = '請清理安裝目錄和暫存檔案所在磁碟的空間，然後重新執行同一個官方安裝程式。'
     }
   }
-  $message = @($title, $state, $reason, $cause, $file, $advice, $log) | Where-Object { $_ }
+  $fallback = if (!$cause) { $sourceResult } else { '' }
+  $message = @($title, $state, $reason, $cause, $fallback, $file, $advice, $log) | Where-Object { $_ }
 }
 $messageText = $message -join "`r`n`r`n"
 if ($MessagePath) {

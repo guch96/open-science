@@ -272,7 +272,7 @@ if (!$child.WaitForExit(20000)) { $child.Kill(); throw 'Cleanup did not finish.'
     expect(diagnostic.attempts[0].retryDelaySeconds).toBe(0)
   }, 30_000)
 
-  it('does not retry when Windows denies directory-list access needed to hold staging', () => {
+  it('explains a denied staging-directory hold without retrying or changing old files', () => {
     const stage = join(root, 'unreadable-stage')
     mkdirSync(stage)
     const path = join(stage, 'keep.dll')
@@ -302,6 +302,24 @@ exit $code`)
         expect.objectContaining({ nativeErrorCode: 5 })
       ])
     )
+    const finalized = run(
+      `& ${quote(resolve('build/windows-install-diagnostics.ps1'))} -Action finalize -ReportPath ${quote(report)} -LogDirectory ${quote(join(root, 'unreadable-logs'))} -ExitCode 2`
+    )
+    expect(finalized.status, String(finalized.stderr)).toBe(0)
+    const message = finalized.stdout.toString('utf16le')
+    expect(message).toContain('Windows denied access to an application file.')
+    expect(message).toContain('unreadable-stage')
+    expect(message).toContain('Restoration of old files could not be confirmed.')
+    expect(message).toContain('contact support before removing them')
+    expect(message).not.toContain('An application file is in use.')
+    const restored = run(
+      `& ${quote(resolve('build/windows-install-diagnostics.ps1'))} -Action record -ReportPath ${quote(report)} -MoveBack succeeded; & ${quote(resolve('build/windows-install-diagnostics.ps1'))} -Action finalize -ReportPath ${quote(report)} -LogDirectory ${quote(join(root, 'unreadable-logs'))} -ExitCode 2`
+    )
+    expect(restored.status, String(restored.stderr)).toBe(0)
+    const restoredMessage = restored.stdout.toString('utf16le')
+    expect(restoredMessage).toContain('Windows denied access to an application file.')
+    expect(restoredMessage).toContain('Check access permissions and security software records.')
+    expect(restoredMessage).not.toContain('Restoration of old files could not be confirmed.')
   }, 30_000)
 
   it('does not retry a real access denial or lose bytes and attributes after cancellation', () => {
@@ -481,6 +499,7 @@ exit $code`)
     const message = result.stdout.toString('utf16le')
     expect(message).toContain('Open-Science Pro 未能完成更新。')
     expect(message).toContain('无法确认旧应用文件是否已恢复。')
+    expect(message).toContain('错误来源：uninstaller；结果：2。')
     expect(message).not.toContain('文件正在被占用')
   }, 30_000)
 })
@@ -590,6 +609,7 @@ FileClose $8
 ${!recovered ? "System::Call 'kernel32::CloseHandle(p R6)'" : ''}
 \${if} $R0 != 0
 Call showCleanupFailure
+CopyFiles /SILENT "$installDiagnosticMessagePath" "${join(fixture, 'notice.txt')}"
 SetErrorLevel 2
 Quit
 \${endif}
@@ -688,6 +708,10 @@ $start=[Diagnostics.ProcessStartInfo]::new(${quote(parent)}); $start.UseShellExe
         )
         if (outcome === 'missing-child-report') {
           expect(readFileSync(resultFile, 'utf8')).toBe('launch-failed')
+          const notice = readFileSync(join(fixture, 'notice.txt'), 'utf16le')
+          expect(notice).toContain('Error source: uninstaller; result: launch-failed.')
+          expect(notice).toContain('Restoration of old files could not be confirmed.')
+          expect(notice).not.toContain('An application file is in use.')
         } else {
           expect(JSON.parse(readFileSync(finalReport, 'utf8')).status).toBe(
             recovered ? 'succeeded' : 'failed'

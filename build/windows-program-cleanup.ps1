@@ -115,8 +115,11 @@ try {
         }
         try { $directoryHandle = [InstallDirectory]::HoldForProgramCleanup($protectedPath) }
         catch {
-          $_.Exception.Data['operation'] = 'hold-staging-directory'
-          $_.Exception.Data['path'] = $StagingPath
+          # Attach this synchronous hold's context to the actual failure, not PowerShell's
+          # invocation wrapper, so its native reason stays paired with the operation.
+          $failure = $_.Exception.GetBaseException()
+          $failure.Data['operation'] = 'hold-staging-directory'
+          $failure.Data['path'] = $StagingPath
           throw
         }
       }
