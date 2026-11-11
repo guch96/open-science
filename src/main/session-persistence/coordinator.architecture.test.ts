@@ -475,6 +475,9 @@ describe('Session persistence coordinator architecture', () => {
         'withLiteratureAttachmentRemoval',
         'readSessionRuntimeContext',
         'readSessionSnapshot',
+        'prepareSessionRecovery',
+        'commitSessionRecovery',
+        'recoverStartupSession',
         'recoverInterruptedDelegatedWork',
         'replaceSessionMetadata',
         'repairProjectFiles',
@@ -547,6 +550,7 @@ describe('Session persistence coordinator architecture', () => {
         'ComputeJobDeletionParticipant',
         'DelegatedWorkRecordCommands',
         'PatchSessionRuntimeContextCommand',
+        'PreparedSessionRecovery',
         'ProjectSessionDeletionResult',
         'PublishedSessionHandoff',
         'SessionCatalog',
@@ -743,6 +747,8 @@ describe('Session persistence coordinator architecture', () => {
         'patchSessionRuntimeContext',
         'readSessionRuntimeContext',
         'readSessionSnapshot',
+        'prepareSessionRecovery',
+        'commitSessionRecovery',
         'reserveSessionExport',
         'retryArtifactFinalization',
         'commitRecoveredArtifactReferences',
@@ -808,6 +814,38 @@ describe('Session persistence coordinator architecture', () => {
           ),
           name
         ).toEqual([`this.stateOwner.${name}`])
+        continue
+      }
+      if (name === 'recoverStartupSession') {
+        // Orchestration releases the lane between attempts; prepare and commit own their guards.
+        expect(method.getText(facadeFile)).not.toContain('this.operationScheduler.')
+        expect(method.getText(facadeFile)).not.toContain('this.repository.')
+        expect(method.getText(facadeFile)).toContain('this.prepareSessionRecovery(')
+        expect(method.getText(facadeFile)).toContain('this.commitSessionRecovery(')
+        continue
+      }
+      if (name === 'prepareSessionRecovery' || name === 'commitSessionRecovery') {
+        // Production preparation reads a non-mutating snapshot off-lane; only legacy readers use
+        // the scoped fallback. Commit revalidates before effectful reconciliation in that lane.
+        const calls = walk(method, isCallExpression)
+          .filter(isCallExpression)
+          .map((call) => call.expression.getText(facadeFile))
+        expect(calls.filter((call) => call.startsWith('this.operationScheduler.'))).toEqual([
+          'this.operationScheduler.runSession'
+        ])
+        if (name === 'prepareSessionRecovery') {
+          expect(calledOwnerMethods(method)).toEqual([])
+          expect(calls.filter((call) => call.startsWith('this.repository.'))).toEqual([
+            'this.repository.loadSessionRecoverySnapshot',
+            'this.repository.loadSessionWithDiagnostics'
+          ])
+        } else {
+          expect(calledOwnerMethods(method)).toEqual([
+            'reconciliationOwner.reconcileLoadedSessions',
+            'stateOwner.ownsPromptPreparation',
+            'stateOwner.recordSession'
+          ])
+        }
         continue
       }
       if (name === 'projectRuntimeSessionSummaries') {
@@ -916,7 +954,7 @@ describe('Session persistence coordinator architecture', () => {
       expect(methods(owner, 'private')).not.toContain('enqueue')
     }
 
-    expect(expectedSchedulerRoute.size).toBe(51)
+    expect(expectedSchedulerRoute.size).toBe(53)
     const constructorSource = facade.members.filter(isConstructorDeclaration)[0].getText(facadeFile)
     expect(constructorSource).toContain('this.operationScheduler.runSession(')
     expect(constructorSource).toContain('this.operationScheduler.runGlobal(work)')
@@ -1301,6 +1339,8 @@ describe('Session persistence coordinator architecture', () => {
       'src/main/session-persistence/projection-diagnostics.test.ts',
       'src/main/session-persistence/projection-diagnostics.ts',
       'src/main/session-persistence/projection.test.ts',
+      'src/main/session-persistence/startup-hydration.integration.test.ts',
+      'src/main/session-persistence/recovery-commit.integration.test.ts',
       'src/main/session-persistence/projection.ts',
       'src/main/session-persistence/renderer-flush.test.ts',
       'src/main/session-persistence/renderer-flush.ts',
@@ -1392,6 +1432,8 @@ describe('Session persistence coordinator architecture', () => {
       'src/main/session-persistence/pdf-context-owner.test.ts',
       'src/main/session-persistence/projection-diagnostics.test.ts',
       'src/main/session-persistence/projection.test.ts',
+      'src/main/session-persistence/startup-hydration.integration.test.ts',
+      'src/main/session-persistence/recovery-commit.integration.test.ts',
       'src/main/session-persistence/renderer-flush.test.ts',
       'src/main/session-persistence/renderer-save-options.test.ts',
       'src/main/session-persistence/repository-queue.test.ts',
