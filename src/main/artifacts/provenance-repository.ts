@@ -999,7 +999,13 @@ class ArtifactProvenanceRepository {
     projectIdInput: string,
     appSessionIdInput: string,
     startupCutoff: number
-  ): Promise<Array<() => Promise<void>>> {
+  ): Promise<
+    Array<
+      (
+        commit: (apply: () => Promise<void>) => Promise<boolean>
+      ) => Promise<'complete' | 'stale' | 'busy'>
+    >
+  > {
     const projectId = assertSafeSegment(projectIdInput, 'project id')
     const appSessionId = assertSafeSegment(appSessionIdInput, 'session id')
     const actions = await this.stagingRecovery.planOrphanStagingCleanup(
@@ -1007,9 +1013,14 @@ class ArtifactProvenanceRepository {
       appSessionId,
       startupCutoff
     )
-    return actions.map(
-      (apply) => () => this.versionWriter.withSessionWrite({ projectId, appSessionId }, apply)
-    )
+    return actions.map((apply) => async (commit) => {
+      const reservation = await this.versionWriter.tryWithSessionWrite(
+        { projectId, appSessionId },
+        () => commit(apply)
+      )
+      if (!reservation.acquired) return 'busy'
+      return reservation.result ? 'complete' : 'stale'
+    })
   }
 
   async reconcileSession(
