@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -22,6 +22,7 @@ import { SessionPersistenceCoordinator, type SessionFileIndex } from './coordina
 import { composeSessionProjection } from '../composition/session-projection'
 import { materializeSessionConversationGraph, type PersistedChatSession } from '../../shared/session-persistence'
 import { RuntimeSessionOwner } from './runtime-session-owner'
+import { initializeManagedWorkspaceOwnership, finalizeManagedWorkspaceOwnership, planProvisionalManagedWorkspaceReconciliation } from '../storage/managed-workspace-ownership'
 
 let root: string
 let client: PrismaClient
@@ -31,7 +32,7 @@ afterEach(async () => {
   if (root) await rm(root, { recursive: true, force: true })
 })
 
-async function createStartupHarness(dependencies: ConstructorParameters<typeof SessionRepository>[1] = {}, syncSession: SessionFileIndex['syncSession'] = async () => []) {
+async function createStartupHarness(dependencies: ConstructorParameters<typeof SessionRepository>[1] = {}, syncSession: SessionFileIndex['syncSession'] = async () => [], workspace?: ConstructorParameters<typeof SessionPersistenceCoordinator>[11]) {
   root = await mkdtemp(join(tmpdir(), 'targeted-session-startup-'))
   initDataRoot(root)
   client = createProjectDbClient(root)
@@ -91,7 +92,7 @@ async function createStartupHarness(dependencies: ConstructorParameters<typeof S
     },
     markReconciliationIncomplete: () => undefined
   }
-  const coordinator = new SessionPersistenceCoordinator(repository, fileIndex)
+  const coordinator = new SessionPersistenceCoordinator(repository, fileIndex, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, workspace)
   reads.length = 0
   const composed = composeSessionProjection({
     sessionRepository: repository,
@@ -112,7 +113,7 @@ async function createStartupHarness(dependencies: ConstructorParameters<typeof S
     auxiliaryUsageRecorder: {},
     archiveCoordinator: {}
   } as unknown as Parameters<typeof composeSessionProjection>[0])
-  return { composed, coordinator, repository, projection, makeSession, reads, owners }
+  return { composed, coordinator, repository, projection, makeSession, reads, owners, historical }
 }
 
 it('loads selected context while pending and idle history remain summary-only until deferred work starts', async () => {
@@ -316,4 +317,80 @@ it('cancels a deferred snapshot without admitting repair after shutdown', async 
   try { await workflow.dispose() } finally { delaying = false; release(); await workflow.settled() }
   expect(repaired).toEqual([])
   expect((await h.repository.loadSessionSummaries()).find(({ id }) => id === 'interrupted')?.status).toBe('running')
+})
+
+
+it('rejects cleanup queued behind a second-repository package publication before adoption', async () => {
+  const h = await createStartupHarness()
+  const snapshot = await h.repository.scanSessionIdentities()
+  const generation = h.coordinator.recoveryCatalogGeneration()
+  let release!: () => void
+  let enter!: () => void
+  const entered = new Promise<void>((resolve) => { enter = resolve })
+  const blocked = new Promise<void>((resolve) => { release = resolve })
+  const publication = h.coordinator.runSessionMutation('project', 'published', async () => {
+    await new SessionRepository(root).saveSession(h.makeSession('published'))
+    enter()
+    await blocked
+  })
+  await entered
+  const apply = vi.fn(async () => undefined)
+  const cleanup = h.coordinator.reconcileRecoveryCatalog([], generation, async (operation) => {
+    await apply()
+    return h.repository.runWithSessionCatalogSnapshot(snapshot, operation)
+  })
+  release()
+  await publication
+  expect(await cleanup).toBe(false)
+  expect(apply).not.toHaveBeenCalled()
+  expect(await h.repository.loadSession('project', 'published')).toBeDefined()
+})
+
+it.each([false, true])('preserves shared cwd references and defers cleanup when an earlier reference changes: %s', async (changeReference) => {
+  const h = await createStartupHarness({}, undefined, {
+    planProvisional: (sessions) => planProvisionalManagedWorkspaceReconciliation(sessions, 20, root),
+    reconcileProvisional: async () => undefined, markProjectRetained: async () => [],
+    restoreProjectActive: async () => undefined, markRetained: async () => false, restoreActive: async () => undefined
+  })
+  const shared = join(root, 'workspaces', 'shared')
+  const orphan = join(root, 'workspaces', 'orphan')
+  for (const cwd of [shared, orphan]) {
+    await mkdir(cwd, { recursive: true })
+    await initializeManagedWorkspaceOwnership(cwd, 'project', 1, root)
+    await finalizeManagedWorkspaceOwnership(cwd, 'old-source', 2, root)
+  }
+  if (!changeReference) {
+    const branch = await h.repository.loadSession('project', 'historical')
+    await h.repository.saveSession({ ...branch!, cwd: shared }, branch!.revision)
+  }
+  await h.composed.loadStartupSessions()
+  let recovered = 0
+  const workflow = h.composed.createDeferredRecovery(async () => {
+    recovered += 1
+    if (changeReference && recovered === 3) {
+      const latest = await h.repository.loadSession('project', 'historical')
+      await h.coordinator.saveSession({ ...latest!, cwd: shared, archivedAt: 50 })
+    }
+  })
+  workflow.start()
+  try {
+    await workflow.settled()
+    await expect(access(shared)).resolves.toBeUndefined()
+    if (changeReference) await expect(access(orphan)).resolves.toBeUndefined()
+    else await expect(access(orphan)).rejects.toMatchObject({ code: 'ENOENT' })
+  } finally { await workflow.dispose() }
+})
+
+
+it('refreshes only confirmed missing summaries and preserves authority published before recheck', async () => {
+  const { repository, projection, historical } = await createStartupHarness()
+  const authority = join(root, 'sessions', historical.projectId, `${historical.id}.json`)
+  await rm(authority)
+  expect(await repository.loadSessionRecoverySnapshot(historical.projectId, historical.id)).toEqual({ status: 'missing' })
+  await repository.saveSession(historical)
+  expect(await repository.reconcileMissingSessionProjection(historical.projectId, historical.id)).toBe(false)
+  expect((await projection.list()).some(({ id }) => id === historical.id)).toBe(true)
+  await writeFile(authority, '{invalid')
+  expect(await repository.reconcileMissingSessionProjection(historical.projectId, historical.id)).toBe(false)
+  expect((await projection.list()).some(({ id }) => id === historical.id)).toBe(true)
 })

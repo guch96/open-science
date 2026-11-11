@@ -114,6 +114,7 @@ export type PublishedSessionHandoff = {
 
 const SESSION_CPU_TRACE_ENABLED = process.env.OPEN_SCIENCE_PERF_SESSION_TRACE === '1'
 type SessionMutationRepository = {
+  hasLiveRuntimeSession?(projectId: string, sessionId: string): boolean
   deleteRecoveryFile?(request: DeleteSessionRecoveryFileRequest): Promise<void>
   loadAllWithDiagnostics(options?: {
     mode?: 'repair' | 'read-only'
@@ -220,7 +221,7 @@ const emitRecoverableDiagnostic = (
 type SessionAuthorityScan = Awaited<ReturnType<SessionMutationRepository['loadAllWithDiagnostics']>>
 
 type PreparedSessionRecovery = Readonly<
-  { projectId: string; sessionId: string } & (
+  { projectId: string; sessionId: string; metrics?: SessionRecoverySnapshot['metrics'] } & (
     | { status: 'prepared'; session: PersistedChatSession; expectedRevision: number }
     | { status: 'repair-required' }
   )
@@ -721,6 +722,37 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     return this.hydrationCache.generationForLoad()
   }
 
+  async cleanupRecoveredSession(
+    prepared: PreparedSessionRecovery,
+    expectedGeneration: number,
+    commit: (operation: () => Promise<void>) => Promise<boolean>,
+    startupCutoff: number,
+    cancelled: () => boolean
+  ): Promise<'complete' | 'busy' | 'stale'> {
+    if (prepared.status !== 'prepared') return 'stale'
+    const { projectId, sessionId, session } = prepared
+    const actions = await this.reconciliationOwner.planOrphanStagingCleanup(session, startupCutoff)
+    const guarded = (operation: () => Promise<void>, holdCatalog: boolean): Promise<'complete' | 'busy' | 'stale'> =>
+      this.operationScheduler.runSession(projectId, sessionId, async () => {
+        if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return 'stale'
+        this.assertMutable(projectId, sessionId, 'mutate')
+        if (session.activeRun || this.stateOwner.ownsPromptPreparation(session) || this.repository.hasLiveRuntimeSession?.(projectId, sessionId)) return 'busy'
+        if (holdCatalog) return await commit(operation) ? 'complete' : 'stale'
+        if (!await commit(async () => undefined)) return 'stale'
+        // Verified legacy-source cleanup hashes files under the Session lane, never globally.
+        await operation()
+        return 'complete'
+      })
+    const uploads = await guarded(() => this.reconciliationOwner.cleanupVersionedUploadSources(session), false)
+    if (uploads !== 'complete') return uploads
+    for (const apply of actions) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      const outcome = await guarded(apply, true)
+      if (outcome !== 'complete') return outcome
+    }
+    return 'complete'
+  }
+
   async reconcileRecoveryCatalog(
     sessions: readonly RecoveredSessionReference[],
     expectedGeneration: number,
@@ -729,9 +761,12 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
   ): Promise<boolean> {
     // Directory enumeration and receipt planning run before any catalog commit reservation.
     const workspaceActions = await this.workspaceOwnership?.planProvisional?.(sessions) ?? []
+    const failures: unknown[] = []
     const guarded = (operation: () => Promise<void>): Promise<boolean> => this.operationScheduler.runGlobal(async () => {
       if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return false
-      return commit(operation)
+      return commit(async () => {
+        try { await operation() } catch (error) { failures.push(error) }
+      })
     })
     if (!await guarded(async () => {
       await this.reconciliationOwner.reconcileCatalogIdentities(sessions)
@@ -743,6 +778,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       await new Promise<void>((resolve) => setImmediate(resolve))
       if (!await guarded(apply)) return false
     }
+    if (failures.length) throw new AggregateError(failures, 'Session catalog cleanup is incomplete.')
     return true
   }
 
@@ -759,7 +795,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     operation.phase('read-snapshot')
     try {
       this.assertMutable(projectId, sessionId, 'mutate')
-      const loaded = this.repository.loadSessionRecoverySnapshot
+      const loaded: SessionRecoverySnapshot = this.repository.loadSessionRecoverySnapshot
         ? await this.repository.loadSessionRecoverySnapshot(projectId, sessionId)
         : await this.operationScheduler.runSession(projectId, sessionId, () => {
             this.assertMutable(projectId, sessionId, 'mutate')
@@ -768,7 +804,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       this.assertMutable(projectId, sessionId, 'mutate')
       if (loaded.status === 'unreadable')
         throw new Error('Cannot recover a Session whose durable JSON is unreadable.')
-      operation.complete({ status: loaded.status })
+      operation.complete({ status: loaded.status, ...('metrics' in loaded ? loaded.metrics : {}) })
       if (loaded.status === 'repair-required')
         return { status: loaded.status, projectId, sessionId }
       if (loaded.status !== 'found') return undefined
@@ -777,7 +813,8 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
         projectId,
         sessionId,
         session: structuredClone(loaded.session),
-        expectedRevision: sessionRevision(loaded.session)
+        expectedRevision: sessionRevision(loaded.session),
+        ...('metrics' in loaded ? { metrics: loaded.metrics } : {})
       }
     } catch (error) {
       operation.fail(error, { status: 'failed' })

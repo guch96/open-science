@@ -58,6 +58,7 @@ export function composeSessionProjection({
     | 'commitSessionRecovery'
     | 'recoveryCatalogGeneration'
     | 'reconcileRecoveryCatalog'
+    | 'cleanupRecoveredSession'
     | 'loadAll'
     | 'loadAllReadOnly'
     | 'replaceSessionMetadata'
@@ -89,6 +90,7 @@ export function composeSessionProjection({
   sessionPersistenceBackend: ReturnType<typeof coordinateSessionPersistenceWithProjectDeletions>
 } {
   const log = createLogger('session-network-approval')
+  const recoveryStartupCutoff = Date.now()
   // One host owner is shared by hydration and every provider runtime. Recovery must not
   // mistake another runtime's in-flight Settings transaction for an abandoned decision.
   const sandboxNetworkApprovalOwner = new SandboxNetworkApprovalOwner(
@@ -344,8 +346,23 @@ export function composeSessionProjection({
     if (snapshot.sessions.length !== refs.size || summaries.length !== refs.size ||
       !snapshot.sessions.every(({ projectId, id }) => refs.get(id)?.projectId === projectId) ||
       !summaries.every((summary) => refs.get(summary.id)?.revision === summary.revision)) return
+    const guard = (operation: () => Promise<void>): Promise<boolean> => sessionRepository.runWithSessionCatalogSnapshot(snapshot, operation)
+    const failures: unknown[] = []
+    for (const reference of references) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      if (cancelled()) return
+      try {
+        const prepared = await sessionPersistenceCoordinator.prepareSessionRecovery(reference.projectId, reference.id)
+        if (prepared?.status !== 'prepared' || prepared.expectedRevision !== reference.revision) return
+        const result = await sessionPersistenceCoordinator.cleanupRecoveredSession(prepared, generation, guard, recoveryStartupCutoff, cancelled)
+        if (result === 'stale') return
+      } catch (error) {
+        failures.push(error)
+      }
+    }
     await sessionPersistenceCoordinator.reconcileRecoveryCatalog(references, generation,
-      (operation) => sessionRepository.runWithSessionCatalogSnapshot(snapshot, operation), cancelled)
+      guard, cancelled)
+    if (failures.length) throw new AggregateError(failures, 'Deferred Session source cleanup is incomplete.')
   }
 
   const createDeferredRecovery = (
@@ -354,6 +371,7 @@ export function composeSessionProjection({
   ): DeferredSessionRecovery => new DeferredSessionRecovery({
     list: async () => (await ensureSessionProjection()).sessions,
     prepare: (projectId, sessionId) => sessionPersistenceCoordinator.prepareSessionRecovery(projectId, sessionId),
+    missing: (projectId, sessionId) => sessionRepository.reconcileMissingSessionProjection(projectId, sessionId),
     commit: (prepared) => sessionPersistenceCoordinator.commitSessionRecovery(prepared),
     recovered: async (session) => {
       const reconciled = sessionEnabledComputeHostsOwnerRef.current

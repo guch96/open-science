@@ -1,5 +1,5 @@
 import { createLogger, diagnosticErrorFields } from '@aipoch/diagnostics/node'
-import type { PersistedChatSession, SessionSummary } from '../../shared/session-persistence'
+import { sessionRevision, type PersistedChatSession, type SessionSummary } from '../../shared/session-persistence'
 import type { PreparedSessionRecovery } from './coordinator'
 
 export type RecoveredSessionReference = Pick<
@@ -10,6 +10,7 @@ export type RecoveredSessionReference = Pick<
 type RecoveryDependencies = {
   list(): Promise<readonly SessionSummary[]>
   prepare(projectId: string, sessionId: string): Promise<PreparedSessionRecovery | undefined>
+  missing(projectId: string, sessionId: string): Promise<boolean>
   commit(prepared: PreparedSessionRecovery): Promise<PersistedChatSession | undefined>
   recovered(session: PersistedChatSession): Promise<PersistedChatSession>
   complete(sessions: readonly RecoveredSessionReference[], cancelled: () => boolean): Promise<void>
@@ -67,6 +68,7 @@ export class DeferredSessionRecovery {
       .map(({ projectId, id }) => ({ projectId, id, attempts: 0, readyAt: 0 }))
     const references: RecoveredSessionReference[] = []
     let exhausted = 0
+    let confirmedMissing = 0
     while (pending.length && !this.stopped) {
       pending.sort((left, right) => left.readyAt - right.readyAt)
       const candidate = pending.shift()!
@@ -76,26 +78,37 @@ export class DeferredSessionRecovery {
       candidate.attempts += 1
       try {
         const prepared = await this.dependencies.prepare(candidate.projectId, candidate.id)
+        const prepareMs = performance.now() - startedAt
         if (this.stopped) return
-        if (!prepared) continue
+        if (!prepared) {
+          if (await this.dependencies.missing(candidate.projectId, candidate.id)) confirmedMissing += 1
+          continue
+        }
         // Foreground operations queued while reading enter their lane before this commit.
         await this.yield()
         if (this.stopped) return
+        const commitStartedAt = performance.now()
         const commit = this.dependencies.commit(prepared)
         this.commit = commit
         let session = await commit
+        const commitMs = performance.now() - commitStartedAt
         this.commit = undefined
         if (this.stopped) return
-        if (!session) continue
+        if (!session) {
+          if (await this.dependencies.missing(candidate.projectId, candidate.id)) confirmedMissing += 1
+          continue
+        }
         const recovered = this.dependencies.recovered(session)
         this.commit = recovered
         session = await recovered
         this.commit = undefined
         if (this.stopped) return
-        const { id, projectId, cwd, revision, updatedAt, archivedAt } = session
-        references.push({ id, projectId, cwd, revision, updatedAt, archivedAt })
+        const { id, projectId, cwd, updatedAt, archivedAt } = session
+        references.push({ id, projectId, cwd, revision: sessionRevision(session), updatedAt, archivedAt })
         this.log.debug('deferred Session recovered', {
-          mode: 'background', attempt: candidate.attempts, durationMs: performance.now() - startedAt
+          mode: 'background', attempt: candidate.attempts, durationMs: performance.now() - startedAt,
+          prepareMs, commitMs, ...prepared.metrics,
+          planningMs: Math.max(0, prepareMs - (prepared.metrics?.authorityReadMs ?? 0) - (prepared.metrics?.jsonParseMs ?? 0))
         })
       } catch (error) {
         this.commit = undefined
@@ -113,7 +126,7 @@ export class DeferredSessionRecovery {
     }
     if (this.stopped) return
     // Missing, unreadable or failed authorities cannot authorize destructive absence cleanup.
-    if (!exhausted && references.length === summaries.length) {
+    if (!exhausted && references.length + confirmedMissing === summaries.length) {
       await this.yield()
       if (this.stopped) return
       this.commit = this.dependencies.complete(references, () => this.stopped)
@@ -122,7 +135,7 @@ export class DeferredSessionRecovery {
     }
     this.log.info('deferred Session recovery completed', {
       mode: 'background', sessionCount: summaries.length, recoveredCount: references.length,
-      exhaustedCount: exhausted
+      exhaustedCount: exhausted, missingCount: confirmedMissing
     })
   }
 }

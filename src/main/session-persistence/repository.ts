@@ -922,6 +922,18 @@ class SessionRepository {
     return quarantine.exists ? { status: 'unreadable' } : { status: 'missing' }
   }
 
+  // Only a scoped durable recheck may remove stale derived metadata. An unresolved
+  // import, temp, quarantine or unreadable body is never evidence of deletion.
+  async reconcileMissingSessionProjection(projectId: string, sessionId: string): Promise<boolean> {
+    return this.operationScheduler.runSession(projectId, sessionId, async () => {
+      if (!this.projection || await isSessionPackagePending(this.storageDir, projectId)) return false
+      const loaded = await this.loadSessionWithDiagnostics(projectId, sessionId)
+      if (loaded.status !== 'missing') return false
+      await this.mutateCatalog(() => this.projection!.commitDelete(projectId, sessionId))
+      return true
+    })
+  }
+
   // Off-lane recovery planning must not use the durable reader: even read-only diagnostics can
   // promote or remove temporary files. Defer that evidence to the guarded commit instead.
   async loadSessionRecoverySnapshot(
