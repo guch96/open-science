@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { PrismaClient } from '@prisma/client'
 
@@ -168,7 +168,7 @@ it('commits an active terminal in the same Project while historical recovery rea
     hasLiveRuntimeSession: (_projectId, sessionId) => sessionId === 'active',
     hasActiveRuntimePrompt: (_projectId, sessionId) => sessionId === 'active',
     readSessionFile: async (path) => {
-      if (delayRead && path.endsWith('/session.json')) {
+      if (delayRead && basename(path) === 'session.json') {
         entered.resolve()
         await release.promise
       }
@@ -237,7 +237,7 @@ it.each([1, 2])('bounds recovery retries when authority advances %i time(s)', as
   let advances = 0
   const h = await harness({
     readSessionFile: async (path) => {
-      if (armed && path.endsWith('/session.json')) {
+      if (armed && basename(path) === 'session.json') {
         recoveryReads += 1
         if ((recoveryReads === 2 || recoveryReads === 4) && advances < conflicts) {
           const document = JSON.parse(await readFile(path, 'utf8'))

@@ -29,7 +29,11 @@ export class DeferredSessionRecovery {
 
   start(): void {
     this.task ??= this.run().catch((error) => {
-      this.log.warn('deferred Session recovery stopped', diagnosticErrorFields(error))
+      this.log.warn('deferred Session recovery stopped', {
+        ...diagnosticErrorFields(error),
+        mode: 'background',
+        status: 'failed'
+      })
     })
   }
 
@@ -76,11 +80,13 @@ export class DeferredSessionRecovery {
       if (this.stopped) return
       const startedAt = performance.now()
       candidate.attempts += 1
+      let phase = 'prepare'
       try {
         const prepared = await this.dependencies.prepare(candidate.projectId, candidate.id)
         const prepareMs = performance.now() - startedAt
         if (this.stopped) return
         if (!prepared) {
+          phase = 'confirm-missing'
           const missing = this.dependencies.missing(candidate.projectId, candidate.id)
           this.commit = missing
           if (await missing) confirmedMissing += 1
@@ -90,6 +96,7 @@ export class DeferredSessionRecovery {
         // Foreground operations queued while reading enter their lane before this commit.
         await this.yield()
         if (this.stopped) return
+        phase = 'commit'
         const commitStartedAt = performance.now()
         const commit = this.dependencies.commit(prepared)
         this.commit = commit
@@ -98,12 +105,14 @@ export class DeferredSessionRecovery {
         this.commit = undefined
         if (this.stopped) return
         if (!session) {
+          phase = 'confirm-missing'
           const missing = this.dependencies.missing(candidate.projectId, candidate.id)
           this.commit = missing
           if (await missing) confirmedMissing += 1
           this.commit = undefined
           continue
         }
+        phase = 'recover-derived-state'
         const recovered = this.dependencies.recovered(session)
         this.commit = recovered
         session = await recovered
@@ -120,6 +129,8 @@ export class DeferredSessionRecovery {
         })
         this.log.debug('deferred Session recovered', {
           mode: 'background',
+          projectId: candidate.projectId,
+          sessionId: candidate.id,
           attempt: candidate.attempts,
           durationMs: performance.now() - startedAt,
           prepareMs,
@@ -136,22 +147,30 @@ export class DeferredSessionRecovery {
         this.commit = undefined
         if (this.stopped) return
         const retry = candidate.attempts < 3
+        const retryDelayMs = retry ? (candidate.attempts === 1 ? 250 : 1000) : 0
         this.log.warn('deferred Session recovery failed', {
           ...diagnosticErrorFields(error),
           mode: 'background',
+          projectId: candidate.projectId,
+          sessionId: candidate.id,
+          phase,
           attempt: candidate.attempts,
           retry,
+          retryDelayMs,
+          exhausted: !retry,
           durationMs: performance.now() - startedAt
         })
         if (retry) {
-          candidate.readyAt = Date.now() + (candidate.attempts === 1 ? 250 : 1000)
+          candidate.readyAt = Date.now() + retryDelayMs
           pending.push(candidate)
         } else exhausted += 1
       }
     }
     if (this.stopped) return
+    const unresolvedCount = summaries.length - references.length - confirmedMissing
+    const cleanupEligible = !exhausted && unresolvedCount === 0
     // Only successfully recovered or durably confirmed missing entries permit complete cleanup.
-    if (!exhausted && references.length + confirmedMissing === summaries.length) {
+    if (cleanupEligible) {
       await this.yield()
       if (this.stopped) return
       this.commit = this.dependencies.complete(references, () => this.stopped)
@@ -160,10 +179,18 @@ export class DeferredSessionRecovery {
     }
     this.log.info('deferred Session recovery completed', {
       mode: 'background',
+      status: cleanupEligible ? 'complete' : 'partial',
       sessionCount: summaries.length,
       recoveredCount: references.length,
       exhaustedCount: exhausted,
-      missingCount: confirmedMissing
+      missingCount: confirmedMissing,
+      unresolvedCount,
+      cleanupEligible,
+      cleanupSkippedReason: exhausted
+        ? 'retries-exhausted'
+        : unresolvedCount
+          ? 'unconfirmed-missing'
+          : undefined
     })
   }
 }

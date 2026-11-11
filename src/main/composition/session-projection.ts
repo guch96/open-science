@@ -1,4 +1,4 @@
-import { createLogger, errorLogFields } from '@aipoch/diagnostics/node'
+import { createLogger, diagnosticErrorFields, errorLogFields } from '@aipoch/diagnostics/node'
 import { MAIN_PERMISSION_WAIT_LIFECYCLE_CLIENT_ID } from '../../shared/lifecycle-events'
 import { SandboxNetworkApprovalOwner } from '../acp/sandbox-network-approval-owner'
 import { broadcastToRenderers } from '../renderer-broadcast'
@@ -355,11 +355,24 @@ export function composeSessionProjection({
     references: readonly RecoveredSessionReference[],
     cancelled: () => boolean
   ): Promise<void> => {
+    const recoveryLog = createLogger('session-persistence')
+    const skipped = (reason: string, sessionId?: string): void => {
+      recoveryLog.info('deferred Session catalog cleanup skipped', {
+        mode: 'background',
+        reason,
+        sessionId,
+        sessionCount: references.length
+      })
+    }
     await projectDeletionCoordinator.recoverPendingDeletions()
     if (cancelled()) return
     const generation = sessionPersistenceCoordinator.recoveryCatalogGeneration()
     const snapshot = await sessionRepository.scanSessionIdentities()
-    if (!snapshot.isComplete || cancelled()) return
+    if (cancelled()) return
+    if (!snapshot.isComplete) {
+      skipped('incomplete-catalog')
+      return
+    }
     const summaries = await sessionRepository.loadSessionSummaries()
     const refs = new Map(references.map((session) => [session.id, session]))
     // Earlier sweep entries may already be stale. Completeness alone is insufficient for cwd
@@ -369,8 +382,10 @@ export function composeSessionProjection({
       summaries.length !== refs.size ||
       !snapshot.sessions.every(({ projectId, id }) => refs.get(id)?.projectId === projectId) ||
       !summaries.every((summary) => refs.get(summary.id)?.revision === summary.revision)
-    )
+    ) {
+      skipped('stale-references')
       return
+    }
     const guard = (operation: () => Promise<void>): Promise<boolean> =>
       sessionRepository.runWithSessionCatalogSnapshot(snapshot, operation)
     const failures: unknown[] = []
@@ -384,8 +399,10 @@ export function composeSessionProjection({
             reference.projectId,
             reference.id
           )
-          if (prepared?.status !== 'prepared' || prepared.expectedRevision !== reference.revision)
+          if (prepared?.status !== 'prepared' || prepared.expectedRevision !== reference.revision) {
+            skipped('session-authority-changed', reference.id)
             return
+          }
           const result = await sessionPersistenceCoordinator.cleanupRecoveredSession(
             prepared,
             generation,
@@ -393,21 +410,31 @@ export function composeSessionProjection({
             recoveryStartupCutoff,
             cancelled
           )
-          if (result === 'stale') return
+          if (result === 'stale') {
+            skipped('catalog-or-session-changed', reference.id)
+            return
+          }
           if (result === 'complete') break
           if (attempt === 2) throw new Error('Deferred Session source cleanup remains busy.')
           await new Promise<void>((resolve) => setTimeout(resolve, attempt === 0 ? 250 : 1000))
         }
       } catch (error) {
+        recoveryLog.warn('deferred Session source cleanup failed', {
+          ...diagnosticErrorFields(error),
+          mode: 'background',
+          projectId: reference.projectId,
+          sessionId: reference.id
+        })
         failures.push(error)
       }
     }
-    await sessionPersistenceCoordinator.reconcileRecoveryCatalog(
+    const reconciled = await sessionPersistenceCoordinator.reconcileRecoveryCatalog(
       references,
       generation,
       guard,
       cancelled
     )
+    if (!reconciled && !cancelled()) skipped('catalog-changed')
     if (failures.length)
       throw new AggregateError(failures, 'Deferred Session source cleanup is incomplete.')
   }

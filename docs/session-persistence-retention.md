@@ -30,6 +30,13 @@ Per-Session LRU would require new revision/invalidation and selection-ownership 
 adding no benefit to the existing on-demand read path. The initial limits are conservative
 engineering defaults and should be assessed against measured retention and reload cost.
 
+Acceptance for #15 / #19 uses the complete-snapshot boundary: count, estimated size, idle expiry,
+invalidation, and on-demand reload are tested on the whole entry. The selected authority remains
+loadable and live runtime state remains writable after eviction; their independent owners do not
+need a new cache pin flag. A per-Session LRU is not implemented. Windows process memory and
+first-upgrade projection rebuilding require separate measurement; the cache limits do not imply
+a process-wide memory or startup latency guarantee.
+
 ## Diagnostic fields
 
 - Ready summary reads emit debug-level `mode`, `sessionCount`, `candidateCount`, `queueWaitMs`, and
@@ -42,6 +49,13 @@ engineering defaults and should be assessed against measured retention and reloa
 - Hydration reports queue wait before entering its scheduler, existing per-phase durations, and
   `retainedSessionCount`, `retainedEstimatedBytes`, `cacheRetention`, `cacheMaxSessionCount`, and
   `cacheMaxEstimatedBytes`. Counts describe the cache, not independently owned runtime/renderer data.
+- Deferred recovery failures include `projectId`, `sessionId`, `phase`, `attempt`, `retry`,
+  `retryDelayMs`, and `exhausted`. Phases distinguish preparation, missing-authority confirmation,
+  commit, and derived-state recovery. Error fields omit messages/stacks that could contain content.
+- The sweep summary reports `status: complete | partial`, `unresolvedCount`, `cleanupEligible`,
+  and `cleanupSkippedReason` (`retries-exhausted` or `unconfirmed-missing`). Eligibility only
+  admits complete-catalog cleanup; fresh catalog/revision guards may still skip it. Those skips
+  emit `deferred Session catalog cleanup skipped` with the reason and, when known, Session id.
 
 Metrics contain counts, durations, modes, and outcomes. They do not include conversation bodies,
 titles, or workspace paths. Scoped recovery conflicts/retries and background admission are reported
@@ -114,12 +128,24 @@ work from JSON and summaries; there is no additional durable queue. Missing auth
 inside a scoped repository lane before removing only its stale projection. Unreadable/quarantined
 or pending-import evidence keeps the summary.
 
+Exhaustion leaves that Session unresolved and skips absence-based complete cleanup for this sweep.
+Healthy recovery and foreground saves remain usable. There is no automatic second sweep in the
+same process; the next process reconstructs pending work. The summary's `complete` outcome describes
+the recovery sweep, not a guarantee that every destructive cleanup action ran.
+
 Production integration tests delay the primary read, the second durable read, and effectful file
 indexing for more than 2.6 seconds. A concurrent ready-list request returns and a real same-Project
 runtime terminal save acknowledges within 1.5 seconds and survives a new repository read. These
 checks cover the effectful recovery path, not only off-lane planning. Synchronous JSON parsing and
 operations on the same Session are still not preemptible; exceptional complete projection rebuilds
 remain a separate startup path.
+
+The background workflow also has a real revision-conflict case: foreground JSON N+1 is saved while
+the prepared N snapshot waits, the first background commit conflicts, and a backed-off attempt
+succeeds while preserving the new message and metadata. Unreadable, oversized, and failed-index
+cases verify three attempts, backoff, healthy sibling recovery, and a partial sweep diagnostic.
+See [Windows validation handoff](session-persistence-windows-validation.md) for the remaining
+platform and upgrade acceptance work.
 
 ## Complete cleanup boundary
 

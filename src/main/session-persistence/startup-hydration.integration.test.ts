@@ -2,12 +2,12 @@ import { reserveAcpSessionStorageCleanup } from '../acp/session-registry'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile, access, stat, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { PrismaClient } from '@prisma/client'
 
 vi.mock('electron', () => ({ app: { getPath: () => '/home/user', isPackaged: true } }))
-const diagnostics = vi.hoisted(() => ({ debug: vi.fn() }))
+const diagnostics = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn() }))
 const filesystem = vi.hoisted(() => ({
   beforeRead: undefined as ((path: string) => Promise<void>) | undefined,
   beforeRemove: undefined as ((path: string) => Promise<void>) | undefined
@@ -30,7 +30,7 @@ vi.mock('@aipoch/diagnostics/node', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@aipoch/diagnostics/node')>()
   return {
     ...actual,
-    createLogger: (scope: string) => ({ ...actual.createLogger(scope), debug: diagnostics.debug })
+    createLogger: (scope: string) => ({ ...actual.createLogger(scope), ...diagnostics })
   }
 })
 
@@ -70,6 +70,8 @@ afterEach(async () => {
   filesystem.beforeRead = undefined
   await client?.$disconnect()
   if (root) await rm(root, { recursive: true, force: true })
+  vi.restoreAllMocks()
+  for (const log of Object.values(diagnostics)) log.mockClear()
 })
 
 async function createStartupHarness(
@@ -215,10 +217,10 @@ it('loads selected context while pending and idle history remain summary-only un
     'interrupted',
     'selected'
   ])
-  expect(reads.some((path) => path.endsWith('/historical.json'))).toBe(false)
+  expect(reads.some((path) => basename(path) === 'historical.json')).toBe(false)
   expect(owners.has('historical')).toBe(true)
   expect(hydrated.map(({ id }) => id)).toEqual(['selected'])
-  expect(reads.some((path) => path.endsWith('/interrupted.json'))).toBe(false)
+  expect(reads.some((path) => basename(path) === 'interrupted.json')).toBe(false)
   expect(catalog.sessions.find(({ id }) => id === 'interrupted')?.status).toBe('running')
   const worker = composed.createDeferredRecovery(async () => undefined)
   worker.start()
@@ -232,6 +234,15 @@ it('loads selected context while pending and idle history remain summary-only un
       prepareMs: expect.any(Number),
       commitMs: expect.any(Number),
       planningMs: expect.any(Number)
+    })
+  )
+  expect(diagnostics.info).toHaveBeenCalledWith(
+    'deferred Session recovery completed',
+    expect.objectContaining({
+      status: 'complete',
+      cleanupEligible: true,
+      unresolvedCount: 0,
+      exhaustedCount: 0
     })
   )
   expect(
@@ -329,7 +340,7 @@ it.each(['snapshot', 'commit-read', 'index-effects'] as const)(
         readSessionFile: async (path) => {
           if (
             delaying &&
-            path.endsWith('/interrupted.json') &&
+            basename(path) === 'interrupted.json' &&
             ++reads === (phase === 'snapshot' ? 1 : phase === 'commit-read' ? 2 : -1)
           ) {
             enter()
@@ -442,10 +453,16 @@ it.each(['unreadable', 'oversized', 'index'] as const)(
         join(root, 'sessions/project/historical.json'),
         failure === 'oversized' ? 'x'.repeat(8192) : '{invalid'
       )
+    const attemptTimes: number[] = []
+    const prepare = h.coordinator.prepareSessionRecovery.bind(h.coordinator)
+    vi.spyOn(h.coordinator, 'prepareSessionRecovery').mockImplementation((projectId, sessionId) => {
+      if (sessionId === 'historical') attemptTimes.push(performance.now())
+      return prepare(projectId, sessionId)
+    })
     const selected = await h.composed.loadStartupSessions()
     expect(selected.map(({ id }) => id)).toEqual(['selected'])
     expect((await h.composed.sessionPersistenceBackend.list!()).sessions).toHaveLength(3)
-    expect(h.reads.some((path) => path.endsWith('/historical.json'))).toBe(false)
+    expect(h.reads.some((path) => basename(path) === 'historical.json')).toBe(false)
     const workflow = h.composed.createDeferredRecovery(async () => undefined, complete)
     workflow.start()
     try {
@@ -464,6 +481,35 @@ it.each(['unreadable', 'oversized', 'index'] as const)(
       )
       expect(complete).not.toHaveBeenCalled()
       if (failure === 'index') expect(attempts).toBe(3)
+      expect(attemptTimes).toHaveLength(3)
+      // Allow timer resolution variance while rejecting immediate retries.
+      expect(attemptTimes[1] - attemptTimes[0]).toBeGreaterThanOrEqual(200)
+      expect(attemptTimes[2] - attemptTimes[1]).toBeGreaterThanOrEqual(900)
+      const failures = diagnostics.warn.mock.calls
+        .filter(
+          ([message, fields]) =>
+            message === 'deferred Session recovery failed' && fields.sessionId === 'historical'
+        )
+        .map(([, fields]) => fields)
+      expect(failures).toMatchObject([
+        { projectId: 'project', phase: 'commit', attempt: 1, retry: true, retryDelayMs: 250 },
+        { projectId: 'project', phase: 'commit', attempt: 2, retry: true, retryDelayMs: 1000 },
+        { projectId: 'project', phase: 'commit', attempt: 3, retry: false, exhausted: true }
+      ])
+      expect(diagnostics.info).toHaveBeenCalledWith(
+        'deferred Session recovery completed',
+        expect.objectContaining({
+          status: 'partial',
+          sessionCount: 3,
+          recoveredCount: 2,
+          exhaustedCount: 1,
+          unresolvedCount: 1,
+          cleanupEligible: false,
+          cleanupSkippedReason: 'retries-exhausted'
+        })
+      )
+      expect(JSON.stringify(failures)).not.toContain('History for historical')
+      expect(JSON.stringify(failures)).not.toContain(root)
       expect(h.owners.has('historical')).toBe(true)
       expect(h.coordinator.listRuntimeTerminalFailures()).toEqual([])
     } finally {
@@ -472,6 +518,80 @@ it.each(['unreadable', 'oversized', 'index'] as const)(
     }
   }
 )
+
+it('retries a background revision conflict and preserves the foreground save while healthy history recovers', async () => {
+  const h = await createStartupHarness()
+  await h.composed.loadStartupSessions()
+  let enter!: () => void
+  let release!: () => void
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve
+  })
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let delayed = false
+  const prepare = h.coordinator.prepareSessionRecovery.bind(h.coordinator)
+  const preparations = vi
+    .spyOn(h.coordinator, 'prepareSessionRecovery')
+    .mockImplementation(async (projectId, sessionId) => {
+      const prepared = await prepare(projectId, sessionId)
+      if (sessionId === 'interrupted' && !delayed) {
+        delayed = true
+        enter()
+        await blocked
+      }
+      return prepared
+    })
+  const recovered: PersistedChatSession[] = []
+  const complete = vi.fn(async () => undefined)
+  const workflow = h.composed.createDeferredRecovery(async (session) => {
+    recovered.push(session)
+  }, complete)
+  workflow.start()
+  try {
+    await entered
+    const current = await h.repository.loadSession('project', 'interrupted')
+    const newer = await h.coordinator.saveSession({
+      ...current!,
+      title: 'Foreground revision',
+      messages: [
+        ...current!.messages,
+        { ...h.makeSession('new').messages[0], id: 'new-message', content: 'Foreground message' }
+      ],
+      updatedAt: 2
+    })
+    release()
+    await workflow.settled()
+    expect(
+      preparations.mock.calls.filter(([, sessionId]) => sessionId === 'interrupted')
+    ).toHaveLength(2)
+    expect(diagnostics.warn).toHaveBeenCalledWith(
+      'deferred Session recovery failed',
+      expect.objectContaining({
+        projectId: 'project',
+        sessionId: 'interrupted',
+        phase: 'commit',
+        attempt: 1,
+        retry: true,
+        retryDelayMs: 250
+      })
+    )
+    expect(recovered.map(({ id }) => id).sort()).toEqual(['historical', 'interrupted', 'selected'])
+    expect(complete).toHaveBeenCalledOnce()
+    const reopened = await new SessionRepository(root).loadSession('project', 'interrupted')
+    expect(reopened).toMatchObject({ revision: newer.revision, title: 'Foreground revision' })
+    expect(reopened?.messages.map(({ content }) => content)).toEqual([
+      'History for interrupted',
+      'Foreground message'
+    ])
+    expect(h.coordinator.listRuntimeTerminalFailures()).toEqual([])
+  } finally {
+    release()
+    await workflow.dispose()
+    await workflow.settled()
+  }
+})
 
 it('cancels a deferred snapshot without admitting repair after shutdown', async () => {
   let release!: () => void
@@ -487,7 +607,7 @@ it('cancels a deferred snapshot without admitting repair after shutdown', async 
   const h = await createStartupHarness(
     {
       readSessionFile: async (path) => {
-        if (delaying && path.endsWith('/interrupted.json')) {
+        if (delaying && basename(path) === 'interrupted.json') {
           enter()
           await blocked
         }
@@ -583,8 +703,13 @@ it.each([false, true])(
     try {
       await workflow.settled()
       await expect(access(shared)).resolves.toBeUndefined()
-      if (changeReference) await expect(access(orphan)).resolves.toBeUndefined()
-      else await expect(access(orphan)).rejects.toMatchObject({ code: 'ENOENT' })
+      if (changeReference) {
+        await expect(access(orphan)).resolves.toBeUndefined()
+        expect(diagnostics.info).toHaveBeenCalledWith(
+          'deferred Session catalog cleanup skipped',
+          expect.objectContaining({ mode: 'background', reason: 'stale-references' })
+        )
+      } else await expect(access(orphan)).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
       await workflow.dispose()
     }

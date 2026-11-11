@@ -2,7 +2,7 @@ import { configureTestRuntimeMetadata } from '../../../test/runtime-metadata'
 import { ProjectFilesReconciliationError } from '../project-files/repository'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('electron', () => ({
@@ -7143,7 +7143,7 @@ describe('SessionPersistenceCoordinator', () => {
       reads.length = 0
       const second = await coordinator.loadAll()
       expect(second.sessions).toHaveLength(33)
-      expect(reads.some((path) => path.endsWith('/history-0.json'))).toBe(true)
+      expect(reads.some((path) => basename(path) === 'history-0.json')).toBe(true)
       expect(await coordinator.loadSessionForContinuation('project-1', 'history-0')).toMatchObject({
         id: 'history-0',
         title: 'Session'
@@ -7187,7 +7187,7 @@ describe('SessionPersistenceCoordinator', () => {
       await coordinator.loadAll()
       reads.length = 0
       const next = await coordinator.loadAll()
-      expect(reads.some((path) => path.endsWith('/large-history.json'))).toBe(true)
+      expect(reads.some((path) => basename(path) === 'large-history.json')).toBe(true)
       expect(next.manifest.lastSessionId).toBe('selected')
       expect(await coordinator.loadSessionForContinuation('project-1', 'selected')).toMatchObject({
         id: 'selected'
@@ -7226,7 +7226,7 @@ describe('SessionPersistenceCoordinator', () => {
       expect(reads).toEqual([])
       await vi.advanceTimersByTimeAsync(30_001)
       const expired = await coordinator.loadAll()
-      expect(reads.some((path) => path.endsWith('/session-1.json'))).toBe(true)
+      expect(reads.some((path) => basename(path) === 'session-1.json')).toBe(true)
       expect(expired.manifest.lastSessionId).toBe('session-1')
       expect(expired.sessions[0].messages[0].content).toBe('preserved-history')
     } finally {
