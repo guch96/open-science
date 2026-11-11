@@ -3439,6 +3439,19 @@ describe('ManagedFileIndexRepository', () => {
     })
     await repository.reconcileActiveSessions([])
     expect((await repository.getOverview(PROJECT_ID)).totalCount).toBe(1)
+
+    // A native witness protects import publication; it cannot undo an explicit deletion receipt.
+    const token = await repository.softDeleteSession(PROJECT_ID, SESSION_ID)
+    await repository.reconcileActiveSessions([])
+    expect((await repository.getOverview(PROJECT_ID)).totalCount).toBe(0)
+    await expect(
+      client.managedFileSessionSync.findUniqueOrThrow({
+        where: { projectId_sessionId: { projectId: PROJECT_ID, sessionId: SESSION_ID } }
+      })
+    ).resolves.toMatchObject({ deleteOperationId: token, deletedAt: expect.any(Date) })
+    // An explicit rollback still owns its receipt and can restore the original projection.
+    await repository.restoreSession(PROJECT_ID, SESSION_ID, token)
+    expect((await repository.getOverview(PROJECT_ID)).totalCount).toBe(1)
   })
 
   it('keeps native Artifact Versions readable with a deleted origin Session', async () => {
