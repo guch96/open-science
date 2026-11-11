@@ -93,7 +93,8 @@
     "src/main/session-persistence/attention-projection.test.ts",
     "src/main/session-persistence/turn-outcome-authority.test.ts",
     "src/main/session-persistence/flush-protocol.ts",
-    "src/main/session-persistence/conversation-pdf-electron.ts"
+    "src/main/session-persistence/conversation-pdf-electron.ts",
+    "src/main/session-persistence/deferred-recovery.ts"
   ],
   "interfacePaths": [
     "src/main/session-persistence/coordinator.ts",
@@ -122,7 +123,8 @@
     "src/main/session-persistence/runtime-session-owner.ts",
     "src/main/session-persistence/runtime-writer.ts",
     "src/main/session-persistence/flush-protocol.ts",
-    "src/main/session-persistence/conversation-pdf-electron.ts"
+    "src/main/session-persistence/conversation-pdf-electron.ts",
+    "src/main/session-persistence/deferred-recovery.ts"
   ],
   "consumerModules": ["project_lifecycle"],
   "testFiles": {

@@ -54,6 +54,7 @@ import type { SessionDeletionReceipt } from '../artifacts/provenance-message-sna
 import type { ManagedFileSoftDeleteToken } from '../project-files/repository'
 import * as computeHostAccess from '../compute/session-compute-host-access'
 import type { ProjectSessionDeletionState, SessionRecoverySnapshot } from './repository'
+import type { RecoveredSessionReference } from './deferred-recovery'
 import { createLogger, diagnosticErrorFields, type Logger } from '@aipoch/diagnostics/node'
 import { startDiagnosticOperation } from '@aipoch/diagnostics/node'
 import type { AcpRuntimeEvent } from '../../shared/acp'
@@ -113,6 +114,7 @@ export type PublishedSessionHandoff = {
 
 const SESSION_CPU_TRACE_ENABLED = process.env.OPEN_SCIENCE_PERF_SESSION_TRACE === '1'
 type SessionMutationRepository = {
+  hasLiveRuntimeSession?(projectId: string, sessionId: string): boolean
   deleteRecoveryFile?(request: DeleteSessionRecoveryFileRequest): Promise<void>
   loadAllWithDiagnostics(options?: {
     mode?: 'repair' | 'read-only'
@@ -183,7 +185,9 @@ type SessionFileIndex = {
   ): Promise<void>
   softDeleteProject(projectId: string): Promise<ManagedFileSoftDeleteToken>
   reconcileProjectSessions(projectId: string, sessions: PersistedChatSession[]): Promise<void>
-  reconcileActiveSessions(sessions: PersistedChatSession[]): Promise<void>
+  reconcileActiveSessions(
+    sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<void>
   markReconciliationIncomplete(projectId?: string): void
 }
 
@@ -219,7 +223,7 @@ const emitRecoverableDiagnostic = (
 type SessionAuthorityScan = Awaited<ReturnType<SessionMutationRepository['loadAllWithDiagnostics']>>
 
 type PreparedSessionRecovery = Readonly<
-  { projectId: string; sessionId: string } & (
+  { projectId: string; sessionId: string; metrics?: SessionRecoverySnapshot['metrics'] } & (
     | { status: 'prepared'; session: PersistedChatSession; expectedRevision: number }
     | { status: 'repair-required' }
   )
@@ -630,6 +634,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
   adoptPublishedSession(publication: PublishedSessionHandoff): Promise<void> {
     // Capture before enqueueing: the publisher and this owner have independent schedulers.
     const { projectId, sessionId, session, pendingProjectImport } = structuredClone(publication)
+    this.hydrationCache.invalidate()
     return this.operationScheduler.runSession(projectId, sessionId, async () => {
       this.assertMutable(projectId, sessionId, 'mutate')
       if (session.id !== sessionId || session.projectId !== projectId)
@@ -715,6 +720,89 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     })
   }
 
+  recoveryCatalogGeneration(): number {
+    return this.hydrationCache.generationForLoad()
+  }
+
+  async cleanupRecoveredSession(
+    prepared: PreparedSessionRecovery,
+    expectedGeneration: number,
+    commit: (operation: () => Promise<void>) => Promise<boolean>,
+    startupCutoff: number,
+    cancelled: () => boolean
+  ): Promise<'complete' | 'busy' | 'stale'> {
+    if (prepared.status !== 'prepared') return 'stale'
+    const { projectId, sessionId, session } = prepared
+    const actions = await this.reconciliationOwner.planOrphanStagingCleanup(session, startupCutoff)
+    const guarded = (
+      operation: () => Promise<'complete' | 'busy' | 'stale'>
+    ): Promise<'complete' | 'busy' | 'stale'> =>
+      this.operationScheduler.runSession(projectId, sessionId, async () => {
+        if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return 'stale'
+        this.assertMutable(projectId, sessionId, 'mutate')
+        if (
+          session.activeRun ||
+          this.stateOwner.ownsPromptPreparation(session) ||
+          this.repository.hasLiveRuntimeSession?.(projectId, sessionId)
+        )
+          return 'busy'
+        return operation()
+      })
+    for (const apply of actions) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      // Try Artifact ownership before the catalog fence; a busy writer never queues here.
+      const outcome = await guarded(() => apply(commit))
+      if (outcome !== 'complete') return outcome
+    }
+    const uploads = await guarded(async () => {
+      if (!(await commit(async () => undefined))) return 'stale'
+      // Verified legacy-source cleanup hashes files under the Session lane, never globally.
+      await this.reconciliationOwner.cleanupVersionedUploadSources(session)
+      return 'complete'
+    })
+    if (uploads !== 'complete') return uploads
+    return 'complete'
+  }
+
+  async reconcileRecoveryCatalog(
+    sessions: readonly RecoveredSessionReference[],
+    expectedGeneration: number,
+    commit: (operation: () => Promise<void>) => Promise<boolean>,
+    cancelled: () => boolean = () => false
+  ): Promise<boolean> {
+    // Directory enumeration and receipt planning run before any catalog commit reservation.
+    const workspaceActions = (await this.workspaceOwnership?.planProvisional?.(sessions)) ?? []
+    const failures: unknown[] = []
+    const guarded = (operation: () => Promise<void>): Promise<boolean> =>
+      this.operationScheduler.runGlobal(async () => {
+        if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return false
+        return commit(async () => {
+          try {
+            await operation()
+          } catch (error) {
+            failures.push(error)
+          }
+        })
+      })
+    if (
+      !(await guarded(async () => {
+        await this.reconciliationOwner.reconcileCatalogIdentities(sessions)
+        await this.sessionDeletionHandlers?.reconcile(
+          sessions.map(({ id }) => id),
+          sessions.filter(({ archivedAt }) => archivedAt !== undefined).map(({ id }) => id)
+        )
+      }))
+    )
+      return false
+    for (const apply of workspaceActions) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      if (!(await guarded(apply))) return false
+    }
+    if (failures.length)
+      throw new AggregateError(failures, 'Session catalog cleanup is incomplete.')
+    return true
+  }
+
   // The primary snapshot reader never repairs files and does not reserve the Project lane while
   // reading/parsing history. Temporary or uncertain authority is deferred to guarded commit.
   async prepareSessionRecovery(
@@ -728,7 +816,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     operation.phase('read-snapshot')
     try {
       this.assertMutable(projectId, sessionId, 'mutate')
-      const loaded = this.repository.loadSessionRecoverySnapshot
+      const loaded: SessionRecoverySnapshot = this.repository.loadSessionRecoverySnapshot
         ? await this.repository.loadSessionRecoverySnapshot(projectId, sessionId)
         : await this.operationScheduler.runSession(projectId, sessionId, () => {
             this.assertMutable(projectId, sessionId, 'mutate')
@@ -737,7 +825,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       this.assertMutable(projectId, sessionId, 'mutate')
       if (loaded.status === 'unreadable')
         throw new Error('Cannot recover a Session whose durable JSON is unreadable.')
-      operation.complete({ status: loaded.status })
+      operation.complete({ status: loaded.status, ...('metrics' in loaded ? loaded.metrics : {}) })
       if (loaded.status === 'repair-required')
         return { status: loaded.status, projectId, sessionId }
       if (loaded.status !== 'found') return undefined
@@ -746,7 +834,8 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
         projectId,
         sessionId,
         session: structuredClone(loaded.session),
-        expectedRevision: sessionRevision(loaded.session)
+        expectedRevision: sessionRevision(loaded.session),
+        ...('metrics' in loaded ? { metrics: loaded.metrics } : {})
       }
     } catch (error) {
       operation.fail(error, { status: 'failed' })
@@ -1502,6 +1591,8 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       } finally {
         // Force the next save to validate Artifact finalization's binding before reusing topology.
         this.stateOwner.invalidateBindingTopology(projectId, sessionId)
+        // External package publishers may commit through another repository instance.
+        this.hydrationCache.invalidate()
       }
     })
   }

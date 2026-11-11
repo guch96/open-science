@@ -40,6 +40,7 @@ import {
   markManagedProjectWorkspacesRetained,
   markManagedWorkspaceRetained,
   reconcileProvisionalManagedWorkspaces,
+  planProvisionalManagedWorkspaceReconciliation,
   restoreManagedProjectWorkspacesActive,
   restoreManagedWorkspaceActive
 } from '../storage/managed-workspace-ownership'
@@ -329,6 +330,8 @@ export async function composeSessionAuthority({
       }
     },
     {
+      planProvisional: (sessions) =>
+        planProvisionalManagedWorkspaceReconciliation(sessions, managedWorkspaceRecoveryCutoff),
       reconcileProvisional: (sessions) =>
         reconcileProvisionalManagedWorkspaces(sessions, managedWorkspaceRecoveryCutoff),
       markProjectRetained: markManagedProjectWorkspacesRetained,

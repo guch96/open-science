@@ -48,7 +48,9 @@ type SessionReconciliationFileIndex = {
     session: PersistedChatSession,
     options?: { force?: boolean }
   ): Promise<ProjectFileSource[]>
-  reconcileActiveSessions(sessions: PersistedChatSession[]): Promise<void>
+  reconcileActiveSessions(
+    sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<void>
 }
 
 type SessionReconciliationProvenance = {
@@ -57,7 +59,10 @@ type SessionReconciliationProvenance = {
   ): Promise<PersistedChatSession | undefined>
   captureFinalizedMessages(session: PersistedChatSession): Promise<void>
   reconcileSessionDeletions(activeSessions: PersistedChatSession[]): Promise<void>
-  reconcileSessionCleanup?(activeSessions: PersistedChatSession[]): Promise<void>
+  reconcileSessionCleanup?(
+    activeSessions: readonly Pick<PersistedChatSession, 'id' | 'projectId'>[]
+  ): Promise<void>
+  reconcileSessionMessageSnapshots?(session: PersistedChatSession): Promise<void>
   reconcileMessageSnapshots?(activeSessions: PersistedChatSession[]): Promise<void>
 }
 
@@ -75,6 +80,17 @@ type SessionUploadPersistence = {
 }
 
 type ArtifactStorageReconciler = {
+  planOrphanStagingCleanup?(
+    projectId: string,
+    sessionId: string,
+    startupCutoff: number
+  ): Promise<
+    Array<
+      (
+        commit: (apply: () => Promise<void>) => Promise<boolean>
+      ) => Promise<'complete' | 'stale' | 'busy'>
+    >
+  >
   resolveVersionDescriptors?(request: {
     projectId: string
     appSessionId: string
@@ -665,16 +681,70 @@ class SessionPersistenceReconciliationOwner {
         // Restore active owners before scan-order-dependent sync offers canonical rows elsewhere.
         await this.fileIndex.reconcileActiveSessions(sessions)
       } else {
-        for (const session of sessions) await this.provenance?.captureFinalizedMessages(session)
+        for (const session of sessions) {
+          await this.provenance?.captureFinalizedMessages(session)
+          await this.provenance?.reconcileSessionMessageSnapshots?.(session)
+        }
       }
+      input.phase('index-work')
       for (const session of sessions) {
         await this.fileIndex.syncSession(session)
       }
+      input.phase('index-work-complete')
     } catch (failure) {
       return { status: 'degraded', result, failure }
     }
 
     return { status: 'ready', result }
+  }
+
+  async planOrphanStagingCleanup(
+    session: PersistedChatSession,
+    startupCutoff: number
+  ): Promise<
+    Array<
+      (
+        commit: (apply: () => Promise<void>) => Promise<boolean>
+      ) => Promise<'complete' | 'stale' | 'busy'>
+    >
+  > {
+    return (
+      this.artifactStorage?.planOrphanStagingCleanup?.(
+        session.projectId,
+        session.id,
+        startupCutoff
+      ) ?? []
+    )
+  }
+
+  async cleanupVersionedUploadSources(session: PersistedChatSession): Promise<void> {
+    if (hasLegacySessionUpload(session))
+      throw new Error('Legacy upload references still require recovery.')
+    // Every reference is already immutable. This consumes verified legacy copies only, never
+    // produces a new Session authority or invokes full reconciliation inside a catalog guard.
+    await this.uploads?.upgradeLegacySessionUploads(session, { mode: 'reconcile' })
+  }
+
+  async reconcileCatalogIdentities(
+    sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<void> {
+    const failures: unknown[] = []
+    for (const reconcile of [
+      () =>
+        this.permissionGrants?.reconcileSessions(
+          sessions.map(({ projectId, id }) => ({ projectId, sessionId: id }))
+        ),
+      () => this.provenance?.reconcileSessionCleanup?.(sessions),
+      () => this.fileIndex.reconcileActiveSessions(sessions)
+    ]) {
+      try {
+        await reconcile()
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    if (failures.length)
+      throw new AggregateError(failures, 'Session identity cleanup is incomplete.')
   }
 
   async repairFileProjection(sessions: PersistedChatSession[]): Promise<void> {

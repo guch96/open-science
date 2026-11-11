@@ -447,6 +447,9 @@ describe('Session persistence coordinator architecture', () => {
         'assertSessionAvailable',
         'attachDelegatedMessageArtifacts',
         'cancelQuestions',
+        'cleanupRecoveredSession',
+        'reconcileRecoveryCatalog',
+        'recoveryCatalogGeneration',
         'clearSideChat',
         'commitSideChatRelays',
         'completeChildTurn',
@@ -786,7 +789,8 @@ describe('Session persistence coordinator architecture', () => {
           'clearSessionRecordProblem',
           'listSessionRecordProblems',
           'recordRuntimeTerminalFailure',
-          'projectRuntimeSession'
+          'projectRuntimeSession',
+          'recoveryCatalogGeneration'
         ].includes(name)
       ) {
         // Synchronous Main facts decorate projections; they never write durable Session state.
@@ -814,6 +818,17 @@ describe('Session persistence coordinator architecture', () => {
           ),
           name
         ).toEqual([`this.stateOwner.${name}`])
+        continue
+      }
+      if (name === 'cleanupRecoveredSession' || name === 'reconcileRecoveryCatalog') {
+        const text = method.getText(facadeFile)
+        expect(text).toContain(
+          name === 'cleanupRecoveredSession'
+            ? 'this.operationScheduler.runSession'
+            : 'this.operationScheduler.runGlobal'
+        )
+        expect(text).toContain('this.recoveryCatalogGeneration() !== expectedGeneration')
+        expect(text).toContain('cancelled()')
         continue
       }
       if (name === 'recoverStartupSession') {
@@ -905,7 +920,9 @@ describe('Session persistence coordinator architecture', () => {
         // The package publisher has a different scheduler. Snapshot its handoff synchronously
         // before this owner queues the ordinary read and catalog mutation in the Session lane.
         // Recovery deletion similarly validates and captures its untrusted identity before queuing.
-        expect(statements, name).toHaveLength(2)
+        expect(statements, name).toHaveLength(name === 'adoptPublishedSession' ? 3 : 2)
+        if (name === 'adoptPublishedSession')
+          expect(statements?.[1].getText(facadeFile)).toBe('this.hydrationCache.invalidate()')
         const capture = statements?.[0]
         expect(capture && isVariableStatement(capture)).toBe(true)
         expect(capture?.getText(facadeFile)).toBe(
@@ -922,9 +939,11 @@ describe('Session persistence coordinator architecture', () => {
       }
       const statement =
         statements?.[
-          name === 'adoptPublishedSession' || name === 'deleteRecoveryFile' || capturesQueueTime
-            ? 1
-            : 0
+          name === 'adoptPublishedSession'
+            ? 2
+            : name === 'deleteRecoveryFile' || capturesQueueTime
+              ? 1
+              : 0
         ]
       expect(statement, name).toBeDefined()
       if (!statement) continue
@@ -1161,6 +1180,9 @@ describe('Session persistence coordinator architecture', () => {
     expect(methods(reconciliationOwner, 'public')).toEqual(
       [
         'commitRecoveredArtifacts',
+        'cleanupVersionedUploadSources',
+        'planOrphanStagingCleanup',
+        'reconcileCatalogIdentities',
         'reconcileLoadedSessions',
         'repairFileProjection',
         'retryArtifactFinalization'
@@ -1392,7 +1414,8 @@ describe('Session persistence coordinator architecture', () => {
       'src/main/session-persistence/attention-projection.test.ts',
       'src/main/session-persistence/turn-outcome-authority.test.ts',
       'src/main/session-persistence/flush-protocol.ts',
-      'src/main/session-persistence/conversation-pdf-electron.ts'
+      'src/main/session-persistence/conversation-pdf-electron.ts',
+      'src/main/session-persistence/deferred-recovery.ts'
     ])
     expect(sessionPersistence.interfacePaths).toEqual([
       'src/main/session-persistence/coordinator.ts',
@@ -1421,7 +1444,8 @@ describe('Session persistence coordinator architecture', () => {
       'src/main/session-persistence/runtime-session-owner.ts',
       'src/main/session-persistence/runtime-writer.ts',
       'src/main/session-persistence/flush-protocol.ts',
-      'src/main/session-persistence/conversation-pdf-electron.ts'
+      'src/main/session-persistence/conversation-pdf-electron.ts',
+      'src/main/session-persistence/deferred-recovery.ts'
     ])
     expect(sessionPersistence.consumerModules).toEqual(['project_lifecycle'])
     expect(sessionPersistence.testFiles.owner).toEqual([
