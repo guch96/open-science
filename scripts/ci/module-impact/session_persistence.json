@@ -174,7 +174,6 @@
       "src/main/session-persistence/turn-outcome-authority.test.ts"
     ],
     "contract": [
-      "src/main/session-persistence/deletion-integration.test.ts",
       "src/shared/session-persistence.test.ts",
       "src/main/session-persistence/coordinator-contract.test.ts",
       "src/main/session-persistence/ipc.test.ts",
@@ -197,6 +196,7 @@
       "src/main/session-plan/adversarial-session-plan.test.ts",
       "src/main/delegation/session-record-adapter.test.ts",
       "src/main/session-persistence/artifact-finalization-recovery.integration.test.ts",
+      "src/main/session-persistence/deletion-integration.test.ts",
       "src/main/acp/application-commands.test.ts",
       "src/main/acp/artifact-code-reconstruction-runner.test.ts",
       "src/main/acp/codex-completion-handoff.integration.test.ts",
