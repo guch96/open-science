@@ -122,6 +122,8 @@ type SessionMutationRepository = {
       projectDirectoryCount: number
       sessionFileCount: number
       sessionBytes: number
+      authorityReadMs?: number
+      jsonParseMs?: number
     }
     failure?: SessionLoadFailure
   }>
@@ -209,11 +211,40 @@ const emitRecoverableDiagnostic = (
 
 type SessionAuthorityScan = Awaited<ReturnType<SessionMutationRepository['loadAllWithDiagnostics']>>
 
+const HYDRATION_CACHE_IDLE_MS = 30_000
+const HYDRATION_CACHE_MAX_SESSIONS = 32
+const HYDRATION_CACHE_MAX_ESTIMATED_BYTES = 32 * 1024 * 1024
+
+// Estimate retained JS values without serializing a second copy of the transcript. The estimate
+// deliberately overcounts shared strings; it is a retention budget, not a heap measurement.
+const estimateHydrationBytes = (value: unknown): number => {
+  const pending = [value]
+  const seen = new Set<object>()
+  let bytes = 0
+  while (pending.length > 0 && bytes <= HYDRATION_CACHE_MAX_ESTIMATED_BYTES) {
+    const current = pending.pop()
+    if (typeof current === 'string') bytes += 24 + current.length * 2
+    else if (current && typeof current === 'object' && !seen.has(current)) {
+      seen.add(current)
+      bytes += 64
+      for (const key of Object.keys(current)) {
+        bytes += 16 + key.length * 2
+        if (bytes > HYDRATION_CACHE_MAX_ESTIMATED_BYTES) return bytes
+        pending.push((current as Record<string, unknown>)[key])
+      }
+    } else bytes += 8
+  }
+  return bytes
+}
+
 // Reuse only the expensive authority scan. Derived reconciliation still runs on every load so a
 // second window/renderer cannot miss files or artifacts written after the first was cached.
 class SessionHydrationCache {
   private generation = 0
-  private cached: { generation: number; scan: SessionAuthorityScan } | undefined
+  private cached:
+    { generation: number; scan: SessionAuthorityScan; estimatedBytes: number } | undefined
+  private retention = 'empty'
+  private expiry: ReturnType<typeof setTimeout> | undefined
 
   generationForLoad(): number {
     return this.generation
@@ -224,14 +255,46 @@ class SessionHydrationCache {
     return cached && cached.generation === this.generation ? cached.scan : undefined
   }
 
+  diagnostics(): Record<string, string | number> {
+    return {
+      retainedSessionCount: this.cached?.scan.result.sessions.length ?? 0,
+      retainedEstimatedBytes: this.cached?.estimatedBytes ?? 0,
+      cacheRetention: this.retention,
+      cacheMaxSessionCount: HYDRATION_CACHE_MAX_SESSIONS,
+      cacheMaxEstimatedBytes: HYDRATION_CACHE_MAX_ESTIMATED_BYTES
+    }
+  }
+
   set(scan: SessionAuthorityScan, generation: number): void {
     if (generation !== this.generation || scan.isComplete !== true) return
-    this.cached = { generation, scan }
+    clearTimeout(this.expiry)
+    this.expiry = undefined
+    this.cached = undefined
+    if (scan.result.sessions.length > HYDRATION_CACHE_MAX_SESSIONS) {
+      this.retention = 'count-limit'
+      return
+    }
+    const estimatedBytes = estimateHydrationBytes(scan)
+    if (estimatedBytes > HYDRATION_CACHE_MAX_ESTIMATED_BYTES) {
+      this.retention = 'byte-limit'
+      return
+    }
+    this.cached = { generation, scan, estimatedBytes }
+    this.retention = 'admitted'
+    this.expiry = setTimeout(() => {
+      this.cached = undefined
+      this.expiry = undefined
+      this.retention = 'expired'
+    }, HYDRATION_CACHE_IDLE_MS)
+    this.expiry.unref()
   }
 
   invalidate(): void {
+    clearTimeout(this.expiry)
+    this.expiry = undefined
     this.generation += 1
     this.cached = undefined
+    this.retention = 'invalidated'
   }
 }
 
@@ -590,6 +653,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
 
   // Degraded authority read: keeps healthy transcripts navigable while writes remain blocked.
   loadAllReadOnly(): Promise<LoadAllSessionsResult> {
+    const queuedAt = performance.now()
     return this.operationScheduler.runGlobal(async () => {
       this.hydrationCache.invalidate()
       this.stateOwner.beginHydration()
@@ -600,7 +664,11 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       const operation = startDiagnosticOperation(this.log, {
         operation: 'session-hydration',
         cpuUsage: SESSION_CPU_TRACE_ENABLED ? process.cpuUsage : undefined,
-        fields: { mode: 'read-only', startupCleanupEligible: false }
+        fields: {
+          mode: 'read-only',
+          startupCleanupEligible: false,
+          queueWaitMs: performance.now() - queuedAt
+        }
       })
       operation.phase('load-authority')
       let scan: Awaited<ReturnType<SessionMutationRepository['loadAllWithDiagnostics']>>
@@ -673,6 +741,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
    * complete scan has restored active ownership. Chat hydration remains available on any failure.
    */
   loadAll(): Promise<LoadAllSessionsResult> {
+    const queuedAt = performance.now()
     return this.operationScheduler.runGlobal(async () => {
       const hydrationGeneration = this.hydrationCache.generationForLoad()
       const cachedScan = this.hydrationCache.get()
@@ -687,6 +756,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
         cpuUsage: SESSION_CPU_TRACE_ENABLED ? process.cpuUsage : undefined,
         fields: {
           mode: 'reconcile',
+          queueWaitMs: performance.now() - queuedAt,
           startupCleanupEligible: mayRunDestructiveStartupCleanup,
           authorityReused: cachedScan !== undefined
         }
@@ -856,15 +926,16 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
         return reconciliation.result
       }
 
+      if (degradedReconciliationCount === 0) {
+        this.hydrationCache.set({ ...scan, result: reconciliation.result }, hydrationGeneration)
+      }
       operation.complete({
         status: degradedReconciliationCount > 0 ? 'degraded' : 'ready',
         sessionCount: reconciliation.result.sessions.length,
         warningCount: scan.warnings?.length ?? 0,
-        degradedReconciliationCount
+        degradedReconciliationCount,
+        ...this.hydrationCache.diagnostics()
       })
-      if (degradedReconciliationCount === 0) {
-        this.hydrationCache.set({ ...scan, result: reconciliation.result }, hydrationGeneration)
-      }
       return reconciliation.result
     })
   }

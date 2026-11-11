@@ -476,6 +476,7 @@ describe('Session persistence coordinator architecture', () => {
         'readSessionRuntimeContext',
         'readSessionSnapshot',
         'recoverInterruptedDelegatedWork',
+        'recoverStartupSession',
         'replaceSessionMetadata',
         'repairProjectFiles',
         'reserveSessionExport',
@@ -743,6 +744,7 @@ describe('Session persistence coordinator architecture', () => {
         'patchSessionRuntimeContext',
         'readSessionRuntimeContext',
         'readSessionSnapshot',
+        'recoverStartupSession',
         'reserveSessionExport',
         'retryArtifactFinalization',
         'commitRecoveredArtifactReferences',
@@ -862,6 +864,7 @@ describe('Session persistence coordinator architecture', () => {
         continue
       }
       const statements = method.body?.statements
+      const capturesQueueTime = name === 'loadAll' || name === 'loadAllReadOnly'
       if (name === 'adoptPublishedSession' || name === 'deleteRecoveryFile') {
         // The package publisher has a different scheduler. Snapshot its handoff synchronously
         // before this owner queues the ordinary read and catalog mutation in the Session lane.
@@ -874,11 +877,19 @@ describe('Session persistence coordinator architecture', () => {
             ? 'const { projectId, sessionId, session, pendingProjectImport } = structuredClone(publication)'
             : 'const validated = deleteSessionRecoveryFileRequestSchema.parse(request)'
         )
+      } else if (capturesQueueTime) {
+        // Capture the enqueue clock only; all authority work must still enter the global lane.
+        expect(statements, name).toHaveLength(2)
+        expect(statements?.[0].getText(facadeFile)).toBe('const queuedAt = performance.now()')
       } else {
         expect(statements, name).toHaveLength(1)
       }
       const statement =
-        statements?.[name === 'adoptPublishedSession' || name === 'deleteRecoveryFile' ? 1 : 0]
+        statements?.[
+          name === 'adoptPublishedSession' || name === 'deleteRecoveryFile' || capturesQueueTime
+            ? 1
+            : 0
+        ]
       expect(statement, name).toBeDefined()
       if (!statement) continue
       expect(isReturnStatement(statement), name).toBe(true)
@@ -916,7 +927,7 @@ describe('Session persistence coordinator architecture', () => {
       expect(methods(owner, 'private')).not.toContain('enqueue')
     }
 
-    expect(expectedSchedulerRoute.size).toBe(51)
+    expect(expectedSchedulerRoute.size).toBe(52)
     const constructorSource = facade.members.filter(isConstructorDeclaration)[0].getText(facadeFile)
     expect(constructorSource).toContain('this.operationScheduler.runSession(')
     expect(constructorSource).toContain('this.operationScheduler.runGlobal(work)')
@@ -1301,6 +1312,7 @@ describe('Session persistence coordinator architecture', () => {
       'src/main/session-persistence/projection-diagnostics.test.ts',
       'src/main/session-persistence/projection-diagnostics.ts',
       'src/main/session-persistence/projection.test.ts',
+      'src/main/session-persistence/startup-hydration.integration.test.ts',
       'src/main/session-persistence/projection.ts',
       'src/main/session-persistence/renderer-flush.test.ts',
       'src/main/session-persistence/renderer-flush.ts',
@@ -1392,6 +1404,7 @@ describe('Session persistence coordinator architecture', () => {
       'src/main/session-persistence/pdf-context-owner.test.ts',
       'src/main/session-persistence/projection-diagnostics.test.ts',
       'src/main/session-persistence/projection.test.ts',
+      'src/main/session-persistence/startup-hydration.integration.test.ts',
       'src/main/session-persistence/renderer-flush.test.ts',
       'src/main/session-persistence/renderer-save-options.test.ts',
       'src/main/session-persistence/repository-queue.test.ts',
