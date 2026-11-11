@@ -1,5 +1,5 @@
 import { bindManagedPdfVersion } from '../pdf-annotations/source-bindings'
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import type { PrismaClient } from '@prisma/client'
@@ -86,6 +86,78 @@ const moveDirectoryIfPresent = async (source: string, destination: string): Prom
 
 export class ArtifactProvenanceStagingRecovery {
   constructor(private readonly options: ArtifactProvenanceStagingRecoveryOptions) {}
+
+  // Plan directory I/O outside the persistence barrier. The facade admits each action under
+  // artifact Session ownership; its caller additionally guards the complete Session snapshot.
+  async planOrphanStagingCleanup(
+    projectId: string,
+    appSessionId: string,
+    startupCutoff: number
+  ): Promise<Array<() => Promise<void>>> {
+    const root = resolveStorageKey(
+      this.options.storageRoot,
+      storageKey('artifacts', projectId, appSessionId, '.provenance', '.staging', 'versions')
+    )
+    const candidates = await readdir(root, { withFileTypes: true }).catch((error: unknown) => {
+      if (errorCode(error) === 'ENOENT') return []
+      throw error
+    })
+    const client = await this.options.getClient()
+    const actions: Array<() => Promise<void>> = []
+    for (const candidate of candidates) {
+      if (!candidate.isDirectory() || !SAFE_SEGMENT_PATTERN.test(candidate.name)) continue
+      const path = join(root, candidate.name)
+      const before = await lstat(path).catch((error: unknown) => {
+        if (errorCode(error) === 'ENOENT') return undefined
+        throw error
+      })
+      if (
+        !before?.isDirectory() ||
+        before.isSymbolicLink() ||
+        before.mtimeMs >= startupCutoff ||
+        before.ctimeMs >= startupCutoff ||
+        this.options.now().getTime() - before.mtimeMs < ORPHAN_STAGING_GRACE_MS
+      )
+        continue
+      if (
+        await client.artifactVersion.findUnique({
+          where: { id: candidate.name },
+          select: { id: true }
+        })
+      )
+        continue
+      actions.push(async () => {
+        // A Version may have acquired authority or replaced/touched its directory after planning.
+        // Neither case authorizes deleting the originally observed rowless staging candidate.
+        if (
+          await client.artifactVersion.findUnique({
+            where: { id: candidate.name },
+            select: { id: true }
+          })
+        )
+          return
+        const current = await lstat(path).catch((error: unknown) => {
+          if (errorCode(error) === 'ENOENT') return undefined
+          throw error
+        })
+        if (
+          !current?.isDirectory() ||
+          current.isSymbolicLink() ||
+          current.dev !== before.dev ||
+          current.ino !== before.ino ||
+          current.mtimeMs !== before.mtimeMs ||
+          current.ctimeMs !== before.ctimeMs ||
+          current.birthtimeMs !== before.birthtimeMs ||
+          current.mtimeMs >= startupCutoff ||
+          current.ctimeMs >= startupCutoff ||
+          this.options.now().getTime() - current.mtimeMs < ORPHAN_STAGING_GRACE_MS
+        )
+          return
+        await rm(path, { recursive: true, force: true })
+      })
+    }
+    return actions
+  }
 
   routingPublisher(
     projectId: string,
