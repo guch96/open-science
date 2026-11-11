@@ -1061,7 +1061,12 @@ describe('session persistence repository (per-session files)', () => {
   })
 
   it('reports aggregate Session scan scale without exposing catalog identifiers', async () => {
-    const repository = new SessionRepository(await createStorageRoot())
+    const repository = new SessionRepository(await createStorageRoot(), {
+      readSessionFile: async (path) => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        return readFile(path, 'utf8')
+      }
+    })
     const projectA = join(storageRoot!, 'sessions', 'project-a')
     const projectB = join(storageRoot!, 'sessions', 'project-b')
     const rawA = JSON.stringify({
@@ -1082,8 +1087,12 @@ describe('session persistence repository (per-session files)', () => {
     expect(scan.scanMetrics).toEqual({
       projectDirectoryCount: 2,
       sessionFileCount: 2,
-      sessionBytes: Buffer.byteLength(rawA, 'utf8') + Buffer.byteLength(rawB, 'utf8')
+      sessionBytes: Buffer.byteLength(rawA, 'utf8') + Buffer.byteLength(rawB, 'utf8'),
+      authorityReadMs: expect.any(Number),
+      jsonParseMs: expect.any(Number)
     })
+    expect(scan.scanMetrics.authorityReadMs).toBeGreaterThanOrEqual(15)
+    expect(scan.scanMetrics.jsonParseMs).toBeGreaterThanOrEqual(0)
     expect(JSON.stringify(scan.scanMetrics)).not.toContain('private-session')
     expect(JSON.stringify(scan.scanMetrics)).not.toContain('project-a')
   })

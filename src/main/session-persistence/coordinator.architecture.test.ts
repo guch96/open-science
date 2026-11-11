@@ -900,6 +900,7 @@ describe('Session persistence coordinator architecture', () => {
         continue
       }
       const statements = method.body?.statements
+      const capturesQueueTime = name === 'loadAll' || name === 'loadAllReadOnly'
       if (name === 'adoptPublishedSession' || name === 'deleteRecoveryFile') {
         // The package publisher has a different scheduler. Snapshot its handoff synchronously
         // before this owner queues the ordinary read and catalog mutation in the Session lane.
@@ -912,11 +913,19 @@ describe('Session persistence coordinator architecture', () => {
             ? 'const { projectId, sessionId, session, pendingProjectImport } = structuredClone(publication)'
             : 'const validated = deleteSessionRecoveryFileRequestSchema.parse(request)'
         )
+      } else if (capturesQueueTime) {
+        // Capture the enqueue clock only; all authority work must still enter the global lane.
+        expect(statements, name).toHaveLength(2)
+        expect(statements?.[0].getText(facadeFile)).toBe('const queuedAt = performance.now()')
       } else {
         expect(statements, name).toHaveLength(1)
       }
       const statement =
-        statements?.[name === 'adoptPublishedSession' || name === 'deleteRecoveryFile' ? 1 : 0]
+        statements?.[
+          name === 'adoptPublishedSession' || name === 'deleteRecoveryFile' || capturesQueueTime
+            ? 1
+            : 0
+        ]
       expect(statement, name).toBeDefined()
       if (!statement) continue
       expect(isReturnStatement(statement), name).toBe(true)
