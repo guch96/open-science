@@ -702,7 +702,29 @@ describe('artifact provenance repository', () => {
     )
     expect(actions).toHaveLength(1)
     await expect(readFile(join(directory, 'content'), 'utf8')).resolves.toBe('orphaned bytes')
-    await actions[0]()
+    await expect(actions[0](async () => false)).resolves.toBe('stale')
+    await expect(readFile(join(directory, 'content'), 'utf8')).resolves.toBe('orphaned bytes')
+    let writerEntered = false
+    let writing: Promise<void> | undefined
+    try {
+      await expect(
+        actions[0](async (apply) => {
+          writing = repository.withSessionMutation(
+            { projectId: 'project-1', appSessionId: 'session-1' },
+            async () => {
+              writerEntered = true
+            }
+          )
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          expect(writerEntered).toBe(false)
+          await apply()
+          return true
+        })
+      ).resolves.toBe('complete')
+    } finally {
+      await writing
+    }
+    expect(writerEntered).toBe(true)
     await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -734,7 +756,7 @@ describe('artifact provenance repository', () => {
   })
 
   it.each(['touched', 'replaced'] as const)(
-    'waits for Session artifact ownership and preserves staging %s after planning',
+    'yields busy artifact ownership without entering cleanup guard and preserves staging %s',
     async (change) => {
       storageRoot = await mkdtemp(join(tmpdir(), 'artifact-staging-cleanup-ownership-'))
       const client = createProjectDbClient(storageRoot)
@@ -775,18 +797,27 @@ describe('artifact provenance repository', () => {
         }
       )
       await entered.promise
-      let settled = false
-      const applying = actions[0]().then(() => {
-        settled = true
-      })
+      let guardEntered = false
+      const commit = async (apply: () => Promise<void>): Promise<boolean> => {
+        guardEntered = true
+        await apply()
+        return true
+      }
+      const applying = actions[0](commit)
       try {
-        await new Promise<void>((resolve) => setImmediate(resolve))
-        expect(settled).toBe(false)
+        const result = await Promise.race([
+          applying,
+          new Promise<'still waiting'>((resolve) => setImmediate(() => resolve('still waiting')))
+        ])
+        expect(result).toBe('busy')
+        expect(guardEntered).toBe(false)
         await expect(stat(directory)).resolves.toBeDefined()
       } finally {
         release.resolve()
         await Promise.all([writing, applying])
       }
+      await expect(actions[0](commit)).resolves.toBe('complete')
+      expect(guardEntered).toBe(true)
       await expect(readFile(join(directory, 'new-copy'), 'utf8')).resolves.toBe(
         'active writer bytes'
       )
@@ -822,7 +853,10 @@ describe('artifact provenance repository', () => {
     )
     expect(actions).toHaveLength(1)
     await fixture.client.artifactVersion.create({ data: row })
-    await actions[0]()
+    await actions[0](async (apply) => {
+      await apply()
+      return true
+    })
     await expect(readFile(join(directory, 'content'), 'utf8')).resolves.toBe('owned bytes')
   })
 
