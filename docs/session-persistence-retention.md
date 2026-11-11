@@ -63,10 +63,22 @@ a second conflict remains a failure for the background owner to record and resch
 Sessions return no result; unreadable authority throws and must not be counted as recovered.
 
 This keeps historical primary reads from blocking a current Session's terminal save in the same
-Project. Commit still uses the established Project-and-Session lane: already-started revalidation,
-durable-temp recovery, and effectful repair are not preemptible. Synchronous JSON parsing also
-still occupies Main's event loop. Background admission must yield between Sessions and avoid
-queuing an entire catalog ahead of foreground work.
+Project, including the second durable read and effectful indexing/migration. Recovery now reserves
+its Session identity and a Project lifecycle fence independently of ordinary saves in other Sessions.
+Project deletion and package publication reserve both scopes, while same-Session writes remain
+serialized. Recovery JSON saves use the same isolated identity plus explicit CAS in the repository;
+they do not reacquire the ordinary Project save queue. Synchronous JSON parsing still occupies
+Main's event loop, and same-Session durable effects remain nonpreemptible.
+
+A global request waiting for admitted recovery does not publish the global barrier until recovery
+drains. Foreground saves remain admissible meanwhile; subsequent recovery waits behind those
+pending globals, whose original order and failure isolation are retained. Package publication also
+waits for existing recovery before reserving the ordinary Project queue, preventing an import
+waiting on history from blocking later foreground saves. Later recovery waits behind admitted
+publication; explicit Project deletion retains its exclusive lifecycle boundary. Ready-list metadata uses
+a synchronous generation-checked replacement, preserving newer live metadata and marking it
+incomplete if the summary snapshot became stale. Ordered metadata snapshots retain their existing
+scheduler boundary.
 
 Recovery diagnostics use `operation: session-recovery` with prepare/commit/startup modes, phase
 durations, commit `queueWaitMs`, and `revisionConflicts`. They contain no message bodies, titles,
@@ -97,11 +109,12 @@ work from JSON and summaries; there is no additional durable queue. Missing auth
 inside a scoped repository lane before removing only its stale projection. Unreadable/quarantined
 or pending-import evidence keeps the summary.
 
-The production integration test delays a historical primary read for more than 2.6 seconds and
-proves a real same-Project runtime terminal save acknowledges within 1.5 seconds and survives a
-new repository read. This does not promise preemption of synchronous JSON parsing, protected
-commit effects, or exceptional durable-temp repair. An already admitted protected commit still
-owns the Project lane and can delay same-Project foreground work for that commit.
+Production integration tests delay the primary read, the second durable read, and effectful file
+indexing for more than 2.6 seconds. A concurrent ready-list request returns and a real same-Project
+runtime terminal save acknowledges within 1.5 seconds and survives a new repository read. These
+checks cover the effectful recovery path, not only off-lane planning. Synchronous JSON parsing and
+operations on the same Session are still not preemptible; exceptional complete projection rebuilds
+remain a separate startup path.
 
 ## Complete cleanup boundary
 
@@ -123,19 +136,35 @@ ownership witness remain eligible for orphan cleanup.
 
 A second streamed pass cleans verified legacy Upload sources and orphan Artifact staging only
 after the complete sweep. Upload sources must already have fully versioned references; cleanup
-uses the existing immutable checksum/private-claim verification. Hashing runs under a scoped
-Project/Session lane, outside the global catalog fence. The precheck alone is not a lasting fence:
-known same-process writers are safe because package publication takes that same lane, live-save
-upgrades references before commit, and direct repository writes reject legacy references. External
+uses the existing immutable checksum/private-claim verification. Hashing runs under isolated Session
+ownership, outside the global catalog fence. The precheck alone is not a lasting fence: cleanup
+accepts only the deterministic owning Session upload directory and matching UploadFile/Version
+ownership, while package publication takes the exclusive Project lifecycle fence. Live-save upgrades
+references before commit and direct repository writes reject legacy references. External
 uncoordinated filesystem writers are outside that ownership contract.
 
 Artifact directory planning runs outside global ownership. Application uses the artifact writer's
 nonblocking Session reservation before entering the repository catalog fence, and rechecks
 ownership, stat identity, grace period, and a fixed startup cutoff. Newly created staging from this
 process is excluded. The callback must not invoke repository mutations under its catalog fence.
-Busy writer ownership skips admission instead of waiting under the global boundary. Protected
-filesystem deletion itself is not preemptible.
+Busy writer ownership skips admission instead of waiting under the global boundary. The guarded
+action atomically renames a proven orphan into a private UUID directory; it never falls back to
+copying on rename failure. Recursive removal runs after global ownership is released. Workspace
+cleanup follows the same detach-then-delete rule. The namespaces
+`.ownership/.retired-workspaces` and `.staging/.retired-orphans` are rediscovered on restart so a
+failed removal is retried without deleting a newly recreated original directory. The Artifact
+callback hands detached cleanup back before physical removal so the coordinator releases the
+Session reservation too; opening that Session does not wait for disposal of retired bytes. Parent directories
+are synced before completing detachment; no new JSON schema or durable queue is introduced.
 
 Deferred diagnostics report aggregate bytes, bounded read/parse timings, preparation and commit
 timings, and existing per-phase index work. They never serialize transcripts merely to measure
 size. Background retries/exhaustion and final counts are separate from foreground durability.
+
+This refines specification #15's “short scoped commit” wording: existing effectful owners keep
+Session serialization rather than being rewritten into separate speculative plans. Unrelated
+Session saves share a Project without sharing the recovery reservation. Project-wide deletion,
+package publication, global catalog changes, and each Session's revision/ownership checks retain
+their conflict fences. Artifact Project snapshots contain compatibility-publication candidates;
+target Session/context checks and Artifact Session ownership still authorize finalization. File-index
+canonical collision reads and writes remain within their existing Prisma transaction.

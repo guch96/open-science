@@ -1251,6 +1251,16 @@ class SessionRepository {
     )
   }
 
+  // Recovery holds the same identity/CAS protection without serializing unrelated Project saves.
+  async saveRecoveredSession(
+    session: PersistedChatSession,
+    expectedRevision: number
+  ): Promise<PersistedChatSession> {
+    return this.operationScheduler.runSessionRecovery(session.projectId, session.id, () =>
+      this.saveSessionNow(session, expectedRevision, false)
+    )
+  }
+
   // Startup-only repair: never rename graph identities underneath an attached runtime. The backup
   // and revisioned replacement share the normal repository lane, so a retry cannot overwrite a
   // newer Session or lose the original bytes after an interrupted repair.
@@ -1258,7 +1268,7 @@ class SessionRepository {
     session: PersistedChatSession,
     expectedRevision: number
   ): Promise<PersistedChatSession> {
-    return this.operationScheduler.runSession(session.projectId, session.id, async () => {
+    return this.operationScheduler.runSessionRecovery(session.projectId, session.id, async () => {
       if (
         this.dependencies.hasLiveRuntimeSession(session.projectId, session.id) ||
         this.dependencies.hasActiveRuntimePrompt(session.projectId, session.id)

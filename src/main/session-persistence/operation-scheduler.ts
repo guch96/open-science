@@ -16,11 +16,15 @@ class SessionPersistenceOperationScope {
   }
 }
 
-// Keeps Session persistence ordered at its real authority scopes. Scoped operations may overlap when
-// they share no Project or Session identity, while a global operation forms an exclusive barrier that
-// waits for every earlier scope and blocks every later one until it settles.
+// Keeps ordinary writes ordered by Project and Session. Background recovery shares only its Session
+// and Project lifecycle fence; unrelated foreground Sessions can proceed. Global operations publish
+// an exclusive barrier after admitted recovery drains, without queueing foreground behind that wait.
 class SessionPersistenceOperationScheduler {
   private globalTail: Promise<void> = Promise.resolve()
+  private deferredGlobalTail: Promise<void> | undefined
+  private readonly recoveryTails = new Set<Promise<void>>()
+  private readonly recoveryByProject = new Map<string, Set<Promise<void>>>()
+  private readonly deferredProjectTails = new Map<string, Promise<void>>()
   private generation = 0
   private sequence = 0
   private readonly scopeTails = new Map<
@@ -29,7 +33,9 @@ class SessionPersistenceOperationScheduler {
   >()
 
   runProject<Result>(projectId: string, operation: ScopedOperation<Result>): Promise<Result> {
-    return this.runScoped([projectScope(projectId)], operation)
+    const publication = this.deferredProjectTails.get(projectId)
+    if (publication) return publication.then(() => this.runProject(projectId, operation))
+    return this.runScoped([projectScope(projectId), projectRecoveryScope(projectId)], operation)
   }
 
   runSession<Result>(
@@ -38,6 +44,62 @@ class SessionPersistenceOperationScheduler {
     operation: ScopedOperation<Result>
   ): Promise<Result> {
     return this.runScoped([projectScope(projectId), sessionScope(sessionId)], operation)
+  }
+
+  // Historical repair conflicts with its Session and Project-wide lifecycle work, not unrelated
+  // Session saves. Exclusive Project publishers/deleters reserve both Project keys.
+  runSessionRecovery<Result>(
+    projectId: string,
+    sessionId: string,
+    operation: ScopedOperation<Result>
+  ): Promise<Result> {
+    const publication = this.deferredProjectTails.get(projectId)
+    if (publication)
+      return publication.then(() => this.runSessionRecovery(projectId, sessionId, operation))
+    if (this.deferredGlobalTail) {
+      return this.deferredGlobalTail.then(() =>
+        this.runSessionRecovery(projectId, sessionId, operation)
+      )
+    }
+    const run = this.runScoped(
+      [projectRecoveryScope(projectId), sessionScope(sessionId)],
+      operation
+    )
+    const tail = settledTail(run)
+    this.recoveryTails.add(tail)
+    const projectTails = this.recoveryByProject.get(projectId) ?? new Set<Promise<void>>()
+    projectTails.add(tail)
+    this.recoveryByProject.set(projectId, projectTails)
+    void tail.then(() => {
+      this.recoveryTails.delete(tail)
+      projectTails.delete(tail)
+      if (projectTails.size === 0) this.recoveryByProject.delete(projectId)
+    })
+    return run
+  }
+
+  runSessionProjectExclusive<Result>(
+    projectId: string,
+    sessionId: string,
+    operation: ScopedOperation<Result>
+  ): Promise<Result> {
+    const recovery = this.recoveryByProject.get(projectId)
+    if (recovery?.size) {
+      const run = Promise.all([...recovery]).then(() =>
+        this.runSessionProjectExclusive(projectId, sessionId, operation)
+      )
+      const tail = settledTail(run)
+      this.deferredProjectTails.set(projectId, tail)
+      void tail.then(() => {
+        if (this.deferredProjectTails.get(projectId) === tail)
+          this.deferredProjectTails.delete(projectId)
+      })
+      return run
+    }
+    return this.runScoped(
+      [projectScope(projectId), projectRecoveryScope(projectId), sessionScope(sessionId)],
+      operation
+    )
   }
 
   runSessionThenGlobal<Result, FinalResult>(
@@ -81,6 +143,17 @@ class SessionPersistenceOperationScheduler {
   }
 
   runGlobal<Result>(operation: Operation<Result>): Promise<Result> {
+    // A waiting maintenance/catalog request must not turn slow background work into a global
+    // foreground barrier. Publish the exclusive barrier only after admitted recovery drains.
+    if (this.recoveryTails.size > 0) {
+      const run = Promise.all([...this.recoveryTails]).then(() => this.runGlobal(operation))
+      const tail = settledTail(run)
+      this.deferredGlobalTail = tail
+      void tail.then(() => {
+        if (this.deferredGlobalTail === tail) this.deferredGlobalTail = undefined
+      })
+      return run
+    }
     const predecessors = new Set([
       this.globalTail,
       ...[...this.scopeTails.values()].flatMap((tails) =>
@@ -178,6 +251,7 @@ class SessionPersistenceOperationScheduler {
 }
 
 const MANIFEST_SCOPE = 'manifest'
+const projectRecoveryScope = (projectId: string): string => `project-recovery\0${projectId}`
 const projectScope = (projectId: string): string => `project\0${projectId}`
 const sessionScope = (sessionId: string): string => `session\0${sessionId}`
 const settledTail = (operation: Promise<unknown>): Promise<void> =>

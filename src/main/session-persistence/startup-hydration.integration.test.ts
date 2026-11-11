@@ -6,6 +6,19 @@ import type { PrismaClient } from '@prisma/client'
 
 vi.mock('electron', () => ({ app: { getPath: () => '/home/user', isPackaged: true } }))
 const diagnostics = vi.hoisted(() => ({ debug: vi.fn() }))
+const filesystem = vi.hoisted(() => ({
+  beforeRemove: undefined as ((path: string) => Promise<void>) | undefined
+}))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      await filesystem.beforeRemove?.(String(args[0]))
+      return actual.rm(...args)
+    }
+  }
+})
 vi.mock('@aipoch/diagnostics/node', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@aipoch/diagnostics/node')>()
   return {
@@ -36,6 +49,7 @@ let root: string
 let client: PrismaClient
 
 afterEach(async () => {
+  filesystem.beforeRemove = undefined
   await client?.$disconnect()
   if (root) await rm(root, { recursive: true, force: true })
 })
@@ -277,92 +291,116 @@ it('marks pending metadata and permission recovery while leaving completed histo
   expect(buildSessionProjection(base).summary.needsStartupRecovery).toBe(false)
 })
 
-it('keeps a same-Project terminal durable while production deferred recovery reads history', async () => {
-  let release!: () => void
-  let enter!: () => void
-  const entered = new Promise<void>((resolve) => {
-    enter = resolve
-  })
-  const blocked = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  let delaying = false
-  const h = await createStartupHarness({
-    hasLiveRuntimeSession: (_projectId, sessionId) => sessionId === 'active',
-    hasActiveRuntimePrompt: (_projectId, sessionId) => sessionId === 'active',
-    readSessionFile: async (path) => {
-      if (delaying && path.endsWith('/interrupted.json')) {
-        enter()
-        await blocked
-      }
-      return readFile(path, 'utf8')
-    }
-  })
-  const active = await h.repository.saveSession(
-    materializeSessionConversationGraph({
-      ...h.makeSession('active'),
-      status: 'running',
-      activeRun: { promptMessageId: 'active-message', startedAt: 1 }
+it.each(['snapshot', 'commit-read', 'index-effects'] as const)(
+  'keeps a same-Project terminal durable during delayed historical %s',
+  async (phase) => {
+    let release!: () => void
+    let enter!: () => void
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
     })
-  )
-  await h.repository.saveManifest({ lastSessionId: 'active' })
-  const graph = active.conversationGraph!
-  const owner = new RuntimeSessionOwner({
-    loadSession: (key) => h.coordinator.loadSessionForContinuation(key.projectId, key.sessionId),
-    mutateSession: (key, mutate, committed) =>
-      h.coordinator.mutateRuntimeSession(key, mutate, committed),
-    finalizeArtifacts: async () => [],
-    scheduleFlush: () => () => undefined,
-    now: () => 10
-  })
-  await owner.begin({
-    projectId: 'project',
-    sessionId: 'active',
-    promptMessageId: 'active-message',
-    agentFrameId: graph.rootFrameId,
-    messageBranchId: graph.branches[0].id,
-    runtimeSegmentId: graph.runtimeSegments[0].id,
-    executionId: 'execution'
-  })
-  const selected = await h.composed.loadStartupSessions()
-  expect(selected.map(({ id }) => id)).toEqual(['active'])
-  delaying = true
-  const workflow = h.composed.createDeferredRecovery(async () => undefined)
-  workflow.start()
-  await entered
-  let committed = false
-  const terminal = owner.commitTerminal(
-    {
-      id: 'terminal',
-      timestamp: 20,
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let delaying = false
+    let reads = 0
+    const h = await createStartupHarness(
+      {
+        hasLiveRuntimeSession: (_projectId, sessionId) => sessionId === 'active',
+        hasActiveRuntimePrompt: (_projectId, sessionId) => sessionId === 'active',
+        readSessionFile: async (path) => {
+          if (
+            delaying &&
+            path.endsWith('/interrupted.json') &&
+            ++reads === (phase === 'snapshot' ? 1 : phase === 'commit-read' ? 2 : -1)
+          ) {
+            enter()
+            await blocked
+          }
+          return readFile(path, 'utf8')
+        }
+      },
+      async (session) => {
+        if (delaying && phase === 'index-effects' && session.id === 'interrupted') {
+          enter()
+          await blocked
+        }
+        return []
+      }
+    )
+    const active = await h.repository.saveSession(
+      materializeSessionConversationGraph({
+        ...h.makeSession('active'),
+        status: 'running',
+        activeRun: { promptMessageId: 'active-message', startedAt: 1 }
+      })
+    )
+    await h.repository.saveManifest({ lastSessionId: 'active' })
+    const graph = active.conversationGraph!
+    const owner = new RuntimeSessionOwner({
+      loadSession: (key) => h.coordinator.loadSessionForContinuation(key.projectId, key.sessionId),
+      mutateSession: (key, mutate, committed) =>
+        h.coordinator.mutateRuntimeSession(key, mutate, committed),
+      finalizeArtifacts: async () => [],
+      scheduleFlush: () => () => undefined,
+      now: () => 10
+    })
+    await owner.begin({
+      projectId: 'project',
       sessionId: 'active',
       promptMessageId: 'active-message',
-      promptExecutionId: 'execution',
-      kind: 'stop',
-      level: 'info',
-      text: 'end_turn'
-    },
-    () => {
-      committed = true
+      agentFrameId: graph.rootFrameId,
+      messageBranchId: graph.branches[0].id,
+      runtimeSegmentId: graph.runtimeSegments[0].id,
+      executionId: 'execution'
+    })
+    const selected = await h.composed.loadStartupSessions()
+    expect(selected.map(({ id }) => id)).toEqual(['active'])
+    delaying = true
+    const workflow = h.composed.createDeferredRecovery(async () => undefined)
+    workflow.start()
+    await entered
+    let catalogReady = false
+    const catalogDuringRecovery = h.composed.sessionPersistenceBackend.list!().then((result) => {
+      catalogReady = true
+      return result
+    })
+    let committed = false
+    const terminal = owner.commitTerminal(
+      {
+        id: 'terminal',
+        timestamp: 20,
+        sessionId: 'active',
+        promptMessageId: 'active-message',
+        promptExecutionId: 'execution',
+        kind: 'stop',
+        level: 'info',
+        text: 'end_turn'
+      },
+      () => {
+        committed = true
+      }
+    )
+    try {
+      await expect.poll(() => committed, { timeout: 1500 }).toBe(true)
+      await expect.poll(() => catalogReady, { timeout: 1500 }).toBe(true)
+      expect(await h.repository.loadSession('project', 'active')).toMatchObject({ status: 'idle' })
+      // Keep the actual read blocked beyond the former terminal admission budget.
+      await new Promise((resolve) => setTimeout(resolve, 2600))
+    } finally {
+      delaying = false
+      release()
+      await terminal
+      await workflow.settled()
+      await catalogDuringRecovery
+      await workflow.dispose()
+      await h.coordinator.readSessionSnapshot('project', 'active')
     }
-  )
-  try {
-    await expect.poll(() => committed, { timeout: 1500 }).toBe(true)
-    expect(await h.repository.loadSession('project', 'active')).toMatchObject({ status: 'idle' })
-    // Keep the actual read blocked beyond the former terminal admission budget.
-    await new Promise((resolve) => setTimeout(resolve, 2600))
-  } finally {
-    delaying = false
-    release()
-    await terminal
-    await workflow.settled()
-    await workflow.dispose()
-    await h.coordinator.readSessionSnapshot('project', 'active')
+    expect(await h.repository.loadSession('project', 'interrupted')).toMatchObject({
+      status: 'error'
+    })
   }
-  expect(await h.repository.loadSession('project', 'interrupted')).toMatchObject({
-    status: 'error'
-  })
-})
+)
 
 it.each(['unreadable', 'oversized', 'index'] as const)(
   'isolates %s history with bounded retries while navigation and healthy recovery remain usable',
@@ -662,4 +700,191 @@ it('yields a busy Artifact writer before catalog locking while same-Project term
     )
   ).resolves.toBe('complete')
   await expect(access(directory)).rejects.toThrow()
+})
+
+it.each(['workspace', 'artifact'] as const)(
+  'keeps terminal saves durable while detached %s removal is slow and retries detached bytes after failure',
+  async (kind) => {
+    const h = await createStartupHarness(
+      {
+        hasLiveRuntimeSession: (_p, id) => id === 'active',
+        hasActiveRuntimePrompt: (_p, id) => id === 'active'
+      },
+      undefined,
+      {
+        planProvisional: (sessions) =>
+          planProvisionalManagedWorkspaceReconciliation(sessions, 20, root),
+        reconcileProvisional: async () => undefined,
+        markProjectRetained: async () => [],
+        restoreProjectActive: async () => undefined,
+        markRetained: async () => false,
+        restoreActive: async () => undefined
+      }
+    )
+    const directory =
+      kind === 'workspace'
+        ? join(root, 'workspaces/orphan')
+        : join(root, 'artifacts/project/historical/.provenance/.staging/versions/orphan')
+    await mkdir(directory, { recursive: true })
+    if (kind === 'workspace')
+      await initializeManagedWorkspaceOwnership(directory, 'project', 1, root)
+    const old = new Date(Date.now() - 7200000)
+    await utimes(directory, old, old)
+    const cutoff = (await stat(directory)).ctimeMs + 1
+    const artifacts = new ArtifactProvenanceRepository({
+      storageRoot: root,
+      getClient: async () => client,
+      now: () => new Date(cutoff + 7200000)
+    })
+    const coordinator =
+      kind === 'workspace'
+        ? h.coordinator
+        : new SessionPersistenceCoordinator(
+            h.repository,
+            h.fileIndex,
+            undefined,
+            undefined,
+            undefined,
+            artifacts
+          )
+    const active = await h.repository.saveSession(
+      materializeSessionConversationGraph({
+        ...h.makeSession('active'),
+        status: 'running',
+        activeRun: { promptMessageId: 'active-message', startedAt: 1 }
+      })
+    )
+    const graph = active.conversationGraph!
+    const owner = new RuntimeSessionOwner({
+      loadSession: (key) => coordinator.loadSessionForContinuation(key.projectId, key.sessionId),
+      mutateSession: (key, mutate, committed) =>
+        coordinator.mutateRuntimeSession(key, mutate, committed),
+      finalizeArtifacts: async () => [],
+      scheduleFlush: () => () => undefined,
+      now: () => 10
+    })
+    await owner.begin({
+      projectId: 'project',
+      sessionId: 'active',
+      promptMessageId: 'active-message',
+      agentFrameId: graph.rootFrameId,
+      messageBranchId: graph.branches[0].id,
+      runtimeSegmentId: graph.runtimeSegments[0].id,
+      executionId: 'execution'
+    })
+    const snapshot = await h.repository.scanSessionIdentities()
+    const guard = (apply: () => Promise<void>): Promise<boolean> =>
+      h.repository.runWithSessionCatalogSnapshot(snapshot, apply)
+    let release!: () => void
+    let enter!: () => void
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const retiredPaths: string[] = []
+    filesystem.beforeRemove = async (path) => {
+      if (path.includes('.retired-')) {
+        retiredPaths.push(path)
+        enter()
+        await gate
+        throw new Error('physical delete interrupted')
+      }
+    }
+    const prepared = await coordinator.prepareSessionRecovery('project', 'historical')
+    const cleanup =
+      kind === 'workspace'
+        ? coordinator.reconcileRecoveryCatalog(
+            [active, h.historical],
+            coordinator.recoveryCatalogGeneration(),
+            guard
+          )
+        : coordinator.cleanupRecoveredSession(
+            prepared!,
+            coordinator.recoveryCatalogGeneration(),
+            guard,
+            cutoff,
+            () => false
+          )
+    const cleanupFailed = expect(cleanup).rejects.toThrow()
+    await entered
+    try {
+      await expect(access(directory)).rejects.toThrow()
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, 'new-live-content'), 'preserve')
+      let opened = false
+      const navigationSave = coordinator
+        .saveSession({ ...h.historical, title: 'Opened during detached cleanup' })
+        .then(() => {
+          opened = true
+        })
+      await expect.poll(() => opened, { timeout: 1500 }).toBe(true)
+      await navigationSave
+      let acknowledged = false
+      const terminal = owner.commitTerminal(
+        {
+          id: 'terminal',
+          timestamp: 20,
+          sessionId: 'active',
+          promptMessageId: 'active-message',
+          promptExecutionId: 'execution',
+          kind: 'stop',
+          level: 'info',
+          text: 'end_turn'
+        },
+        () => {
+          acknowledged = true
+        }
+      )
+      await expect.poll(() => acknowledged, { timeout: 1500 }).toBe(true)
+      await terminal
+      expect(await new SessionRepository(root).loadSession('project', 'active')).toMatchObject({
+        status: 'idle'
+      })
+    } finally {
+      release()
+      await cleanupFailed
+      filesystem.beforeRemove = undefined
+    }
+    // A new planner rediscovers the private retired namespace without touching a recreated path.
+    if (kind === 'workspace') {
+      for (const apply of await planProvisionalManagedWorkspaceReconciliation(
+        [active, h.historical],
+        20,
+        root
+      )) {
+        const remove = await apply()
+        await remove?.()
+      }
+    } else {
+      const reopened = new ArtifactProvenanceRepository({
+        storageRoot: root,
+        getClient: async () => client
+      })
+      for (const apply of await reopened.planOrphanStagingCleanup(
+        'project',
+        'historical',
+        cutoff
+      )) {
+        await apply(async (commit) => {
+          await commit()
+          return true
+        })
+      }
+    }
+    expect(await readFile(join(directory, 'new-live-content'), 'utf8')).toBe('preserve')
+    expect(retiredPaths.length).toBeGreaterThan(0)
+    for (const retiredPath of retiredPaths) await expect(access(retiredPath)).rejects.toThrow()
+  }
+)
+
+it('keeps newly durable metadata when a ready-list replacement captured an older generation', async () => {
+  const h = await createStartupHarness()
+  const generation = h.coordinator.recoveryCatalogGeneration()
+  const oldSummaries = await h.repository.loadSessionSummaries()
+  await h.coordinator.saveSession(h.makeSession('new-session'))
+  await h.coordinator.replaceSessionMetadata(oldSummaries, true, generation)
+  const metadata = await h.coordinator.sessionMetadataSnapshot()
+  expect(metadata.sessions.some(({ id }) => id === 'new-session')).toBe(true)
 })

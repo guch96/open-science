@@ -194,6 +194,7 @@ export function composeSessionProjection({
     recoveredSessions?: PersistedChatSession[]
     sessions: SessionSummary[]
   }> => {
+    const metadataGeneration = sessionPersistenceCoordinator.recoveryCatalogGeneration()
     // Reconcile a JSON write from a committed Project tombstone before deletion recovery removes
     // that temporary authority. Its SQLite facts remain part of retained Project history.
     await sessionRepository.reconcilePendingSessionProjection()
@@ -201,13 +202,21 @@ export function composeSessionProjection({
     if (!recovery.isComplete) {
       const result = recovery.result
       const sessions = await sessionRepository.summarizeReadOnlyAuthority(result)
-      await sessionPersistenceCoordinator.replaceSessionMetadata(sessions, false)
+      await sessionPersistenceCoordinator.replaceSessionMetadata(
+        sessions,
+        false,
+        metadataGeneration
+      )
       return { result, sessions: await wslSetupSessions.projectSessionSummaries(sessions) }
     }
     const projection = await sessionRepository.ensureSessionProjection(loadAllSessions)
     const result = projection.result
     const catalogComplete = result ? canReconcileSessionAbsences(result) : true
-    await sessionPersistenceCoordinator.replaceSessionMetadata(projection.sessions, catalogComplete)
+    await sessionPersistenceCoordinator.replaceSessionMetadata(
+      projection.sessions,
+      catalogComplete,
+      metadataGeneration
+    )
     if (catalogComplete) await reconcileWslSetupSessions(projection.sessions)
     return {
       ...projection,

@@ -36,6 +36,10 @@ type SessionReconciliationRepository = {
   ): Promise<
     { status: 'found'; session: PersistedChatSession } | { status: 'missing' | 'unreadable' }
   >
+  saveRecoveredSession?(
+    session: PersistedChatSession,
+    expectedRevision: number
+  ): Promise<PersistedChatSession>
   saveSession(session: PersistedChatSession): Promise<PersistedChatSession>
   saveSessionWithBindingRepair?(
     session: PersistedChatSession,
@@ -551,6 +555,13 @@ class SessionPersistenceReconciliationOwner {
       }
     }
 
+    const saveRepository =
+      input.scope === 'session' && this.repository.saveRecoveredSession
+        ? {
+            saveSession: (session: PersistedChatSession, revision?: number) =>
+              this.repository.saveRecoveredSession!(session, revision ?? sessionRevision(session))
+          }
+        : this.repository
     input.phase('reconcile-derived-state')
     try {
       const provenance = this.provenance
@@ -592,7 +603,7 @@ class SessionPersistenceReconciliationOwner {
             )
             result = { ...result, sessions }
             const persisted = await saveSessionWithRevision(
-              this.repository,
+              saveRepository,
               upgradedSession,
               input.scope === 'session' ? sessionRevision(session) : undefined
             )
@@ -662,7 +673,7 @@ class SessionPersistenceReconciliationOwner {
           result = { ...result, sessions }
           await this.provenance?.captureFinalizedMessages(recoveredSession)
           const persisted = await saveSessionWithRevision(
-            this.repository,
+            saveRepository,
             recoveredSession,
             input.scope === 'session' ? sessionRevision(session) : undefined
           )
