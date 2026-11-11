@@ -71,3 +71,72 @@ queuing an entire catalog ahead of foreground work.
 Recovery diagnostics use `operation: session-recovery` with prepare/commit/startup modes, phase
 durations, commit `queueWaitMs`, and `revisionConflicts`. They contain no message bodies, titles,
 or paths. These timings distinguish snapshot reading, persistence waiting, and effectful repair.
+
+
+## Startup and deferred recovery ownership
+
+With a ready derived projection, startup reads Session summaries and the selected Session only.
+Listing summaries does not inspect every historical body and an oversized or unreadable historical
+file does not initiate a full rebuild. Missing/old projection versions retain the exceptional
+complete rebuild path; the JSON schema and authority do not change. Opening history hydrates that
+Session through the existing continuation path.
+
+The application composition starts `DeferredSessionRecovery` after foreground surfaces are wired.
+It visits pending recovery candidates first, then streams the remaining historical Sessions so
+legacy Upload upgrades, Artifact repair, finalized message snapshots, file indexing, Compute Host
+bindings, sandbox approvals, and Session Details recovery retain their previous obligations.
+Only one full body is held by the worker at a time; the completion catalog holds identities,
+revisions, archive state, timestamps, and cwd references. It is not another transcript cache.
+Compute Host and Session Details owners continue to protect work owned by the current process.
+
+Each Session gets at most three attempts, with 250 ms and 1 s backoff. Failed Sessions yield to
+healthy entries. Admission yields between reads, commits, and entries; it does not reserve future
+Project lanes. Shutdown cancels future admission and waits for an already admitted effect, while
+an off-lane primary read may finish without submitting a commit. Background failures are logged
+locally and do not set the active Session's terminal-save error state. A later process reconstructs
+work from JSON and summaries; there is no additional durable queue. Missing authority is rechecked
+inside a scoped repository lane before removing only its stale projection. Unreadable/quarantined
+or pending-import evidence keeps the summary.
+
+The production integration test delays a historical primary read for more than 2.6 seconds and
+proves a real same-Project runtime terminal save acknowledges within 1.5 seconds and survives a
+new repository read. This does not promise preemption of synchronous JSON parsing, protected
+commit effects, or exceptional durable-temp repair. An already admitted protected commit still
+owns the Project lane and can delay same-Project foreground work for that commit.
+
+## Complete cleanup boundary
+
+Absence-based cleanup runs only after a successful complete sweep. Identity enumeration is
+body-free and rejects incomplete temporary/import/deletion evidence. Every collected reference
+must match the current summary revision (including legacy revision zero); a fresh catalog epoch
+alone cannot validate an earlier cwd snapshot. Both the coordinator generation and repository
+mutation generation must remain current through each destructive application. Package publication
+through a second repository invalidates the coordinator generation before releasing its Session
+lane, including failed publications. Repository mutation fencing covers durable-reader repairs.
+
+Permission/index/provenance and archive cleanup use the complete identity set. Workspace planning
+runs outside the global boundary, includes shared branch cwd references, and each action checks
+freshness again. A failure is isolated where safe; uncertain or stale evidence defers destructive
+cleanup until a later recovery. Active FileOriginSession witnesses preserve native import rows
+published before JSON; deleting/deleted witnesses keep their existing retained-origin policy.
+Explicit deletion receipts remain authoritative. Derived index rows without an identity or native
+ownership witness remain eligible for orphan cleanup.
+
+A second streamed pass cleans verified legacy Upload sources and orphan Artifact staging only
+after the complete sweep. Upload sources must already have fully versioned references; cleanup
+uses the existing immutable checksum/private-claim verification. Hashing runs under a scoped
+Project/Session lane, outside the global catalog fence. The precheck alone is not a lasting fence:
+known same-process writers are safe because package publication takes that same lane, live-save
+upgrades references before commit, and direct repository writes reject legacy references. External
+uncoordinated filesystem writers are outside that ownership contract.
+
+Artifact directory planning runs outside global ownership. Application uses the artifact writer's
+nonblocking Session reservation before entering the repository catalog fence, and rechecks
+ownership, stat identity, grace period, and a fixed startup cutoff. Newly created staging from this
+process is excluded. The callback must not invoke repository mutations under its catalog fence.
+Busy writer ownership skips admission instead of waiting under the global boundary. Protected
+filesystem deletion itself is not preemptible.
+
+Deferred diagnostics report aggregate bytes, bounded read/parse timings, preparation and commit
+timings, and existing per-phase index work. They never serialize transcripts merely to measure
+size. Background retries/exhaustion and final counts are separate from foreground durability.

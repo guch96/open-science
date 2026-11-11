@@ -76,7 +76,7 @@ type SessionUploadPersistence = {
 }
 
 type ArtifactStorageReconciler = {
-  planOrphanStagingCleanup?(projectId: string, sessionId: string, startupCutoff: number): Promise<Array<() => Promise<void>>>
+  planOrphanStagingCleanup?(projectId: string, sessionId: string, startupCutoff: number): Promise<Array<(commit: (apply: () => Promise<void>) => Promise<boolean>) => Promise<'complete' | 'stale' | 'busy'>>>
   resolveVersionDescriptors?(request: {
     projectId: string
     appSessionId: string
@@ -684,7 +684,7 @@ class SessionPersistenceReconciliationOwner {
     return { status: 'ready', result }
   }
 
-  async planOrphanStagingCleanup(session: PersistedChatSession, startupCutoff: number): Promise<Array<() => Promise<void>>> {
+  async planOrphanStagingCleanup(session: PersistedChatSession, startupCutoff: number): Promise<Array<(commit: (apply: () => Promise<void>) => Promise<boolean>) => Promise<'complete' | 'stale' | 'busy'>>> {
     return this.artifactStorage?.planOrphanStagingCleanup?.(session.projectId, session.id, startupCutoff) ?? []
   }
 

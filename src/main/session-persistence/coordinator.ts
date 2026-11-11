@@ -732,24 +732,26 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     if (prepared.status !== 'prepared') return 'stale'
     const { projectId, sessionId, session } = prepared
     const actions = await this.reconciliationOwner.planOrphanStagingCleanup(session, startupCutoff)
-    const guarded = (operation: () => Promise<void>, holdCatalog: boolean): Promise<'complete' | 'busy' | 'stale'> =>
+    const guarded = (operation: () => Promise<'complete' | 'busy' | 'stale'>): Promise<'complete' | 'busy' | 'stale'> =>
       this.operationScheduler.runSession(projectId, sessionId, async () => {
         if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return 'stale'
         this.assertMutable(projectId, sessionId, 'mutate')
         if (session.activeRun || this.stateOwner.ownsPromptPreparation(session) || this.repository.hasLiveRuntimeSession?.(projectId, sessionId)) return 'busy'
-        if (holdCatalog) return await commit(operation) ? 'complete' : 'stale'
-        if (!await commit(async () => undefined)) return 'stale'
-        // Verified legacy-source cleanup hashes files under the Session lane, never globally.
-        await operation()
-        return 'complete'
+        return operation()
       })
-    const uploads = await guarded(() => this.reconciliationOwner.cleanupVersionedUploadSources(session), false)
-    if (uploads !== 'complete') return uploads
     for (const apply of actions) {
       await new Promise<void>((resolve) => setImmediate(resolve))
-      const outcome = await guarded(apply, true)
+      // Try Artifact ownership before the catalog fence; a busy writer never queues here.
+      const outcome = await guarded(() => apply(commit))
       if (outcome !== 'complete') return outcome
     }
+    const uploads = await guarded(async () => {
+      if (!await commit(async () => undefined)) return 'stale'
+      // Verified legacy-source cleanup hashes files under the Session lane, never globally.
+      await this.reconciliationOwner.cleanupVersionedUploadSources(session)
+      return 'complete'
+    })
+    if (uploads !== 'complete') return uploads
     return 'complete'
   }
 

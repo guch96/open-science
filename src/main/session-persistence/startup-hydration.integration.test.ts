@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, access, stat, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -21,6 +21,7 @@ import { SessionProjectionRepository } from './projection'
 import { SessionPersistenceCoordinator, type SessionFileIndex } from './coordinator'
 import { composeSessionProjection } from '../composition/session-projection'
 import { materializeSessionConversationGraph, type PersistedChatSession } from '../../shared/session-persistence'
+import { ArtifactProvenanceRepository } from '../artifacts/provenance-repository'
 import { RuntimeSessionOwner } from './runtime-session-owner'
 import { initializeManagedWorkspaceOwnership, finalizeManagedWorkspaceOwnership, planProvisionalManagedWorkspaceReconciliation } from '../storage/managed-workspace-ownership'
 
@@ -113,7 +114,7 @@ async function createStartupHarness(dependencies: ConstructorParameters<typeof S
     auxiliaryUsageRecorder: {},
     archiveCoordinator: {}
   } as unknown as Parameters<typeof composeSessionProjection>[0])
-  return { composed, coordinator, repository, projection, makeSession, reads, owners, historical }
+  return { composed, coordinator, repository, projection, makeSession, reads, owners, historical, fileIndex }
 }
 
 it('loads selected context while pending and idle history remain summary-only until deferred work starts', async () => {
@@ -141,6 +142,13 @@ it('loads selected context while pending and idle history remain summary-only un
   expect(hydrated.map(({ id }) => id)).toEqual(['selected'])
   expect(reads.some((path) => path.endsWith('/interrupted.json'))).toBe(false)
   expect(catalog.sessions.find(({ id }) => id === 'interrupted')?.status).toBe('running')
+  const worker = composed.createDeferredRecovery(async () => undefined)
+  worker.start()
+  await worker.settled()
+  expect(diagnostics.debug).toHaveBeenCalledWith('deferred Session recovered', expect.objectContaining({
+    sessionBytes: expect.any(Number), authorityReadMs: expect.any(Number), jsonParseMs: expect.any(Number),
+    prepareMs: expect.any(Number), commitMs: expect.any(Number), planningMs: expect.any(Number)
+  }))
   expect(
     await composed.sessionPersistenceBackend.loadOne({
       projectId: 'project',
@@ -386,11 +394,54 @@ it('refreshes only confirmed missing summaries and preserves authority published
   const { repository, projection, historical } = await createStartupHarness()
   const authority = join(root, 'sessions', historical.projectId, `${historical.id}.json`)
   await rm(authority)
-  expect(await repository.loadSessionRecoverySnapshot(historical.projectId, historical.id)).toEqual({ status: 'missing' })
+  expect(await repository.loadSessionWithDiagnostics(historical.projectId, historical.id)).toEqual({ status: 'missing' })
   await repository.saveSession(historical)
   expect(await repository.reconcileMissingSessionProjection(historical.projectId, historical.id)).toBe(false)
   expect((await projection.list()).some(({ id }) => id === historical.id)).toBe(true)
   await writeFile(authority, '{invalid')
   expect(await repository.reconcileMissingSessionProjection(historical.projectId, historical.id)).toBe(false)
   expect((await projection.list()).some(({ id }) => id === historical.id)).toBe(true)
+})
+
+
+it('yields a busy Artifact writer before catalog locking while same-Project terminal saves remain durable', async () => {
+  const h = await createStartupHarness()
+  const directory = join(root, 'artifacts/project/historical/.provenance/.staging/versions/orphan')
+  await mkdir(directory, { recursive: true })
+  const old = new Date(Date.now() - 7200000)
+  await utimes(directory, old, old)
+  const cutoff = (await stat(directory)).ctimeMs + 1
+  const artifacts = new ArtifactProvenanceRepository({ storageRoot: root, getClient: async () => client, now: () => new Date(cutoff + 7200000) })
+  const coordinator = new SessionPersistenceCoordinator(h.repository, h.fileIndex, undefined, undefined, undefined, artifacts)
+  const prepared = await coordinator.prepareSessionRecovery('project', 'historical')
+  let entered!: () => void
+  let release!: () => void
+  const enteredPromise = new Promise<void>((resolve) => { entered = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const writer = artifacts.withSessionMutation({ projectId: 'project', appSessionId: 'historical' }, async () => { entered(); await gate })
+  await enteredPromise
+  const guard = vi.fn(async (apply: () => Promise<void>) => { await apply(); return true })
+  const cleanup = coordinator.cleanupRecoveredSession(prepared!, coordinator.recoveryCatalogGeneration(), guard, cutoff, () => false)
+  try {
+    await expect(Promise.race([cleanup, new Promise((resolve) => setTimeout(() => resolve('blocked'), 500))])).resolves.toBe('busy')
+    expect(guard).not.toHaveBeenCalled()
+    const active = await h.repository.saveSession(materializeSessionConversationGraph({
+      ...h.makeSession('active'), status: 'running', activeRun: { promptMessageId: 'active-message', startedAt: 1 }
+    }))
+    const graph = active.conversationGraph!
+    const owner = new RuntimeSessionOwner({
+      loadSession: (key) => coordinator.loadSessionForContinuation(key.projectId, key.sessionId),
+      mutateSession: (key, mutate, committed) => coordinator.mutateRuntimeSession(key, mutate, committed),
+      finalizeArtifacts: async () => [], scheduleFlush: () => () => undefined, now: () => 10
+    })
+    await owner.begin({ projectId: 'project', sessionId: 'active', promptMessageId: 'active-message', agentFrameId: graph.rootFrameId, messageBranchId: graph.branches[0].id, runtimeSegmentId: graph.runtimeSegments[0].id, executionId: 'execution' })
+    await owner.commitTerminal({ id: 'terminal', timestamp: 20, sessionId: 'active', promptMessageId: 'active-message', promptExecutionId: 'execution', kind: 'stop', level: 'info', text: 'end_turn' }, () => undefined)
+    expect(await new SessionRepository(root).loadSession('project', 'active')).toMatchObject({ status: 'idle' })
+  } finally {
+    release()
+    await writer
+    await cleanup
+  }
+  await expect(coordinator.cleanupRecoveredSession(prepared!, coordinator.recoveryCatalogGeneration(), guard, cutoff, () => false)).resolves.toBe('complete')
+  await expect(access(directory)).rejects.toThrow()
 })

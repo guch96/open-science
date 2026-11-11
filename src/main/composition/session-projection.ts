@@ -352,10 +352,16 @@ export function composeSessionProjection({
       await new Promise<void>((resolve) => setImmediate(resolve))
       if (cancelled()) return
       try {
-        const prepared = await sessionPersistenceCoordinator.prepareSessionRecovery(reference.projectId, reference.id)
-        if (prepared?.status !== 'prepared' || prepared.expectedRevision !== reference.revision) return
-        const result = await sessionPersistenceCoordinator.cleanupRecoveredSession(prepared, generation, guard, recoveryStartupCutoff, cancelled)
-        if (result === 'stale') return
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (cancelled()) return
+          const prepared = await sessionPersistenceCoordinator.prepareSessionRecovery(reference.projectId, reference.id)
+          if (prepared?.status !== 'prepared' || prepared.expectedRevision !== reference.revision) return
+          const result = await sessionPersistenceCoordinator.cleanupRecoveredSession(prepared, generation, guard, recoveryStartupCutoff, cancelled)
+          if (result === 'stale') return
+          if (result === 'complete') break
+          if (attempt === 2) throw new Error('Deferred Session source cleanup remains busy.')
+          await new Promise<void>((resolve) => setTimeout(resolve, attempt === 0 ? 250 : 1000))
+        }
       } catch (error) {
         failures.push(error)
       }

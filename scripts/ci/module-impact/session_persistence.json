@@ -93,7 +93,8 @@
     "src/main/session-persistence/attention-projection.test.ts",
     "src/main/session-persistence/turn-outcome-authority.test.ts",
     "src/main/session-persistence/flush-protocol.ts",
-    "src/main/session-persistence/conversation-pdf-electron.ts"
+    "src/main/session-persistence/conversation-pdf-electron.ts",
+    "src/main/session-persistence/deferred-recovery.ts"
   ],
   "interfacePaths": [
     "src/main/session-persistence/coordinator.ts",
@@ -122,9 +123,12 @@
     "src/main/session-persistence/runtime-session-owner.ts",
     "src/main/session-persistence/runtime-writer.ts",
     "src/main/session-persistence/flush-protocol.ts",
-    "src/main/session-persistence/conversation-pdf-electron.ts"
+    "src/main/session-persistence/conversation-pdf-electron.ts",
+    "src/main/session-persistence/deferred-recovery.ts"
   ],
-  "consumerModules": ["project_lifecycle"],
+  "consumerModules": [
+    "project_lifecycle"
+  ],
   "testFiles": {
     "owner": [
       "src/main/session-persistence/coordinator.architecture.test.ts",
@@ -627,6 +631,10 @@
       "src/main/web-service/session-payload.integration.test.ts"
     ]
   },
-  "capabilityOverlays": ["windows_sensitive", "e2e_regressions", "e2e_delegation"],
+  "capabilityOverlays": [
+    "windows_sensitive",
+    "e2e_regressions",
+    "e2e_delegation"
+  ],
   "fallbackCapability": "main_runtime"
 }
