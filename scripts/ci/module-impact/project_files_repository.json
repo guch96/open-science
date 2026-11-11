@@ -23,6 +23,7 @@
       "src/main/project-files/host-artifact-catalog.test.ts"
     ],
     "contract": [
+      "src/main/session-persistence/deletion-integration.test.ts",
       "src/main/project-files/ipc.test.ts",
       "src/preload/index.test.ts",
       "src/renderer/web/api-installer.test.ts",
@@ -37,7 +38,6 @@
       "src/main/session-persistence/runtime-session-owner.test.ts",
       "src/main/session-plan/adversarial-session-plan.test.ts",
       "src/main/session-persistence/coordinator.test.ts",
-      "src/main/session-persistence/deletion-integration.test.ts",
       "src/main/session-persistence/artifact-finalization-recovery.integration.test.ts",
       "src/main/acp/application-commands.test.ts",
       "src/main/acp/artifact-code-reconstruction-runner.test.ts",

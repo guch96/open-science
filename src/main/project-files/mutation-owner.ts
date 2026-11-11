@@ -387,12 +387,21 @@ class ProjectFilesMutationOwner {
         retainedOrigins.map((origin) => sessionKey(origin.projectId, origin.sessionId))
       )
 
+      const restorableOriginKeys = new Set(
+        retainedOrigins
+          .filter((origin) => origin.state !== 'active')
+          .map((origin) => sessionKey(origin.projectId, origin.sessionId))
+      )
+
       for (const indexed of indexedSessions) {
         try {
           const key = sessionKey(indexed.projectId, indexed.sessionId)
           const isActive = activeKeys.has(key) || retainedKeys.has(key)
 
-          if (isActive && indexed.deletedAt !== null) {
+          // An active import witness preserves published rows but cannot reverse an explicit
+          // soft-delete receipt if JSON removal committed before provenance cleanup completed.
+          const mayRestore = activeKeys.has(key) || restorableOriginKeys.has(key)
+          if (mayRestore && indexed.deletedAt !== null) {
             await client.$transaction([
               client.managedFile.updateMany({
                 where: {
