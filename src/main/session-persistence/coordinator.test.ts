@@ -4953,6 +4953,8 @@ describe('SessionPersistenceCoordinator', () => {
       'operation phase',
       'operation phase',
       'operation phase',
+      'operation phase',
+      'operation phase',
       'operation completed'
     ])
     expect(
@@ -4965,7 +4967,9 @@ describe('SessionPersistenceCoordinator', () => {
       'recover-delegation',
       'reconcile-unread-sessions',
       'reconcile-derived-state',
-      'reconcile-derived-state'
+      'index-work',
+      'index-work-complete',
+      'index-work-complete'
     ])
     expect(log.info).toHaveBeenLastCalledWith(
       'operation completed',
@@ -4974,7 +4978,7 @@ describe('SessionPersistenceCoordinator', () => {
         operationId: expect.any(String),
         mode: 'reconcile',
         startupCleanupEligible: true,
-        phase: 'reconcile-derived-state',
+        phase: 'index-work-complete',
         outcome: 'completed',
         status: 'ready',
         sessionCount: 1,
@@ -6377,7 +6381,7 @@ describe('SessionPersistenceCoordinator', () => {
         operationId: expect.any(String),
         mode: 'reconcile',
         startupCleanupEligible: true,
-        phase: 'reconcile-derived-state',
+        phase: 'index-work',
         outcome: 'failed',
         status: 'degraded',
         hydrationAvailable: true,

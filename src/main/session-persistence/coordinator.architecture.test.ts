@@ -554,6 +554,7 @@ describe('Session persistence coordinator architecture', () => {
         'DelegatedWorkRecordCommands',
         'PatchSessionRuntimeContextCommand',
         'PreparedSessionRecovery',
+        'RecoveredSessionReference',
         'ProjectSessionDeletionResult',
         'PublishedSessionHandoff',
         'SessionCatalog',

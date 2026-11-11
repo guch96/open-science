@@ -360,6 +360,10 @@ it.each(['snapshot', 'commit-read', 'index-effects'] as const)(
     const workflow = h.composed.createDeferredRecovery(async () => undefined)
     workflow.start()
     await entered
+    const historyNavigation = h.composed.sessionPersistenceBackend.loadOne({
+      projectId: 'project',
+      sessionId: 'interrupted'
+    })
     let catalogReady = false
     const catalogDuringRecovery = h.composed.sessionPersistenceBackend.list!().then((result) => {
       catalogReady = true
@@ -393,6 +397,7 @@ it.each(['snapshot', 'commit-read', 'index-effects'] as const)(
       await terminal
       await workflow.settled()
       await catalogDuringRecovery
+      await historyNavigation
       await workflow.dispose()
       await h.coordinator.readSessionSnapshot('project', 'active')
     }

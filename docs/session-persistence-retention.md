@@ -75,7 +75,12 @@ drains. Foreground saves remain admissible meanwhile; subsequent recovery waits 
 pending globals, whose original order and failure isolation are retained. Package publication also
 waits for existing recovery before reserving the ordinary Project queue, preventing an import
 waiting on history from blocking later foreground saves. Later recovery waits behind admitted
-publication; explicit Project deletion retains its exclusive lifecycle boundary. Ready-list metadata uses
+publication. An ordinary request for the Session currently being recovered also waits before
+reserving the Project save queue; opening that history cannot convoy another Session's terminal
+save. Direct Project queries and deletion requests use the same delayed admission, then retain their
+exclusive lifecycle boundary. Deferred admissions snapshot earlier predecessors to preserve FIFO
+and rejection isolation without forming cycles with later requests; further recovery waits behind
+these pending foreground/lifecycle operations. Ready-list metadata uses
 a synchronous generation-checked replacement, preserving newer live metadata and marking it
 incomplete if the summary snapshot became stale. Ordered metadata snapshots retain their existing
 scheduler boundary.

@@ -4,12 +4,8 @@ import {
   type PersistedChatSession,
   type SessionSummary
 } from '../../shared/session-persistence'
-import type { PreparedSessionRecovery } from './coordinator'
-
-export type RecoveredSessionReference = Pick<
-  PersistedChatSession,
-  'id' | 'projectId' | 'cwd' | 'revision' | 'updatedAt' | 'archivedAt'
->
+import type { PreparedSessionRecovery, RecoveredSessionReference } from './coordinator'
+export type { RecoveredSessionReference } from './coordinator'
 
 type RecoveryDependencies = {
   list(): Promise<readonly SessionSummary[]>

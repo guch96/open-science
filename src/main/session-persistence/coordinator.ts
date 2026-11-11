@@ -54,7 +54,6 @@ import type { SessionDeletionReceipt } from '../artifacts/provenance-message-sna
 import type { ManagedFileSoftDeleteToken } from '../project-files/repository'
 import * as computeHostAccess from '../compute/session-compute-host-access'
 import type { ProjectSessionDeletionState, SessionRecoverySnapshot } from './repository'
-import type { RecoveredSessionReference } from './deferred-recovery'
 import { createLogger, diagnosticErrorFields, type Logger } from '@aipoch/diagnostics/node'
 import { startDiagnosticOperation } from '@aipoch/diagnostics/node'
 import type { AcpRuntimeEvent } from '../../shared/acp'
@@ -225,6 +224,11 @@ const emitRecoverableDiagnostic = (
 }
 
 type SessionAuthorityScan = Awaited<ReturnType<SessionMutationRepository['loadAllWithDiagnostics']>>
+
+type RecoveredSessionReference = Pick<
+  PersistedChatSession,
+  'id' | 'projectId' | 'cwd' | 'revision' | 'updatedAt' | 'archivedAt'
+>
 
 type PreparedSessionRecovery = Readonly<
   { projectId: string; sessionId: string; metrics?: SessionRecoverySnapshot['metrics'] } & (
@@ -1993,6 +1997,7 @@ type SessionDeletion = Pick<
 export { SessionPersistenceCoordinator, SessionRuntimeContextRevisionConflictError }
 export type {
   PreparedSessionRecovery,
+  RecoveredSessionReference,
   SessionPersistenceCommands,
   ComputeJobDeletionParticipant,
   DelegatedWorkRecordCommands,
