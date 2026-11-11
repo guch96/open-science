@@ -166,6 +166,8 @@ type SessionScanMetrics = {
   projectDirectoryCount: number
   sessionFileCount: number
   sessionBytes: number
+  authorityReadMs: number
+  jsonParseMs: number
 }
 
 type PreparedSessionWrite = {
@@ -626,7 +628,7 @@ class SessionRepository {
       sessions: SessionSummary[]
       recoveredSessions?: PersistedChatSession[]
     }> => {
-      const summaries = await this.operationScheduler.runGlobal(() => this.projection!.list())
+      const summaries = await this.listProjectionSummaries()
       if (recoverSession && !(await this.hasOversizedProjectedSession(summaries))) {
         const recoveredSessions: PersistedChatSession[] = []
         for (const summary of summaries.filter((candidate) => candidate.needsStartupRecovery)) {
@@ -634,7 +636,7 @@ class SessionRepository {
           if (session) recoveredSessions.push(session)
         }
         return {
-          sessions: await this.operationScheduler.runGlobal(() => this.projection!.list()),
+          sessions: await this.listProjectionSummaries(),
           recoveredSessions
         }
       }
@@ -800,11 +802,31 @@ class SessionRepository {
     }
   }
 
+  private async listProjectionSummaries(): Promise<SessionSummary[]> {
+    const queuedAt = performance.now()
+    return this.operationScheduler.runGlobal(async () => {
+      const startedAt = performance.now()
+      const summaries = await this.projection!.list()
+      try {
+        createLogger('session-persistence').debug('Session summaries loaded', {
+          mode: 'summary',
+          sessionCount: summaries.length,
+          candidateCount: summaries.filter((summary) => summary.needsStartupRecovery).length,
+          queueWaitMs: startedAt - queuedAt,
+          summaryReadMs: performance.now() - startedAt
+        })
+      } catch {
+        // Diagnostics must not affect catalog availability.
+      }
+      return summaries
+    })
+  }
+
   async loadSessionSummaries(): Promise<SessionSummary[]> {
     if (!this.projection || !(await this.projection.isReady())) {
       throw new Error('Session projection is not ready.')
     }
-    return this.operationScheduler.runGlobal(() => this.projection!.list())
+    return this.listProjectionSummaries()
   }
 
   private async hasOversizedProjectedSession(
@@ -1049,7 +1071,9 @@ class SessionRepository {
     const scanMetrics: SessionScanMetrics = {
       projectDirectoryCount: 0,
       sessionFileCount: 0,
-      sessionBytes: 0
+      sessionBytes: 0,
+      authorityReadMs: 0,
+      jsonParseMs: 0
     }
     const { sessions, isComplete, warnings } = await this.readAllSessions({
       quarantineInvalidFiles,
@@ -2109,6 +2133,17 @@ class SessionRepository {
         }
       }
     }
+    const readContents = async (path: string, maxBytes?: number): Promise<string> => {
+      const startedAt = performance.now()
+      try {
+        return await (maxBytes === undefined
+          ? this.dependencies.readSessionFile(path)
+          : this.dependencies.readSessionFileWithinLimit(path, maxBytes))
+      } finally {
+        if (options.scanMetrics)
+          options.scanMetrics.authorityReadMs += performance.now() - startedAt
+      }
+    }
     let read:
       | { status: 'found'; value: { session: PersistedChatSession; bytes: number } }
       | { status: 'missing' }
@@ -2116,11 +2151,17 @@ class SessionRepository {
       read = await readDurableJsonFile(
         filePath,
         (contents) =>
-          this.decodeSessionContents(filePath, projectId, contents, options.preserveRuntimeState),
+          this.decodeSessionContents(
+            filePath,
+            projectId,
+            contents,
+            options.preserveRuntimeState,
+            options.scanMetrics
+          ),
         {
           readDirectoryEntries: this.dependencies.readDirectoryEntries,
-          readFile: this.dependencies.readSessionFile,
-          readFileWithinLimit: this.dependencies.readSessionFileWithinLimit,
+          readFile: (path) => readContents(path),
+          readFileWithinLimit: readContents,
           remove: this.dependencies.remove,
           rename: this.dependencies.renameFile,
           wait: this.dependencies.wait
@@ -2220,9 +2261,17 @@ class SessionRepository {
     filePath: string,
     projectId: string,
     contents: string,
-    preserveRuntimeState?: boolean
+    preserveRuntimeState?: boolean,
+    scanMetrics?: SessionScanMetrics
   ): { session: PersistedChatSession; bytes: number } {
-    const decoded = decodeSessionFile(JSON.parse(contents) as unknown, {
+    const parseStartedAt = performance.now()
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(contents) as unknown
+    } finally {
+      if (scanMetrics) scanMetrics.jsonParseMs += performance.now() - parseStartedAt
+    }
+    const decoded = decodeSessionFile(parsed, {
       preserveLegacyUploadPaths: true,
       preserveRuntimeState:
         preserveRuntimeState !== undefined

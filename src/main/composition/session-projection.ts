@@ -310,6 +310,7 @@ export function composeSessionProjection({
     }
   }
   const loadStartupSessions = async (): Promise<PersistedChatSession[]> => {
+    const startedAt = performance.now()
     const projection = await ensureSessionProjection()
     // An exceptional complete rebuild has already performed recovery. Never reinterpret a
     // failed/incomplete catalog as a complete candidate set for mutating details recovery.
@@ -329,6 +330,8 @@ export function composeSessionProjection({
     }
     startupRecoveryComplete = true
     createLogger('session-persistence').info('startup Session catalog hydrated', {
+      mode: 'startup',
+      durationMs: performance.now() - startedAt,
       summaryCount: projection.sessions.length,
       hydratedCount: candidates.length,
       rebuiltCatalog: projection.result !== undefined

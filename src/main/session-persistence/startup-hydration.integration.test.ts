@@ -5,6 +5,14 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { PrismaClient } from '@prisma/client'
 
 vi.mock('electron', () => ({ app: { getPath: () => '/home/user', isPackaged: true } }))
+const diagnostics = vi.hoisted(() => ({ debug: vi.fn() }))
+vi.mock('@aipoch/diagnostics/node', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@aipoch/diagnostics/node')>()
+  return {
+    ...actual,
+    createLogger: (scope: string) => ({ ...actual.createLogger(scope), debug: diagnostics.debug })
+  }
+})
 
 import { initDataRoot } from '../storage-root'
 import { createProjectDbClient, migrateApplicationDatabase } from '../projects/prisma-client'
@@ -103,6 +111,17 @@ it('hydrates interrupted authority without reading idle history or removing its 
     archiveCoordinator: {}
   } as unknown as Parameters<typeof composeSessionProjection>[0])
   const hydrated = await composed.loadStartupSessions()
+  expect(diagnostics.debug).toHaveBeenCalledWith(
+    'Session summaries loaded',
+    expect.objectContaining({
+      mode: 'summary',
+      sessionCount: 3,
+      candidateCount: 1,
+      queueWaitMs: expect.any(Number),
+      summaryReadMs: expect.any(Number)
+    })
+  )
+  expect(JSON.stringify(diagnostics.debug.mock.calls)).not.toContain('History for historical')
   const catalog = await composed.sessionPersistenceBackend.list!()
   expect(catalog.sessions.map(({ id }) => id).sort()).toEqual([
     'historical',
