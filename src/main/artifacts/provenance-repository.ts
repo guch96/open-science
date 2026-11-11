@@ -1014,12 +1014,18 @@ class ArtifactProvenanceRepository {
       startupCutoff
     )
     return actions.map((apply) => async (commit) => {
+      let removeDetached: (() => Promise<void>) | undefined
       const reservation = await this.versionWriter.tryWithSessionWrite(
         { projectId, appSessionId },
-        () => commit(apply)
+        () =>
+          commit(async () => {
+            removeDetached = await apply()
+          })
       )
       if (!reservation.acquired) return 'busy'
-      return reservation.result ? 'complete' : 'stale'
+      if (!reservation.result) return 'stale'
+      await removeDetached?.()
+      return 'complete'
     })
   }
 

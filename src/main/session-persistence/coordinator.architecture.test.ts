@@ -755,7 +755,6 @@ describe('Session persistence coordinator architecture', () => {
         'reserveSessionExport',
         'retryArtifactFinalization',
         'commitRecoveredArtifactReferences',
-        'runSessionMutation',
         'saveSession',
         'saveSessionSpecialistBinding',
         'saveSideChatProjection',
@@ -770,6 +769,7 @@ describe('Session persistence coordinator architecture', () => {
         'updateSessionConfiguration',
         'updateArchive'
       ],
+      runSessionProjectExclusive: ['runSessionMutation'],
       runSessionThenGlobalIfNeeded: ['deleteSession'],
       runSessionIdentity: ['sessionProjectId']
     }
@@ -824,11 +824,18 @@ describe('Session persistence coordinator architecture', () => {
         const text = method.getText(facadeFile)
         expect(text).toContain(
           name === 'cleanupRecoveredSession'
-            ? 'this.operationScheduler.runSession'
+            ? 'this.operationScheduler.runSessionRecovery'
             : 'this.operationScheduler.runGlobal'
         )
         expect(text).toContain('this.recoveryCatalogGeneration() !== expectedGeneration')
         expect(text).toContain('cancelled()')
+        continue
+      }
+      if (name === 'replaceSessionMetadata') {
+        const text = method.getText(facadeFile)
+        expect(text).toContain('this.recoveryCatalogGeneration() === expectedGeneration')
+        expect(text).toContain('this.operationScheduler.runGlobal')
+        expect(text).toContain('this.stateOwner.metadataSnapshot().sessions, false')
         continue
       }
       if (name === 'recoverStartupSession') {
@@ -846,7 +853,9 @@ describe('Session persistence coordinator architecture', () => {
           .filter(isCallExpression)
           .map((call) => call.expression.getText(facadeFile))
         expect(calls.filter((call) => call.startsWith('this.operationScheduler.'))).toEqual([
-          'this.operationScheduler.runSession'
+          name === 'prepareSessionRecovery'
+            ? 'this.operationScheduler.runSession'
+            : 'this.operationScheduler.runSessionRecovery'
         ])
         if (name === 'prepareSessionRecovery') {
           expect(calledOwnerMethods(method)).toEqual([])
@@ -1241,7 +1250,12 @@ describe('Session persistence coordinator architecture', () => {
       patchSessionRuntimeContext: ['stateOwner.patchRuntimeContext'],
       pruneSessionEnabledComputeHosts: ['stateOwner.pruneEnabledComputeHosts'],
       readSessionRuntimeContext: ['stateOwner.readRuntimeContext'],
-      replaceSessionMetadata: ['stateOwner.replaceMetadata'],
+      replaceSessionMetadata: [
+        'stateOwner.metadataSnapshot',
+        'stateOwner.replaceMetadata',
+        'stateOwner.replaceMetadata',
+        'stateOwner.replaceMetadata'
+      ],
       saveSession: [
         'stateOwner.assertRuntimeTerminalWriteAvailable',
         'stateOwner.listRuntimeTerminalFailures',

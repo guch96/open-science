@@ -1,6 +1,7 @@
 import { bindManagedPdfVersion } from '../pdf-annotations/source-bindings'
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 import type { PrismaClient } from '@prisma/client'
 
@@ -93,7 +94,7 @@ export class ArtifactProvenanceStagingRecovery {
     projectId: string,
     appSessionId: string,
     startupCutoff: number
-  ): Promise<Array<() => Promise<void>>> {
+  ): Promise<Array<() => Promise<(() => Promise<void>) | undefined>>> {
     const root = resolveStorageKey(
       this.options.storageRoot,
       storageKey('artifacts', projectId, appSessionId, '.provenance', '.staging', 'versions')
@@ -103,7 +104,22 @@ export class ArtifactProvenanceStagingRecovery {
       throw error
     })
     const client = await this.options.getClient()
-    const actions: Array<() => Promise<void>> = []
+    const retiredRoot = join(dirname(root), '.retired-orphans')
+    const retiredRootInfo = await lstat(retiredRoot).catch((error: unknown) => {
+      if (errorCode(error) === 'ENOENT') return undefined
+      throw error
+    })
+    if (retiredRootInfo && (!retiredRootInfo.isDirectory() || retiredRootInfo.isSymbolicLink()))
+      throw new Error('Artifact retired staging path is unsafe.')
+    const retired = await readdir(retiredRoot, { withFileTypes: true }).catch((error: unknown) => {
+      if (errorCode(error) === 'ENOENT') return []
+      throw error
+    })
+    const actions: Array<() => Promise<(() => Promise<void>) | undefined>> = retired
+      .filter((entry) => entry.isDirectory() && /^[0-9a-f-]{36}$/.test(entry.name))
+      .map((entry) => async () => async () => {
+        await rm(join(retiredRoot, entry.name), { recursive: true, force: true })
+      })
     for (const candidate of candidates) {
       if (!candidate.isDirectory() || !SAFE_SEGMENT_PATTERN.test(candidate.name)) continue
       const path = join(root, candidate.name)
@@ -126,6 +142,11 @@ export class ArtifactProvenanceStagingRecovery {
         })
       )
         continue
+      await mkdir(retiredRoot, { recursive: true })
+      const retiredInfo = await lstat(retiredRoot)
+      if (!retiredInfo.isDirectory() || retiredInfo.isSymbolicLink())
+        throw new Error('Artifact retired staging path is unsafe.')
+      const retiredPath = join(retiredRoot, randomUUID())
       actions.push(async () => {
         // A Version may have acquired authority or replaced/touched its directory after planning.
         // Neither case authorizes deleting the originally observed rowless staging candidate.
@@ -153,7 +174,14 @@ export class ArtifactProvenanceStagingRecovery {
           this.options.now().getTime() - current.mtimeMs < ORPHAN_STAGING_GRACE_MS
         )
           return
-        await rm(path, { recursive: true, force: true })
+        // Atomic detachment is the only destructive action inside the catalog fence. Never copy
+        // on EXDEV/rename failure. The private namespace is rediscovered after interruption.
+        await rename(path, retiredPath)
+        await this.options.durability.syncDirectory(root)
+        await this.options.durability.syncDirectory(retiredRoot)
+        return async () => {
+          await rm(retiredPath, { recursive: true, force: true })
+        }
       })
     }
     return actions

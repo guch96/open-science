@@ -154,6 +154,10 @@ type SessionMutationRepository = {
     sessionId: string
   ): Promise<SessionRecoverySnapshot>
   assertSessionIdentityOwnership(sessionId: string, expectedProjectId: string): Promise<void>
+  saveRecoveredSession?(
+    session: PersistedChatSession,
+    expectedRevision: number
+  ): Promise<PersistedChatSession>
   saveSession(
     session: PersistedChatSession,
     expectedRevision?: number,
@@ -664,7 +668,17 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     return this.operationScheduler.runGlobal(async () => this.stateOwner.metadataSnapshot())
   }
 
-  replaceSessionMetadata(sessions: readonly SessionMetadata[], isComplete: boolean): Promise<void> {
+  replaceSessionMetadata(
+    sessions: readonly SessionMetadata[],
+    isComplete: boolean,
+    expectedGeneration?: number
+  ): Promise<void> {
+    if (expectedGeneration !== undefined) {
+      if (this.recoveryCatalogGeneration() === expectedGeneration)
+        this.stateOwner.replaceMetadata(sessions, isComplete)
+      else this.stateOwner.replaceMetadata(this.stateOwner.metadataSnapshot().sessions, false)
+      return Promise.resolve()
+    }
     return this.operationScheduler.runGlobal(async () => {
       this.stateOwner.replaceMetadata(sessions, isComplete)
     })
@@ -737,7 +751,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     const guarded = (
       operation: () => Promise<'complete' | 'busy' | 'stale'>
     ): Promise<'complete' | 'busy' | 'stale'> =>
-      this.operationScheduler.runSession(projectId, sessionId, async () => {
+      this.operationScheduler.runSessionRecovery(projectId, sessionId, async () => {
         if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return 'stale'
         this.assertMutable(projectId, sessionId, 'mutate')
         if (
@@ -751,7 +765,22 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     for (const apply of actions) {
       await new Promise<void>((resolve) => setImmediate(resolve))
       // Try Artifact ownership before the catalog fence; a busy writer never queues here.
-      const outcome = await guarded(() => apply(commit))
+      let applying: Promise<'complete' | 'stale' | 'busy'> | undefined
+      let detached!: (outcome: 'complete' | 'stale') => void
+      const detachedPromise = new Promise<'complete' | 'stale'>((resolve) => {
+        detached = resolve
+      })
+      const outcome = await guarded(() => {
+        applying = apply(async (operation) => {
+          const accepted = await commit(operation)
+          // The private directory no longer belongs to live Session authority. Release the Session
+          // reservation at this handoff; recursive physical removal may continue independently.
+          detached(accepted ? 'complete' : 'stale')
+          return accepted
+        })
+        return Promise.race([applying, detachedPromise])
+      })
+      await applying
       if (outcome !== 'complete') return outcome
     }
     const uploads = await guarded(async () => {
@@ -796,7 +825,18 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       return false
     for (const apply of workspaceActions) {
       await new Promise<void>((resolve) => setImmediate(resolve))
-      if (!(await guarded(apply))) return false
+      let removeDetached: (() => Promise<void>) | undefined
+      if (
+        !(await guarded(async () => {
+          removeDetached = await apply()
+        }))
+      )
+        return false
+      try {
+        await removeDetached?.()
+      } catch (error) {
+        failures.push(error)
+      }
     }
     if (failures.length)
       throw new AggregateError(failures, 'Session catalog cleanup is incomplete.')
@@ -857,38 +897,46 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     })
     operation.phase('wait-for-session')
     try {
-      const result = await this.operationScheduler.runSession(projectId, sessionId, async () => {
-        operation.phase('revalidate-authority', { queueWaitMs: Math.max(0, Date.now() - queuedAt) })
-        this.assertMutable(projectId, sessionId, 'mutate')
-        const loaded = await this.repository.loadSessionWithDiagnostics(projectId, sessionId)
-        if (loaded.status === 'unreadable')
-          throw new Error('Cannot recover a Session whose durable JSON is unreadable.')
-        if (loaded.status !== 'found') return undefined
-        const actualRevision = sessionRevision(loaded.session)
-        const expectedRevision = preparedRevision ?? actualRevision
-        if (actualRevision !== expectedRevision)
-          throw new SessionRevisionConflictError(expectedRevision, actualRevision)
-        // Normal reads preserve active runtime state. Never restart an owned run or preparation.
-        if (loaded.session.activeRun || this.stateOwner.ownsPromptPreparation(loaded.session))
-          return loaded.session
-        // Runtime ownership can change without a JSON revision. Replan from the validated read so
-        // stale restore normalization cannot resurrect a released run or disturb a new owner.
-        const recovered = recoverInterruptedDelegatedWorkSession(loaded.session)
-        const session = recovered.interrupted.length
-          ? await saveSessionWithRevision(this.repository, recovered.session, expectedRevision)
-          : loaded.session
-        const outcome = await this.reconciliationOwner.reconcileLoadedSessions({
-          result: { sessions: [session], manifest: { version: 1 } },
-          allowDestructiveCleanup: false,
-          scope: 'session',
-          phase: (phase) => operation.phase(phase),
-          onPermissionFailure: () => undefined
-        })
-        if (outcome.status === 'degraded') throw outcome.failure
-        const persisted = outcome.result.sessions[0]
-        this.stateOwner.recordSession(persisted)
-        return persisted
-      })
+      const result = await this.operationScheduler.runSessionRecovery(
+        projectId,
+        sessionId,
+        async () => {
+          operation.phase('revalidate-authority', {
+            queueWaitMs: Math.max(0, Date.now() - queuedAt)
+          })
+          this.assertMutable(projectId, sessionId, 'mutate')
+          const loaded = await this.repository.loadSessionWithDiagnostics(projectId, sessionId)
+          if (loaded.status === 'unreadable')
+            throw new Error('Cannot recover a Session whose durable JSON is unreadable.')
+          if (loaded.status !== 'found') return undefined
+          const actualRevision = sessionRevision(loaded.session)
+          const expectedRevision = preparedRevision ?? actualRevision
+          if (actualRevision !== expectedRevision)
+            throw new SessionRevisionConflictError(expectedRevision, actualRevision)
+          // Normal reads preserve active runtime state. Never restart an owned run or preparation.
+          if (loaded.session.activeRun || this.stateOwner.ownsPromptPreparation(loaded.session))
+            return loaded.session
+          // Runtime ownership can change without a JSON revision. Replan from the validated read so
+          // stale restore normalization cannot resurrect a released run or disturb a new owner.
+          const recovered = recoverInterruptedDelegatedWorkSession(loaded.session)
+          const session = recovered.interrupted.length
+            ? await (this.repository.saveRecoveredSession
+                ? this.repository.saveRecoveredSession(recovered.session, expectedRevision)
+                : saveSessionWithRevision(this.repository, recovered.session, expectedRevision))
+            : loaded.session
+          const outcome = await this.reconciliationOwner.reconcileLoadedSessions({
+            result: { sessions: [session], manifest: { version: 1 } },
+            allowDestructiveCleanup: false,
+            scope: 'session',
+            phase: (phase) => operation.phase(phase),
+            onPermissionFailure: () => undefined
+          })
+          if (outcome.status === 'degraded') throw outcome.failure
+          const persisted = outcome.result.sessions[0]
+          this.stateOwner.recordSession(persisted)
+          return persisted
+        }
+      )
       operation.complete({ status: result ? 'ready' : 'unavailable', revisionConflicts: 0 })
       return result
     } catch (error) {
@@ -1584,7 +1632,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     sessionId: string,
     mutation: () => Promise<Result>
   ): Promise<Result> {
-    return this.operationScheduler.runSession(projectId, sessionId, async () => {
+    return this.operationScheduler.runSessionProjectExclusive(projectId, sessionId, async () => {
       this.assertMutable(projectId, sessionId, 'mutate')
       try {
         return await mutation()

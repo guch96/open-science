@@ -139,7 +139,7 @@ type SessionWorkspaceOwnership = {
   reconcileProvisional(sessions: readonly PersistedChatSession[]): Promise<void>
   planProvisional?(
     sessions: readonly Pick<PersistedChatSession, 'id' | 'projectId' | 'cwd' | 'updatedAt'>[]
-  ): Promise<Array<() => Promise<void>>>
+  ): Promise<Array<() => Promise<(() => Promise<void>) | undefined>>>
   markProjectRetained(projectId: string): Promise<readonly string[]>
   restoreProjectActive(projectId: string, directories: readonly string[]): Promise<void>
   markRetained(
