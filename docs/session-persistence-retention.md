@@ -72,7 +72,6 @@ Recovery diagnostics use `operation: session-recovery` with prepare/commit/start
 durations, commit `queueWaitMs`, and `revisionConflicts`. They contain no message bodies, titles,
 or paths. These timings distinguish snapshot reading, persistence waiting, and effectful repair.
 
-
 ## Startup and deferred recovery ownership
 
 With a ready derived projection, startup reads Session summaries and the selected Session only.

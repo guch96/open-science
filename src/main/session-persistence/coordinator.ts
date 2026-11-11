@@ -185,7 +185,9 @@ type SessionFileIndex = {
   ): Promise<void>
   softDeleteProject(projectId: string): Promise<ManagedFileSoftDeleteToken>
   reconcileProjectSessions(projectId: string, sessions: PersistedChatSession[]): Promise<void>
-  reconcileActiveSessions(sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]): Promise<void>
+  reconcileActiveSessions(
+    sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<void>
   markReconciliationIncomplete(projectId?: string): void
 }
 
@@ -732,11 +734,18 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     if (prepared.status !== 'prepared') return 'stale'
     const { projectId, sessionId, session } = prepared
     const actions = await this.reconciliationOwner.planOrphanStagingCleanup(session, startupCutoff)
-    const guarded = (operation: () => Promise<'complete' | 'busy' | 'stale'>): Promise<'complete' | 'busy' | 'stale'> =>
+    const guarded = (
+      operation: () => Promise<'complete' | 'busy' | 'stale'>
+    ): Promise<'complete' | 'busy' | 'stale'> =>
       this.operationScheduler.runSession(projectId, sessionId, async () => {
         if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return 'stale'
         this.assertMutable(projectId, sessionId, 'mutate')
-        if (session.activeRun || this.stateOwner.ownsPromptPreparation(session) || this.repository.hasLiveRuntimeSession?.(projectId, sessionId)) return 'busy'
+        if (
+          session.activeRun ||
+          this.stateOwner.ownsPromptPreparation(session) ||
+          this.repository.hasLiveRuntimeSession?.(projectId, sessionId)
+        )
+          return 'busy'
         return operation()
       })
     for (const apply of actions) {
@@ -746,7 +755,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       if (outcome !== 'complete') return outcome
     }
     const uploads = await guarded(async () => {
-      if (!await commit(async () => undefined)) return 'stale'
+      if (!(await commit(async () => undefined))) return 'stale'
       // Verified legacy-source cleanup hashes files under the Session lane, never globally.
       await this.reconciliationOwner.cleanupVersionedUploadSources(session)
       return 'complete'
@@ -762,25 +771,35 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     cancelled: () => boolean = () => false
   ): Promise<boolean> {
     // Directory enumeration and receipt planning run before any catalog commit reservation.
-    const workspaceActions = await this.workspaceOwnership?.planProvisional?.(sessions) ?? []
+    const workspaceActions = (await this.workspaceOwnership?.planProvisional?.(sessions)) ?? []
     const failures: unknown[] = []
-    const guarded = (operation: () => Promise<void>): Promise<boolean> => this.operationScheduler.runGlobal(async () => {
-      if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return false
-      return commit(async () => {
-        try { await operation() } catch (error) { failures.push(error) }
+    const guarded = (operation: () => Promise<void>): Promise<boolean> =>
+      this.operationScheduler.runGlobal(async () => {
+        if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return false
+        return commit(async () => {
+          try {
+            await operation()
+          } catch (error) {
+            failures.push(error)
+          }
+        })
       })
-    })
-    if (!await guarded(async () => {
-      await this.reconciliationOwner.reconcileCatalogIdentities(sessions)
-      await this.sessionDeletionHandlers?.reconcile(
-        sessions.map(({ id }) => id), sessions.filter(({ archivedAt }) => archivedAt !== undefined).map(({ id }) => id)
-      )
-    })) return false
+    if (
+      !(await guarded(async () => {
+        await this.reconciliationOwner.reconcileCatalogIdentities(sessions)
+        await this.sessionDeletionHandlers?.reconcile(
+          sessions.map(({ id }) => id),
+          sessions.filter(({ archivedAt }) => archivedAt !== undefined).map(({ id }) => id)
+        )
+      }))
+    )
+      return false
     for (const apply of workspaceActions) {
       await new Promise<void>((resolve) => setImmediate(resolve))
-      if (!await guarded(apply)) return false
+      if (!(await guarded(apply))) return false
     }
-    if (failures.length) throw new AggregateError(failures, 'Session catalog cleanup is incomplete.')
+    if (failures.length)
+      throw new AggregateError(failures, 'Session catalog cleanup is incomplete.')
     return true
   }
 

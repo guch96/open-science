@@ -343,7 +343,9 @@ class ProjectFilesMutationOwner {
     ])
   }
 
-  async reconcileActiveSessions(sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]): Promise<void> {
+  async reconcileActiveSessions(
+    sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<void> {
     await this.reconcileSessions(sessions)
   }
 

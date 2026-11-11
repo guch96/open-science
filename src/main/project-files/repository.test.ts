@@ -2284,7 +2284,10 @@ describe('ManagedFileIndexRepository', () => {
     })
 
     // Detach the derived index from the native owner to model an actual orphan.
-    await client.fileOriginSession.updateMany({ where: { projectId: PROJECT_ID, sessionId: SESSION_ID }, data: { sessionId: `${SESSION_ID}-native-owner` } })
+    await client.fileOriginSession.updateMany({
+      where: { projectId: PROJECT_ID, sessionId: SESSION_ID },
+      data: { sessionId: `${SESSION_ID}-native-owner` }
+    })
     await repository.reconcileActiveSessions([])
     await repository.reconcileActiveSessions([])
     await expect(repository.getOverview(PROJECT_ID)).resolves.toMatchObject({
@@ -2292,7 +2295,10 @@ describe('ManagedFileIndexRepository', () => {
       isIndexComplete: true
     })
 
-    await client.fileOriginSession.updateMany({ where: { projectId: PROJECT_ID, sessionId: `${SESSION_ID}-native-owner` }, data: { sessionId: SESSION_ID } })
+    await client.fileOriginSession.updateMany({
+      where: { projectId: PROJECT_ID, sessionId: `${SESSION_ID}-native-owner` },
+      data: { sessionId: SESSION_ID }
+    })
     await repository.reconcileActiveSessions([session])
     await repository.reconcileActiveSessions([session])
     await expect(repository.getOverview(PROJECT_ID)).resolves.toMatchObject({
@@ -2352,7 +2358,10 @@ describe('ManagedFileIndexRepository', () => {
     )
 
     // Detach the derived index from the native owner to model an actual orphan.
-    await client.fileOriginSession.updateMany({ where: { projectId: PROJECT_ID, sessionId: SESSION_ID }, data: { sessionId: `${SESSION_ID}-native-owner` } })
+    await client.fileOriginSession.updateMany({
+      where: { projectId: PROJECT_ID, sessionId: SESSION_ID },
+      data: { sessionId: `${SESSION_ID}-native-owner` }
+    })
     await repository.reconcileProjectSessions(PROJECT_ID, [])
 
     await expect(repository.getOverview(PROJECT_ID)).resolves.toMatchObject({ totalCount: 0 })
@@ -3397,19 +3406,37 @@ describe('ManagedFileIndexRepository', () => {
     )
 
     // Detach the derived index from the native owner to model an actual orphan.
-    await client.fileOriginSession.updateMany({ where: { projectId: PROJECT_ID, sessionId: SESSION_ID }, data: { sessionId: `${SESSION_ID}-native-owner` } })
+    await client.fileOriginSession.updateMany({
+      where: { projectId: PROJECT_ID, sessionId: SESSION_ID },
+      data: { sessionId: `${SESSION_ID}-native-owner` }
+    })
     await repository.reconcileActiveSessions([])
 
     await expect(repository.getOverview(PROJECT_ID)).resolves.toMatchObject({ totalCount: 0 })
   })
 
   it('preserves native import rows witnessed before Session JSON publication', async () => {
-    const artifactPath = join(storageRoot, 'artifacts', 'default-project', SESSION_ID, 'message-1', 'result.txt')
+    const artifactPath = join(
+      storageRoot,
+      'artifacts',
+      'default-project',
+      SESSION_ID,
+      'message-1',
+      'result.txt'
+    )
     await writeManagedFile(artifactPath, 'imported')
-    await repository.syncSession(createSession({ artifacts: [
-      { id: 'artifact-1', kind: 'managed-file', path: artifactPath, name: 'result.txt' }
-    ] }))
-    await client.fileOriginSession.upsert({ where: { projectId_sessionId: { projectId: PROJECT_ID, sessionId: SESSION_ID } }, create: { projectId: PROJECT_ID, sessionId: SESSION_ID, state: 'active' }, update: { state: 'active' } })
+    await repository.syncSession(
+      createSession({
+        artifacts: [
+          { id: 'artifact-1', kind: 'managed-file', path: artifactPath, name: 'result.txt' }
+        ]
+      })
+    )
+    await client.fileOriginSession.upsert({
+      where: { projectId_sessionId: { projectId: PROJECT_ID, sessionId: SESSION_ID } },
+      create: { projectId: PROJECT_ID, sessionId: SESSION_ID, state: 'active' },
+      update: { state: 'active' }
+    })
     await repository.reconcileActiveSessions([])
     expect((await repository.getOverview(PROJECT_ID)).totalCount).toBe(1)
   })
@@ -3665,7 +3692,10 @@ describe('ManagedFileIndexRepository', () => {
       })
     )
     // Detach the derived index from the native owner to model an actual orphan.
-    await client.fileOriginSession.updateMany({ where: { projectId: PROJECT_ID, sessionId: SESSION_ID }, data: { sessionId: `${SESSION_ID}-native-owner` } })
+    await client.fileOriginSession.updateMany({
+      where: { projectId: PROJECT_ID, sessionId: SESSION_ID },
+      data: { sessionId: `${SESSION_ID}-native-owner` }
+    })
     let shouldFail = true
     const recoveringRepository = new ManagedFileIndexRepository(
       async () => {

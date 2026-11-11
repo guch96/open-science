@@ -330,7 +330,8 @@ export async function composeSessionAuthority({
       }
     },
     {
-      planProvisional: (sessions) => planProvisionalManagedWorkspaceReconciliation(sessions, managedWorkspaceRecoveryCutoff),
+      planProvisional: (sessions) =>
+        planProvisionalManagedWorkspaceReconciliation(sessions, managedWorkspaceRecoveryCutoff),
       reconcileProvisional: (sessions) =>
         reconcileProvisionalManagedWorkspaces(sessions, managedWorkspaceRecoveryCutoff),
       markProjectRetained: markManagedProjectWorkspacesRetained,

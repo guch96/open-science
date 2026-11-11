@@ -1903,7 +1903,9 @@ describe('Session projection', () => {
 
     expect(loaded.result).toBeUndefined()
     expect(loaded.sessions).toMatchObject([{ id: saved.id }])
-    expect(await repository.loadSessionWithDiagnostics(saved.projectId, saved.id)).toMatchObject({ status: 'unreadable' })
+    expect(await repository.loadSessionWithDiagnostics(saved.projectId, saved.id)).toMatchObject({
+      status: 'unreadable'
+    })
   })
 
   it('removes a stale ready projection after oversized authority is moved out', async () => {
@@ -1964,7 +1966,9 @@ describe('Session projection', () => {
 
     expect(loaded.result).toBeUndefined()
     expect(loaded.sessions).toMatchObject([{ id: saved.id }])
-    expect(await repository.loadSessionWithDiagnostics(saved.projectId, saved.id)).toMatchObject({ status: 'unreadable' })
+    expect(await repository.loadSessionWithDiagnostics(saved.projectId, saved.id)).toMatchObject({
+      status: 'unreadable'
+    })
   })
 
   it('does not reuse retained tombstone numbers during a projection-version rebuild', async () => {

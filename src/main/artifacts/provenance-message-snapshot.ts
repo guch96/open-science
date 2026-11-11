@@ -617,7 +617,10 @@ class ProvenanceMessageSnapshotRepository {
   }
 
   async reconcileSessionMessageSnapshots(session: PersistedChatSession): Promise<void> {
-    await this.recoverStagingMessageSnapshots({ projectId: session.projectId, sessionId: session.id })
+    await this.recoverStagingMessageSnapshots({
+      projectId: session.projectId,
+      sessionId: session.id
+    })
     await this.repairReadyMessageSnapshots([session])
   }
 
@@ -626,7 +629,9 @@ class ProvenanceMessageSnapshotRepository {
     await this.repairReadyMessageSnapshots(activeSessions)
   }
 
-  async reconcileSessionCleanup(activeSessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]): Promise<void> {
+  async reconcileSessionCleanup(
+    activeSessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<void> {
     const client = await this.options.getClient()
     await this.recoverStagingReviewScopeSnapshots()
     const activeKeys = new Set(
@@ -691,7 +696,10 @@ class ProvenanceMessageSnapshotRepository {
     })
   }
 
-  private async recoverStagingMessageSnapshots(identity?: { projectId: string; sessionId: string }): Promise<void> {
+  private async recoverStagingMessageSnapshots(identity?: {
+    projectId: string
+    sessionId: string
+  }): Promise<void> {
     const client = await this.options.getClient()
     const staging = await client.artifactMessageSnapshot.findMany({
       where: { state: 'staging', ...identity }

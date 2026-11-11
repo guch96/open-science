@@ -24,7 +24,10 @@ import {
   withSessionDeletionCleanup,
   type SessionPersistenceBackend
 } from '../session-persistence/ipc'
-import { DeferredSessionRecovery, type RecoveredSessionReference } from '../session-persistence/deferred-recovery'
+import {
+  DeferredSessionRecovery,
+  type RecoveredSessionReference
+} from '../session-persistence/deferred-recovery'
 import { SessionProjectionDiagnostics } from '../session-persistence/projection-diagnostics'
 import { selectSessionDetailsStartupCandidates } from '../session-details/startup-catalog'
 import { SettingsService } from '../settings/service'
@@ -59,6 +62,7 @@ export function composeSessionProjection({
     | 'recoveryCatalogGeneration'
     | 'reconcileRecoveryCatalog'
     | 'cleanupRecoveredSession'
+    | 'runSessionMutation'
     | 'loadAll'
     | 'loadAllReadOnly'
     | 'replaceSessionMetadata'
@@ -80,7 +84,13 @@ export function composeSessionProjection({
   pendingSpecialistBindings: PendingSessionSpecialistBindings
   loadAllSessions: () => Promise<LoadAllSessionsResult>
   loadStartupSessions: () => Promise<PersistedChatSession[]>
-  createDeferredRecovery: (recoverDetails: (session: PersistedChatSession) => Promise<void>, complete?: (sessions: readonly RecoveredSessionReference[], cancelled: () => boolean) => Promise<void>) => DeferredSessionRecovery
+  createDeferredRecovery: (
+    recoverDetails: (session: PersistedChatSession) => Promise<void>,
+    complete?: (
+      sessions: readonly RecoveredSessionReference[],
+      cancelled: () => boolean
+    ) => Promise<void>
+  ) => DeferredSessionRecovery
   startupSessionDetails: { current: LoadAllSessionsResult['sessions'] | undefined }
   ensureSessionProjection: () => Promise<{
     result?: LoadAllSessionsResult
@@ -318,7 +328,8 @@ export function composeSessionProjection({
       const session = selected.needsStartupRecovery
         ? await sessionPersistenceCoordinator.recoverStartupSession(selected.projectId, selected.id)
         : await uncoordinatedSessionPersistenceBackend.loadOne({
-            projectId: selected.projectId, sessionId: selected.id
+            projectId: selected.projectId,
+            sessionId: selected.id
           })
       if (session) candidates.push(session)
     }
@@ -332,7 +343,8 @@ export function composeSessionProjection({
     return candidates
   }
   const completeRecoveryCatalog = async (
-    references: readonly RecoveredSessionReference[], cancelled: () => boolean
+    references: readonly RecoveredSessionReference[],
+    cancelled: () => boolean
   ): Promise<void> => {
     await projectDeletionCoordinator.recoverPendingDeletions()
     if (cancelled()) return
@@ -343,10 +355,15 @@ export function composeSessionProjection({
     const refs = new Map(references.map((session) => [session.id, session]))
     // Earlier sweep entries may already be stale. Completeness alone is insufficient for cwd
     // cleanup; every reference must still describe the latest durable revision and identity.
-    if (snapshot.sessions.length !== refs.size || summaries.length !== refs.size ||
+    if (
+      snapshot.sessions.length !== refs.size ||
+      summaries.length !== refs.size ||
       !snapshot.sessions.every(({ projectId, id }) => refs.get(id)?.projectId === projectId) ||
-      !summaries.every((summary) => refs.get(summary.id)?.revision === summary.revision)) return
-    const guard = (operation: () => Promise<void>): Promise<boolean> => sessionRepository.runWithSessionCatalogSnapshot(snapshot, operation)
+      !summaries.every((summary) => refs.get(summary.id)?.revision === summary.revision)
+    )
+      return
+    const guard = (operation: () => Promise<void>): Promise<boolean> =>
+      sessionRepository.runWithSessionCatalogSnapshot(snapshot, operation)
     const failures: unknown[] = []
     for (const reference of references) {
       await new Promise<void>((resolve) => setImmediate(resolve))
@@ -354,9 +371,19 @@ export function composeSessionProjection({
       try {
         for (let attempt = 0; attempt < 3; attempt += 1) {
           if (cancelled()) return
-          const prepared = await sessionPersistenceCoordinator.prepareSessionRecovery(reference.projectId, reference.id)
-          if (prepared?.status !== 'prepared' || prepared.expectedRevision !== reference.revision) return
-          const result = await sessionPersistenceCoordinator.cleanupRecoveredSession(prepared, generation, guard, recoveryStartupCutoff, cancelled)
+          const prepared = await sessionPersistenceCoordinator.prepareSessionRecovery(
+            reference.projectId,
+            reference.id
+          )
+          if (prepared?.status !== 'prepared' || prepared.expectedRevision !== reference.revision)
+            return
+          const result = await sessionPersistenceCoordinator.cleanupRecoveredSession(
+            prepared,
+            generation,
+            guard,
+            recoveryStartupCutoff,
+            cancelled
+          )
           if (result === 'stale') return
           if (result === 'complete') break
           if (attempt === 2) throw new Error('Deferred Session source cleanup remains busy.')
@@ -366,28 +393,42 @@ export function composeSessionProjection({
         failures.push(error)
       }
     }
-    await sessionPersistenceCoordinator.reconcileRecoveryCatalog(references, generation,
-      guard, cancelled)
-    if (failures.length) throw new AggregateError(failures, 'Deferred Session source cleanup is incomplete.')
+    await sessionPersistenceCoordinator.reconcileRecoveryCatalog(
+      references,
+      generation,
+      guard,
+      cancelled
+    )
+    if (failures.length)
+      throw new AggregateError(failures, 'Deferred Session source cleanup is incomplete.')
   }
 
   const createDeferredRecovery = (
     recoverDetails: (session: PersistedChatSession) => Promise<void>,
-    complete: (sessions: readonly RecoveredSessionReference[], cancelled: () => boolean) => Promise<void> = completeRecoveryCatalog
-  ): DeferredSessionRecovery => new DeferredSessionRecovery({
-    list: async () => (await ensureSessionProjection()).sessions,
-    prepare: (projectId, sessionId) => sessionPersistenceCoordinator.prepareSessionRecovery(projectId, sessionId),
-    missing: (projectId, sessionId) => sessionRepository.reconcileMissingSessionProjection(projectId, sessionId),
-    commit: (prepared) => sessionPersistenceCoordinator.commitSessionRecovery(prepared),
-    recovered: async (session) => {
-      const reconciled = sessionEnabledComputeHostsOwnerRef.current
-        ? await sessionEnabledComputeHostsOwnerRef.current.reconcileSession(session) : session
-      const recovered = await sandboxNetworkApprovalOwner.recoverSession(reconciled)
-      await recoverDetails(recovered)
-      return recovered
-    },
-    complete
-  })
+    complete: (
+      sessions: readonly RecoveredSessionReference[],
+      cancelled: () => boolean
+    ) => Promise<void> = completeRecoveryCatalog
+  ): DeferredSessionRecovery =>
+    new DeferredSessionRecovery({
+      list: async () => (await ensureSessionProjection()).sessions,
+      prepare: (projectId, sessionId) =>
+        sessionPersistenceCoordinator.prepareSessionRecovery(projectId, sessionId),
+      missing: (projectId, sessionId) =>
+        sessionPersistenceCoordinator.runSessionMutation(projectId, sessionId, () =>
+          sessionRepository.reconcileMissingSessionProjection(projectId, sessionId)
+        ),
+      commit: (prepared) => sessionPersistenceCoordinator.commitSessionRecovery(prepared),
+      recovered: async (session) => {
+        const reconciled = sessionEnabledComputeHostsOwnerRef.current
+          ? await sessionEnabledComputeHostsOwnerRef.current.reconcileSession(session)
+          : session
+        const recovered = await sandboxNetworkApprovalOwner.recoverSession(reconciled)
+        await recoverDetails(recovered)
+        return recovered
+      },
+      complete
+    })
   const sessionPersistenceBackend = coordinateSessionPersistenceWithProjectDeletions(
     uncoordinatedSessionPersistenceBackend,
     projectDeletionCoordinator

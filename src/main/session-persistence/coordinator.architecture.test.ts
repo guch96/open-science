@@ -822,7 +822,11 @@ describe('Session persistence coordinator architecture', () => {
       }
       if (name === 'cleanupRecoveredSession' || name === 'reconcileRecoveryCatalog') {
         const text = method.getText(facadeFile)
-        expect(text).toContain(name === 'cleanupRecoveredSession' ? 'this.operationScheduler.runSession' : 'this.operationScheduler.runGlobal')
+        expect(text).toContain(
+          name === 'cleanupRecoveredSession'
+            ? 'this.operationScheduler.runSession'
+            : 'this.operationScheduler.runGlobal'
+        )
         expect(text).toContain('this.recoveryCatalogGeneration() !== expectedGeneration')
         expect(text).toContain('cancelled()')
         continue
@@ -917,7 +921,8 @@ describe('Session persistence coordinator architecture', () => {
         // before this owner queues the ordinary read and catalog mutation in the Session lane.
         // Recovery deletion similarly validates and captures its untrusted identity before queuing.
         expect(statements, name).toHaveLength(name === 'adoptPublishedSession' ? 3 : 2)
-        if (name === 'adoptPublishedSession') expect(statements?.[1].getText(facadeFile)).toBe('this.hydrationCache.invalidate()')
+        if (name === 'adoptPublishedSession')
+          expect(statements?.[1].getText(facadeFile)).toBe('this.hydrationCache.invalidate()')
         const capture = statements?.[0]
         expect(capture && isVariableStatement(capture)).toBe(true)
         expect(capture?.getText(facadeFile)).toBe(
@@ -934,9 +939,11 @@ describe('Session persistence coordinator architecture', () => {
       }
       const statement =
         statements?.[
-          name === 'adoptPublishedSession' ? 2 : name === 'deleteRecoveryFile' || capturesQueueTime
-            ? 1
-            : 0
+          name === 'adoptPublishedSession'
+            ? 2
+            : name === 'deleteRecoveryFile' || capturesQueueTime
+              ? 1
+              : 0
         ]
       expect(statement, name).toBeDefined()
       if (!statement) continue

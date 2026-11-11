@@ -926,7 +926,8 @@ class SessionRepository {
   // import, temp, quarantine or unreadable body is never evidence of deletion.
   async reconcileMissingSessionProjection(projectId: string, sessionId: string): Promise<boolean> {
     return this.operationScheduler.runSession(projectId, sessionId, async () => {
-      if (!this.projection || await isSessionPackagePending(this.storageDir, projectId)) return false
+      if (!this.projection || (await isSessionPackagePending(this.storageDir, projectId)))
+        return false
       const loaded = await this.loadSessionWithDiagnostics(projectId, sessionId)
       if (loaded.status !== 'missing') return false
       await this.mutateCatalog(() => this.projection!.commitDelete(projectId, sessionId))

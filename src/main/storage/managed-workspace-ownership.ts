@@ -386,30 +386,27 @@ const planProvisionalManagedWorkspaceReconciliation = async (
   }
   const locations = await listManagedWorkspaceOwnershipLocations(dataRoot)
   return locations.map((location) => async () => {
-      const ownership = await readOwnershipForUpdate(location)
-      if (!ownership || ownership.retainedAfterDelete) return
+    const ownership = await readOwnershipForUpdate(location)
+    if (!ownership || ownership.retainedAfterDelete) return
 
-      const matchingSessions = sessionsByDirectory.get(location.directory) ?? []
-      if (ownership.sessionId) {
-        if (matchingSessions.length > 0 || ownership.lastUsedAt >= createdBefore) return
-      } else if (matchingSessions.length > 0) {
-        if (
-          matchingSessions.length === 1 &&
-          matchingSessions[0].projectId === ownership.projectId
-        ) {
-          await finalizeManagedWorkspaceOwnership(
-            location.directory,
-            matchingSessions[0].id,
-            matchingSessions[0].updatedAt,
-            dataRoot
-          )
-        }
-        return
-      } else if (ownership.createdAt >= createdBefore) return
+    const matchingSessions = sessionsByDirectory.get(location.directory) ?? []
+    if (ownership.sessionId) {
+      if (matchingSessions.length > 0 || ownership.lastUsedAt >= createdBefore) return
+    } else if (matchingSessions.length > 0) {
+      if (matchingSessions.length === 1 && matchingSessions[0].projectId === ownership.projectId) {
+        await finalizeManagedWorkspaceOwnership(
+          location.directory,
+          matchingSessions[0].id,
+          matchingSessions[0].updatedAt,
+          dataRoot
+        )
+      }
+      return
+    } else if (ownership.createdAt >= createdBefore) return
 
-      const workspace = await assertManagedWorkspaceDirectory(location.directory, dataRoot)
-      if (workspace) await rm(workspace.directory, { recursive: true, force: true })
-      await removeManagedWorkspaceOwnership(location.directory, dataRoot)
+    const workspace = await assertManagedWorkspaceDirectory(location.directory, dataRoot)
+    if (workspace) await rm(workspace.directory, { recursive: true, force: true })
+    await removeManagedWorkspaceOwnership(location.directory, dataRoot)
   })
 }
 
@@ -419,8 +416,16 @@ const reconcileProvisionalManagedWorkspaces = async (
   dataRoot = resolveDataRoot()
 ): Promise<void> => {
   let firstFailure: unknown
-  for (const apply of await planProvisionalManagedWorkspaceReconciliation(sessions, createdBefore, dataRoot)) {
-    try { await apply() } catch (error) { firstFailure ??= error }
+  for (const apply of await planProvisionalManagedWorkspaceReconciliation(
+    sessions,
+    createdBefore,
+    dataRoot
+  )) {
+    try {
+      await apply()
+    } catch (error) {
+      firstFailure ??= error
+    }
   }
   if (firstFailure) throw firstFailure
 }

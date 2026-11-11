@@ -1,5 +1,9 @@
 import { createLogger, diagnosticErrorFields } from '@aipoch/diagnostics/node'
-import { sessionRevision, type PersistedChatSession, type SessionSummary } from '../../shared/session-persistence'
+import {
+  sessionRevision,
+  type PersistedChatSession,
+  type SessionSummary
+} from '../../shared/session-persistence'
 import type { PreparedSessionRecovery } from './coordinator'
 
 export type RecoveredSessionReference = Pick<
@@ -81,7 +85,10 @@ export class DeferredSessionRecovery {
         const prepareMs = performance.now() - startedAt
         if (this.stopped) return
         if (!prepared) {
-          if (await this.dependencies.missing(candidate.projectId, candidate.id)) confirmedMissing += 1
+          const missing = this.dependencies.missing(candidate.projectId, candidate.id)
+          this.commit = missing
+          if (await missing) confirmedMissing += 1
+          this.commit = undefined
           continue
         }
         // Foreground operations queued while reading enter their lane before this commit.
@@ -95,7 +102,10 @@ export class DeferredSessionRecovery {
         this.commit = undefined
         if (this.stopped) return
         if (!session) {
-          if (await this.dependencies.missing(candidate.projectId, candidate.id)) confirmedMissing += 1
+          const missing = this.dependencies.missing(candidate.projectId, candidate.id)
+          this.commit = missing
+          if (await missing) confirmedMissing += 1
+          this.commit = undefined
           continue
         }
         const recovered = this.dependencies.recovered(session)
@@ -104,19 +114,38 @@ export class DeferredSessionRecovery {
         this.commit = undefined
         if (this.stopped) return
         const { id, projectId, cwd, updatedAt, archivedAt } = session
-        references.push({ id, projectId, cwd, revision: sessionRevision(session), updatedAt, archivedAt })
+        references.push({
+          id,
+          projectId,
+          cwd,
+          revision: sessionRevision(session),
+          updatedAt,
+          archivedAt
+        })
         this.log.debug('deferred Session recovered', {
-          mode: 'background', attempt: candidate.attempts, durationMs: performance.now() - startedAt,
-          prepareMs, commitMs, ...prepared.metrics,
-          planningMs: Math.max(0, prepareMs - (prepared.metrics?.authorityReadMs ?? 0) - (prepared.metrics?.jsonParseMs ?? 0))
+          mode: 'background',
+          attempt: candidate.attempts,
+          durationMs: performance.now() - startedAt,
+          prepareMs,
+          commitMs,
+          ...prepared.metrics,
+          planningMs: Math.max(
+            0,
+            prepareMs -
+              (prepared.metrics?.authorityReadMs ?? 0) -
+              (prepared.metrics?.jsonParseMs ?? 0)
+          )
         })
       } catch (error) {
         this.commit = undefined
         if (this.stopped) return
         const retry = candidate.attempts < 3
         this.log.warn('deferred Session recovery failed', {
-          ...diagnosticErrorFields(error), mode: 'background', attempt: candidate.attempts,
-          retry, durationMs: performance.now() - startedAt
+          ...diagnosticErrorFields(error),
+          mode: 'background',
+          attempt: candidate.attempts,
+          retry,
+          durationMs: performance.now() - startedAt
         })
         if (retry) {
           candidate.readyAt = Date.now() + (candidate.attempts === 1 ? 250 : 1000)
@@ -125,7 +154,7 @@ export class DeferredSessionRecovery {
       }
     }
     if (this.stopped) return
-    // Missing, unreadable or failed authorities cannot authorize destructive absence cleanup.
+    // Only successfully recovered or durably confirmed missing entries permit complete cleanup.
     if (!exhausted && references.length + confirmedMissing === summaries.length) {
       await this.yield()
       if (this.stopped) return
@@ -134,8 +163,11 @@ export class DeferredSessionRecovery {
       this.commit = undefined
     }
     this.log.info('deferred Session recovery completed', {
-      mode: 'background', sessionCount: summaries.length, recoveredCount: references.length,
-      exhaustedCount: exhausted, missingCount: confirmedMissing
+      mode: 'background',
+      sessionCount: summaries.length,
+      recoveredCount: references.length,
+      exhaustedCount: exhausted,
+      missingCount: confirmedMissing
     })
   }
 }
