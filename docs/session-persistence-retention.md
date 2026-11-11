@@ -173,3 +173,17 @@ package publication, global catalog changes, and each Session's revision/ownersh
 their conflict fences. Artifact Project snapshots contain compatibility-publication candidates;
 target Session/context checks and Artifact Session ownership still authorize finalization. File-index
 canonical collision reads and writes remain within their existing Prisma transaction.
+
+Native owner cleanup is planned from proven identities and applied one Session at a time after the
+catalog fence: Review scope mirrors (including retained/deleted FileOrigin owners), research-film
+receipts, built-in Agent bindings, and Compute Session cache directories all recheck ownership and
+stat identity immediately before removal. Live operations make an action defer; physical disposal
+never waits under a repository or coordinator global fence. Built-in Agent cleanup also uses the
+host's existing ACP identity admission: identities admitted for an existing-ID helper resume stay
+protected for the host lifetime, while a temporary cleanup claim rejects a concurrent admission.
+This is process-local recovery evidence and deliberately introduces no persistent lock format; the
+next startup retries untouched native owners. Fresh helper UUIDs and reviewer sessions are not
+associated with an old app Session and remain governed by their existing admission paths.
+Permission-grant pruning follows the same per-owner plan so its liveness check cannot wait on a
+registry queue while a global catalog fence is held. Native owner failures remain retryable and do
+not block unrelated Session durability.

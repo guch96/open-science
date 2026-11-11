@@ -629,23 +629,52 @@ class ProvenanceMessageSnapshotRepository {
     await this.repairReadyMessageSnapshots(activeSessions)
   }
 
-  async reconcileSessionCleanup(
+  async planSessionCleanup(
     activeSessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<Array<{ projectId: string; sessionId: string; apply(): Promise<void> }>> {
+    const client = await this.options.getClient()
+    // Include retained/deleted origins: their immutable Review evidence outlives Session JSON.
+    const identities = await client.review.findMany({
+      select: { projectId: true, sessionId: true },
+      distinct: ['projectId', 'sessionId']
+    })
+    identities.push(
+      ...(await client.fileOriginSession.findMany({
+        where: { state: 'deleting' },
+        select: { projectId: true, sessionId: true }
+      }))
+    )
+    const unique = new Map(
+      identities.map((identity) => [`${identity.projectId}\0${identity.sessionId}`, identity])
+    )
+    return [...unique.values()].map((identity) => ({
+      ...identity,
+      apply: () => this.reconcileSessionCleanup(activeSessions, identity)
+    }))
+  }
+
+  async reconcileSessionCleanup(
+    activeSessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[],
+    identity?: { projectId: string; sessionId: string }
   ): Promise<void> {
     const client = await this.options.getClient()
-    await this.recoverStagingReviewScopeSnapshots()
+    await this.recoverStagingReviewScopeSnapshots(identity)
     const activeKeys = new Set(
       activeSessions.map((session) => `${session.projectId}\0${session.id}`)
     )
     const deletingOrigins = await client.fileOriginSession.findMany({
-      where: { state: 'deleting' }
+      where: { state: 'deleting', ...identity }
     })
     const [reviewSessions, origins] = await Promise.all([
       client.review.findMany({
+        where: identity,
         select: { projectId: true, sessionId: true },
         distinct: ['projectId', 'sessionId']
       }),
-      client.fileOriginSession.findMany({ select: { projectId: true, sessionId: true } })
+      client.fileOriginSession.findMany({
+        where: identity,
+        select: { projectId: true, sessionId: true }
+      })
     ])
     const originKeys = new Set(origins.map((origin) => `${origin.projectId}\0${origin.sessionId}`))
 
@@ -857,10 +886,13 @@ class ProvenanceMessageSnapshotRepository {
     }
   }
 
-  private async recoverStagingReviewScopeSnapshots(): Promise<void> {
+  private async recoverStagingReviewScopeSnapshots(identity?: {
+    projectId: string
+    sessionId: string
+  }): Promise<void> {
     const client = await this.options.getClient()
     const staging = await client.reviewScopeSnapshot.findMany({
-      where: { state: 'staging' },
+      where: { state: 'staging', ...identity },
       include: { review: true }
     })
     for (const snapshot of staging) {

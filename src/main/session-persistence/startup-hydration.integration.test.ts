@@ -1,3 +1,5 @@
+import { reserveAcpSessionStorageCleanup } from '../acp/session-registry'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile, access, stat, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,12 +9,17 @@ import type { PrismaClient } from '@prisma/client'
 vi.mock('electron', () => ({ app: { getPath: () => '/home/user', isPackaged: true } }))
 const diagnostics = vi.hoisted(() => ({ debug: vi.fn() }))
 const filesystem = vi.hoisted(() => ({
+  beforeRead: undefined as ((path: string) => Promise<void>) | undefined,
   beforeRemove: undefined as ((path: string) => Promise<void>) | undefined
 }))
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
+    readFile: async (...args: Parameters<typeof actual.readFile>) => {
+      await filesystem.beforeRead?.(String(args[0]))
+      return actual.readFile(...args)
+    },
     rm: async (...args: Parameters<typeof actual.rm>) => {
       await filesystem.beforeRemove?.(String(args[0]))
       return actual.rm(...args)
@@ -38,6 +45,16 @@ import {
   type PersistedChatSession
 } from '../../shared/session-persistence'
 import { ArtifactProvenanceRepository } from '../artifacts/provenance-repository'
+import { ProvenanceMessageSnapshotRepository } from '../artifacts/provenance-message-snapshot'
+import { ReviewRepository } from '../reviewer/repository'
+import { createResearchFilmLifecycle } from '../research-video/lifecycle'
+import { createPermissionGrantRegistry } from '../permission-grants/registry'
+import {
+  planPermissionGrantOwnerReconciliation,
+  reconcilePermissionGrantOwners
+} from '../permission-grants/reconciliation'
+import { SessionCacheOwner } from '../compute/session-cache-owner'
+import { HarnessStorageCleanup } from '../harness-acp/storage-cleanup'
 import { RuntimeSessionOwner } from './runtime-session-owner'
 import {
   initializeManagedWorkspaceOwnership,
@@ -50,6 +67,7 @@ let client: PrismaClient
 
 afterEach(async () => {
   filesystem.beforeRemove = undefined
+  filesystem.beforeRead = undefined
   await client?.$disconnect()
   if (root) await rm(root, { recursive: true, force: true })
 })
@@ -893,3 +911,228 @@ it('keeps newly durable metadata when a ready-list replacement captured an older
   const metadata = await h.coordinator.sessionMetadataSnapshot()
   expect(metadata.sessions.some(({ id }) => id === 'new-session')).toBe(true)
 })
+
+it.each(['review', 'film', 'harness', 'cache', 'permission'] as const)(
+  'keeps same-Project terminal durable during native %s repair and cleanup',
+  async (kind) => {
+    const h = await createStartupHarness({
+      hasLiveRuntimeSession: (_p, id) => id === 'active',
+      hasActiveRuntimePrompt: (_p, id) => id === 'active'
+    })
+    const snapshots = new ProvenanceMessageSnapshotRepository({
+      storageRoot: root,
+      getClient: async () => client
+    })
+    let coordinator = new SessionPersistenceCoordinator(
+      h.repository,
+      h.fileIndex,
+      undefined,
+      snapshots
+    )
+    let blockedPath = ''
+    let startPermission: (() => Promise<unknown>) | undefined
+    let permissionMutation: Promise<unknown> | undefined
+    if (kind === 'review') {
+      const reviews = new ReviewRepository(async () => client, { snapshotStorageRoot: root })
+      const review = await reviews.createReview({
+        projectId: 'project',
+        sessionId: 'gone',
+        turnMessageId: 'prompt',
+        scope: { turnMessageId: 'prompt', blocks: [], artifactVersionIds: [] },
+        scopeSnapshot: []
+      })
+      const snapshot = await client.reviewScopeSnapshot.findUniqueOrThrow({
+        where: { reviewId: review.id }
+      })
+      await client.fileOriginSession.create({
+        data: { projectId: 'project', sessionId: 'gone', state: 'deleted', deletedAt: new Date() }
+      })
+      blockedPath = join(root, snapshot.storageKey)
+      await rm(blockedPath)
+      await client.reviewScopeSnapshot.update({
+        where: { id: snapshot.id },
+        data: { state: 'staging' }
+      })
+    } else if (kind === 'film') {
+      const key = createHash('sha256')
+        .update(JSON.stringify(['project', 'gone', null]))
+        .digest('hex')
+      blockedPath = join(
+        root,
+        'research-video-presentations',
+        key,
+        'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+      )
+      await mkdir(blockedPath, { recursive: true })
+      await writeFile(
+        join(blockedPath, 'session.json'),
+        JSON.stringify({ provenance: { projectId: 'project', sessionId: 'gone' } })
+      )
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      const film = createResearchFilmLifecycle({ dataRoot: () => root })
+      coordinator.setSessionDeletionHandlers({
+        commit: async () => {},
+        reconcile: async () => {},
+        planReconciliation: (ids) => film.planSessionReconciliation(ids)
+      })
+    } else if (kind === 'permission') {
+      let registry = await createPermissionGrantRegistry({ getClient: async () => client })
+      await registry.remember({
+        capability: { kind: 'execution', key: 'exec:agent/shell' },
+        scope: { kind: 'session', projectId: 'project', sessionId: 'gone' }
+      })
+      registry = await createPermissionGrantRegistry({
+        getClient: async () => client,
+        isScopeLive: async (scope) =>
+          scope.kind !== 'session' ||
+          (await h.repository.loadSession(scope.projectId, scope.sessionId)) !== undefined
+      })
+      startPermission = () =>
+        registry.remember({
+          capability: { kind: 'execution', key: 'exec:agent/shell' },
+          scope: { kind: 'session', projectId: 'project', sessionId: 'historical' }
+        })
+      blockedPath = join(root, 'sessions/project/historical.json')
+      coordinator = new SessionPersistenceCoordinator(
+        h.repository,
+        h.fileIndex,
+        undefined,
+        snapshots,
+        undefined,
+        undefined,
+        {
+          reconcileSessions: (sessions) => reconcilePermissionGrantOwners(registry, { sessions }),
+          planReconciliation: async (sessions) =>
+            (await planPermissionGrantOwnerReconciliation(registry, { sessions })).flatMap(
+              ({ owner, apply }) =>
+                owner.kind === 'session'
+                  ? [{ projectId: owner.projectId, sessionId: owner.sessionId, apply }]
+                  : []
+            )
+        }
+      )
+    } else if (kind === 'cache') {
+      const prior = new SessionCacheOwner(root)
+      const operation = await prior.createOperationFile('project', 'gone', 'output')
+      await writeFile(operation.path, 'old cache')
+      operation.release()
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      const cache = new SessionCacheOwner(root)
+      blockedPath = join(root, 'compute/session-cache/project/gone')
+      coordinator = new SessionPersistenceCoordinator(
+        h.repository,
+        h.fileIndex,
+        undefined,
+        snapshots,
+        undefined,
+        undefined,
+        {
+          reconcileSessions: async () => {},
+          planReconciliation: (sessions) => cache.planSessionReconciliation(sessions)
+        }
+      )
+    } else {
+      const sessionDirectory = join(root, 'harness-sessions')
+      await mkdir(sessionDirectory)
+      blockedPath = join(sessionDirectory, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.json')
+      await writeFile(
+        blockedPath,
+        JSON.stringify({ owner: { projectId: 'project', sessionId: 'gone' }, cwd: root })
+      )
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      const harness = new HarnessStorageCleanup({
+        sessionDirectory,
+        receiptDirectory: () => join(root, 'harness-receipts'),
+        tryClaimIdentities: reserveAcpSessionStorageCleanup,
+        isLive: () => false
+      })
+      coordinator.setSessionDeletionHandlers({
+        commit: async () => {},
+        reconcile: async () => {},
+        planReconciliation: (ids) => harness.planReconciliation(ids)
+      })
+    }
+    const active = await h.repository.saveSession(
+      materializeSessionConversationGraph({
+        ...h.makeSession('active'),
+        status: 'running',
+        activeRun: { promptMessageId: 'active-message', startedAt: 1 }
+      })
+    )
+    const graph = active.conversationGraph!
+    const owner = new RuntimeSessionOwner({
+      loadSession: (key) => coordinator.loadSessionForContinuation(key.projectId, key.sessionId),
+      mutateSession: (key, mutate, committed) =>
+        coordinator.mutateRuntimeSession(key, mutate, committed),
+      finalizeArtifacts: async () => [],
+      scheduleFlush: () => () => undefined,
+      now: () => 10
+    })
+    await owner.begin({
+      projectId: 'project',
+      sessionId: 'active',
+      promptMessageId: 'active-message',
+      agentFrameId: graph.rootFrameId,
+      messageBranchId: graph.branches[0].id,
+      runtimeSegmentId: graph.runtimeSegments[0].id,
+      executionId: 'execution'
+    })
+    let release!: () => void
+    let entered = false
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const intercept = async (path: string): Promise<void> => {
+      if (path === blockedPath) {
+        entered = true
+        await gate
+      }
+    }
+    if (kind === 'review' || kind === 'permission') filesystem.beforeRead = intercept
+    else filesystem.beforeRemove = intercept
+    permissionMutation = startPermission?.()
+    const catalog = await h.repository.scanSessionIdentities()
+    const cleanup = coordinator.reconcileRecoveryCatalog(
+      [active, h.historical],
+      coordinator.recoveryCatalogGeneration(),
+      (apply) => h.repository.runWithSessionCatalogSnapshot(catalog, apply)
+    )
+    try {
+      await expect.poll(() => entered, { timeout: 1500 }).toBe(true)
+      let acknowledged = false
+      const terminal = owner.commitTerminal(
+        {
+          id: 'terminal',
+          timestamp: 20,
+          sessionId: 'active',
+          promptMessageId: 'active-message',
+          promptExecutionId: 'execution',
+          kind: 'stop',
+          level: 'info',
+          text: 'end_turn'
+        },
+        () => {
+          acknowledged = true
+        }
+      )
+      await expect.poll(() => acknowledged, { timeout: 1500 }).toBe(true)
+      await terminal
+      expect(await new SessionRepository(root).loadSession('project', 'active')).toMatchObject({
+        status: 'idle'
+      })
+    } finally {
+      release()
+      await cleanup
+      await permissionMutation
+      filesystem.beforeRead = undefined
+      filesystem.beforeRemove = undefined
+    }
+    if (kind === 'review') {
+      expect(await readFile(blockedPath, 'utf8')).toContain('gone')
+      expect(
+        await client.reviewScopeSnapshot.count({ where: { state: 'ready', sessionId: 'gone' } })
+      ).toBe(1)
+    } else if (kind !== 'permission') await expect(access(blockedPath)).rejects.toThrow()
+    else expect(await client.permissionGrant.count({ where: { sessionId: 'gone' } })).toBe(0)
+  }
+)

@@ -1192,6 +1192,7 @@ describe('Session persistence coordinator architecture', () => {
         'commitRecoveredArtifacts',
         'cleanupVersionedUploadSources',
         'planOrphanStagingCleanup',
+        'planNativeCleanup',
         'reconcileCatalogIdentities',
         'reconcileLoadedSessions',
         'repairFileProjection',
