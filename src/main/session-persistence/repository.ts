@@ -341,7 +341,12 @@ class SessionRepository {
   >()
   private suspendedProjectionCatalogMutation = false
   private projectionInitialization:
-    Promise<{ result?: LoadAllSessionsResult; sessions: SessionSummary[] }> | undefined
+    | Promise<{
+        result?: LoadAllSessionsResult
+        sessions: SessionSummary[]
+        recoveredSessions?: PersistedChatSession[]
+      }>
+    | undefined
   private backupSequence = 0
   private readonly dependencies: SessionRepositoryDependencies
 
@@ -517,12 +522,17 @@ class SessionRepository {
   }
 
   async ensureSessionProjection(
-    loadAuthority: () => Promise<LoadAllSessionsResult>
-  ): Promise<{ result?: LoadAllSessionsResult; sessions: SessionSummary[] }> {
+    loadAuthority: () => Promise<LoadAllSessionsResult>,
+    recoverSession?: (summary: SessionSummary) => Promise<PersistedChatSession | undefined>
+  ): Promise<{
+    result?: LoadAllSessionsResult
+    sessions: SessionSummary[]
+    recoveredSessions?: PersistedChatSession[]
+  }> {
     if (!this.projection) throw new Error('Session projection is unavailable.')
     if (this.projectionInitialization) return this.projectionInitialization
 
-    const initialization = this.ensureSessionProjectionNow(loadAuthority)
+    const initialization = this.ensureSessionProjectionNow(loadAuthority, recoverSession)
     this.projectionInitialization = initialization
     void initialization.then(
       () => {
@@ -602,15 +612,32 @@ class SessionRepository {
   }
 
   private async ensureSessionProjectionNow(
-    loadAuthority: () => Promise<LoadAllSessionsResult>
-  ): Promise<{ result?: LoadAllSessionsResult; sessions: SessionSummary[] }> {
+    loadAuthority: () => Promise<LoadAllSessionsResult>,
+    recoverSession?: (summary: SessionSummary) => Promise<PersistedChatSession | undefined>
+  ): Promise<{
+    result?: LoadAllSessionsResult
+    sessions: SessionSummary[]
+    recoveredSessions?: PersistedChatSession[]
+  }> {
     if (!this.projection) throw new Error('Session projection is unavailable.')
 
     const loadReadyProjection = async (): Promise<{
       result?: LoadAllSessionsResult
       sessions: SessionSummary[]
+      recoveredSessions?: PersistedChatSession[]
     }> => {
       const summaries = await this.operationScheduler.runGlobal(() => this.projection!.list())
+      if (recoverSession && !(await this.hasOversizedProjectedSession(summaries))) {
+        const recoveredSessions: PersistedChatSession[] = []
+        for (const summary of summaries.filter((candidate) => candidate.needsStartupRecovery)) {
+          const session = await recoverSession(summary)
+          if (session) recoveredSessions.push(session)
+        }
+        return {
+          sessions: await this.operationScheduler.runGlobal(() => this.projection!.list()),
+          recoveredSessions
+        }
+      }
       const needsAuthorityScan =
         summaries.some((session) => session.needsStartupRecovery) ||
         (await this.hasOversizedProjectedSession(summaries))

@@ -25,6 +25,7 @@ import {
   type SessionPersistenceBackend
 } from '../session-persistence/ipc'
 import { SessionProjectionDiagnostics } from '../session-persistence/projection-diagnostics'
+import { selectSessionDetailsStartupCandidates } from '../session-details/startup-catalog'
 import { SettingsService } from '../settings/service'
 import { WslSetupSessionOwner } from '../wsl/wsl-setup-session-owner'
 
@@ -51,6 +52,7 @@ export function composeSessionProjection({
     | 'loadSessionForContinuation'
     | 'containsMessageOnActiveBranch'
     | 'deleteSession'
+    | 'recoverStartupSession'
     | 'loadAll'
     | 'loadAllReadOnly'
     | 'replaceSessionMetadata'
@@ -71,9 +73,11 @@ export function composeSessionProjection({
   sandboxNetworkApprovalOwner: SandboxNetworkApprovalOwner
   pendingSpecialistBindings: PendingSessionSpecialistBindings
   loadAllSessions: () => Promise<LoadAllSessionsResult>
+  loadStartupSessions: () => Promise<PersistedChatSession[]>
   startupSessionDetails: { current: LoadAllSessionsResult['sessions'] | undefined }
   ensureSessionProjection: () => Promise<{
     result?: LoadAllSessionsResult
+    recoveredSessions?: PersistedChatSession[]
     sessions: SessionSummary[]
   }>
   sessionPersistenceBackend: ReturnType<typeof coordinateSessionPersistenceWithProjectDeletions>
@@ -167,8 +171,10 @@ export function composeSessionProjection({
       throw error
     }
   }
+  let startupRecoveryComplete = false
   const ensureSessionProjection = async (): Promise<{
     result?: LoadAllSessionsResult
+    recoveredSessions?: PersistedChatSession[]
     sessions: SessionSummary[]
   }> => {
     // Reconcile a JSON write from a committed Project tombstone before deletion recovery removes
@@ -181,7 +187,21 @@ export function composeSessionProjection({
       await sessionPersistenceCoordinator.replaceSessionMetadata(sessions, false)
       return { result, sessions: await wslSetupSessions.projectSessionSummaries(sessions) }
     }
-    const projection = await sessionRepository.ensureSessionProjection(loadAllSessions)
+    const projection = await sessionRepository.ensureSessionProjection(
+      loadAllSessions,
+      async (summary) => {
+        if (startupRecoveryComplete) return undefined
+        const session = await sessionPersistenceCoordinator.recoverStartupSession(
+          summary.projectId,
+          summary.id
+        )
+        if (!session) return undefined
+        const reconciled = sessionEnabledComputeHostsOwnerRef.current
+          ? await sessionEnabledComputeHostsOwnerRef.current.reconcileSession(session)
+          : session
+        return sandboxNetworkApprovalOwner.recoverSession(reconciled)
+      }
+    )
     const result = projection.result
     const catalogComplete = result ? canReconcileSessionAbsences(result) : true
     await sessionPersistenceCoordinator.replaceSessionMetadata(projection.sessions, catalogComplete)
@@ -289,6 +309,32 @@ export function composeSessionProjection({
       return sessionPersistenceCoordinator.saveManifest(request)
     }
   }
+  const loadStartupSessions = async (): Promise<PersistedChatSession[]> => {
+    const projection = await ensureSessionProjection()
+    // An exceptional complete rebuild has already performed recovery. Never reinterpret a
+    // failed/incomplete catalog as a complete candidate set for mutating details recovery.
+    if (projection.result && !canReconcileSessionAbsences(projection.result)) return []
+    const candidates =
+      projection.recoveredSessions ??
+      (projection.result ? selectSessionDetailsStartupCandidates(projection.result) : undefined) ??
+      []
+    const manifest = projection.result?.manifest ?? (await sessionRepository.loadManifest())
+    const selected = projection.sessions.find((summary) => summary.id === manifest.lastSessionId)
+    if (selected && !candidates.some((session) => session.id === selected.id)) {
+      const session = await uncoordinatedSessionPersistenceBackend.loadOne({
+        projectId: selected.projectId,
+        sessionId: selected.id
+      })
+      if (session) candidates.push(session)
+    }
+    startupRecoveryComplete = true
+    createLogger('session-persistence').info('startup Session catalog hydrated', {
+      summaryCount: projection.sessions.length,
+      hydratedCount: candidates.length,
+      rebuiltCatalog: projection.result !== undefined
+    })
+    return candidates
+  }
   const sessionPersistenceBackend = coordinateSessionPersistenceWithProjectDeletions(
     uncoordinatedSessionPersistenceBackend,
     projectDeletionCoordinator
@@ -297,6 +343,7 @@ export function composeSessionProjection({
     sandboxNetworkApprovalOwner,
     pendingSpecialistBindings,
     loadAllSessions,
+    loadStartupSessions,
     startupSessionDetails,
     ensureSessionProjection,
     sessionPersistenceBackend

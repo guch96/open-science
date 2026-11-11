@@ -124,6 +124,8 @@ type SessionPersistenceReconciliationOwnerOptions = {
 type ReconcileLoadedSessionsInput = {
   result: LoadAllSessionsResult
   allowDestructiveCleanup: boolean
+  // A targeted read is never evidence that an omitted Session was deleted.
+  scope?: 'session'
   phase(name: string): void
   onPermissionFailure(error: unknown): void
 }
@@ -558,7 +560,7 @@ class SessionPersistenceReconciliationOwner {
               reconcileMessageSnapshots: provenance.reconcileMessageSnapshots.bind(provenance)
             }
           : undefined
-      await splitProvenance?.reconcileSessionCleanup(sessions)
+      if (input.scope !== 'session') await splitProvenance?.reconcileSessionCleanup(sessions)
 
       if (this.uploads) {
         for (let index = 0; index < sessions.length; index += 1) {
@@ -573,7 +575,11 @@ class SessionPersistenceReconciliationOwner {
               candidateIndex === index ? upgradedSession : candidate
             )
             result = { ...result, sessions }
-            const persisted = await saveSessionWithRevision(this.repository, upgradedSession)
+            const persisted = await saveSessionWithRevision(
+              this.repository,
+              upgradedSession,
+              input.scope === 'session' ? sessionRevision(session) : undefined
+            )
             sessions = sessions.map((candidate, candidateIndex) =>
               candidateIndex === index ? persisted : candidate
             )
@@ -639,7 +645,11 @@ class SessionPersistenceReconciliationOwner {
           )
           result = { ...result, sessions }
           await this.provenance?.captureFinalizedMessages(recoveredSession)
-          const persisted = await saveSessionWithRevision(this.repository, recoveredSession)
+          const persisted = await saveSessionWithRevision(
+            this.repository,
+            recoveredSession,
+            input.scope === 'session' ? sessionRevision(session) : undefined
+          )
           sessions = sessions.map((candidate, candidateIndex) =>
             candidateIndex === index ? persisted : candidate
           )
@@ -649,10 +659,14 @@ class SessionPersistenceReconciliationOwner {
       // Message snapshot repair needs the authoritative Artifact attachments recovered above;
       // otherwise a ready snapshot can be compared against incomplete Session JSON and stay
       // unavailable even after the Session is repaired later in this same startup pass.
-      if (splitProvenance) await splitProvenance.reconcileMessageSnapshots(sessions)
-      else await this.provenance?.reconcileSessionDeletions(sessions)
-      // Restore active owners before scan-order-dependent sync offers canonical rows elsewhere.
-      await this.fileIndex.reconcileActiveSessions(sessions)
+      if (input.scope !== 'session') {
+        if (splitProvenance) await splitProvenance.reconcileMessageSnapshots(sessions)
+        else await this.provenance?.reconcileSessionDeletions(sessions)
+        // Restore active owners before scan-order-dependent sync offers canonical rows elsewhere.
+        await this.fileIndex.reconcileActiveSessions(sessions)
+      } else {
+        for (const session of sessions) await this.provenance?.captureFinalizedMessages(session)
+      }
       for (const session of sessions) {
         await this.fileIndex.syncSession(session)
       }
