@@ -931,7 +931,7 @@ it.each(['review', 'film', 'harness', 'cache', 'permission'] as const)(
     )
     let blockedPath = ''
     let startPermission: (() => Promise<unknown>) | undefined
-    let permissionMutation: Promise<unknown> | undefined
+    const permissionMutation: Promise<unknown> | undefined
     if (kind === 'review') {
       const reviews = new ReviewRepository(async () => client, { snapshotStorageRoot: root })
       const review = await reviews.createReview({
