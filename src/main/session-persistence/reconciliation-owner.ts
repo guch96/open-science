@@ -58,6 +58,9 @@ type SessionReconciliationFileIndex = {
 }
 
 type SessionReconciliationProvenance = {
+  planSessionCleanup?(
+    sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<Array<{ projectId: string; sessionId: string; apply(): Promise<void> }>>
   recoverLegacySessionGraph?(
     session: PersistedChatSession
   ): Promise<PersistedChatSession | undefined>
@@ -71,6 +74,9 @@ type SessionReconciliationProvenance = {
 }
 
 type SessionPermissionGrantReconciliation = {
+  planReconciliation?(
+    sessions: ReadonlyArray<{ projectId: string; sessionId: string }>
+  ): Promise<Array<{ projectId: string; sessionId: string; apply(): Promise<void> }>>
   reconcileSessions(
     sessions: ReadonlyArray<{ projectId: string; sessionId: string }>
   ): Promise<void>
@@ -736,16 +742,27 @@ class SessionPersistenceReconciliationOwner {
     await this.uploads?.upgradeLegacySessionUploads(session, { mode: 'reconcile' })
   }
 
+  async planNativeCleanup(
+    sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
+  ): Promise<Array<{ projectId: string; sessionId: string; apply(): Promise<void> }>> {
+    const provenance = await this.provenance?.planSessionCleanup?.(sessions)
+    const native = await this.permissionGrants?.planReconciliation?.(
+      sessions.map(({ projectId, id }) => ({ projectId, sessionId: id }))
+    )
+    return [...(provenance ?? []), ...(native ?? [])]
+  }
+
   async reconcileCatalogIdentities(
     sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]
   ): Promise<void> {
     const failures: unknown[] = []
     for (const reconcile of [
       () =>
-        this.permissionGrants?.reconcileSessions(
-          sessions.map(({ projectId, id }) => ({ projectId, sessionId: id }))
-        ),
-      () => this.provenance?.reconcileSessionCleanup?.(sessions),
+        this.permissionGrants?.planReconciliation
+          ? undefined
+          : this.permissionGrants?.reconcileSessions(
+              sessions.map(({ projectId, id }) => ({ projectId, sessionId: id }))
+            ),
       () => this.fileIndex.reconcileActiveSessions(sessions)
     ]) {
       try {

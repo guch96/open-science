@@ -206,7 +206,10 @@ type SessionProvenancePersistence = {
   abortSessionDeletion(receipt: SessionDeletionReceipt): Promise<void>
 }
 
+type SessionNativeCleanup = { projectId: string; sessionId: string; apply(): Promise<void> }
+
 type SessionDeletionHandlers = {
+  planReconciliation?(existingSessionIds: string[]): Promise<SessionNativeCleanup[]>
   commit(sessionIds: string[]): Promise<void>
   reconcile(existingSessionIds: string[], archivedSessionIds: string[]): Promise<void>
 }
@@ -805,7 +808,33 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
   ): Promise<boolean> {
     // Directory enumeration and receipt planning run before any catalog commit reservation.
     const workspaceActions = (await this.workspaceOwnership?.planProvisional?.(sessions)) ?? []
+    const nativeActions = [
+      ...(await this.reconciliationOwner.planNativeCleanup(sessions)),
+      ...((await this.sessionDeletionHandlers?.planReconciliation?.(
+        sessions.map(({ id }) => id)
+      )) ?? [])
+    ]
     const failures: unknown[] = []
+    // Native owner plans contain identities, never permission to delete. Revalidate immediately
+    // before each effect while excluding Session mutation and Project publication/deletion.
+    for (const action of nativeActions) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      const accepted = await this.operationScheduler.runSessionRecovery(
+        action.projectId,
+        action.sessionId,
+        async () => {
+          if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return false
+          if (!(await commit(async () => undefined))) return false
+          try {
+            await action.apply()
+          } catch (error) {
+            failures.push(error)
+          }
+          return true
+        }
+      )
+      if (!accepted) return false
+    }
     const guarded = (operation: () => Promise<void>): Promise<boolean> =>
       this.operationScheduler.runGlobal(async () => {
         if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return false
