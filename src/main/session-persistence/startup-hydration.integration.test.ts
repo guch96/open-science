@@ -931,7 +931,6 @@ it.each(['review', 'film', 'harness', 'cache', 'permission'] as const)(
     )
     let blockedPath = ''
     let startPermission: (() => Promise<unknown>) | undefined
-    const permissionMutation: Promise<unknown> | undefined
     if (kind === 'review') {
       const reviews = new ReviewRepository(async () => client, { snapshotStorageRoot: root })
       const review = await reviews.createReview({
@@ -1090,7 +1089,7 @@ it.each(['review', 'film', 'harness', 'cache', 'permission'] as const)(
     }
     if (kind === 'review' || kind === 'permission') filesystem.beforeRead = intercept
     else filesystem.beforeRemove = intercept
-    permissionMutation = startPermission?.()
+    const permissionMutation = startPermission?.()
     const catalog = await h.repository.scanSessionIdentities()
     const cleanup = coordinator.reconcileRecoveryCatalog(
       [active, h.historical],
