@@ -343,7 +343,7 @@ class ProjectFilesMutationOwner {
     ])
   }
 
-  async reconcileActiveSessions(sessions: PersistedChatSession[]): Promise<void> {
+  async reconcileActiveSessions(sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]): Promise<void> {
     await this.reconcileSessions(sessions)
   }
 
@@ -358,7 +358,7 @@ class ProjectFilesMutationOwner {
   }
 
   private async reconcileSessions(
-    sessions: PersistedChatSession[],
+    sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[],
     projectId?: string
   ): Promise<void> {
     let scopedFailure = false
@@ -375,11 +375,12 @@ class ProjectFilesMutationOwner {
       })
       const retainedOrigins = await client.fileOriginSession.findMany({
         where: {
-          ...(projectId ? { projectId } : {}),
-          state: { in: ['deleting', 'deleted'] }
+          ...(projectId ? { projectId } : {})
         },
-        select: { projectId: true, sessionId: true }
+        select: { projectId: true, sessionId: true, state: true }
       })
+      // Native imports publish their ownership witness before Session JSON. Missing JSON alone
+      // cannot revoke that ownership; explicit deletion receipts remain authoritative.
       const retainedKeys = new Set(
         retainedOrigins.map((origin) => sessionKey(origin.projectId, origin.sessionId))
       )
@@ -417,6 +418,7 @@ class ProjectFilesMutationOwner {
         }
       }
       for (const origin of retainedOrigins) {
+        if (origin.state === 'active') continue
         try {
           await this.rebuildRetainedOriginProjection(client, origin.projectId, origin.sessionId)
         } catch (error) {

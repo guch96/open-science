@@ -3396,6 +3396,17 @@ describe('ManagedFileIndexRepository', () => {
     await expect(repository.getOverview(PROJECT_ID)).resolves.toMatchObject({ totalCount: 0 })
   })
 
+  it('preserves native import rows witnessed before Session JSON publication', async () => {
+    const artifactPath = join(storageRoot, 'artifacts', 'default-project', SESSION_ID, 'message-1', 'result.txt')
+    await writeManagedFile(artifactPath, 'imported')
+    await repository.syncSession(createSession({ artifacts: [
+      { id: 'artifact-1', kind: 'managed-file', path: artifactPath, name: 'result.txt' }
+    ] }))
+    await client.fileOriginSession.upsert({ where: { projectId_sessionId: { projectId: PROJECT_ID, sessionId: SESSION_ID } }, create: { projectId: PROJECT_ID, sessionId: SESSION_ID, state: 'active' }, update: { state: 'active' } })
+    await repository.reconcileActiveSessions([])
+    expect((await repository.getOverview(PROJECT_ID)).totalCount).toBe(1)
+  })
+
   it('keeps native Artifact Versions readable with a deleted origin Session', async () => {
     const artifactPath = join(
       storageRoot,

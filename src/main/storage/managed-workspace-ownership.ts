@@ -372,26 +372,26 @@ const markManagedProjectWorkspacesRetained = async (
   }
 }
 
-const reconcileProvisionalManagedWorkspaces = async (
+// Enumerate receipts outside the persistence commit barrier. Each action re-reads its receipt;
+// the caller must validate the complete Session-reference snapshot before admitting that action.
+const planProvisionalManagedWorkspaceReconciliation = async (
   sessions: readonly Pick<PersistedChatSession, 'cwd' | 'projectId' | 'id' | 'updatedAt'>[],
   createdBefore: number,
   dataRoot = resolveDataRoot()
-): Promise<void> => {
+): Promise<Array<() => Promise<void>>> => {
   const sessionsByDirectory = new Map<string, typeof sessions>()
   for (const session of sessions) {
     const directory = resolve(session.cwd)
     sessionsByDirectory.set(directory, [...(sessionsByDirectory.get(directory) ?? []), session])
   }
-
-  let firstFailure: unknown
-  for (const location of await listManagedWorkspaceOwnershipLocations(dataRoot)) {
-    try {
+  const locations = await listManagedWorkspaceOwnershipLocations(dataRoot)
+  return locations.map((location) => async () => {
       const ownership = await readOwnershipForUpdate(location)
-      if (!ownership || ownership.retainedAfterDelete) continue
+      if (!ownership || ownership.retainedAfterDelete) return
 
       const matchingSessions = sessionsByDirectory.get(location.directory) ?? []
       if (ownership.sessionId) {
-        if (matchingSessions.length > 0 || ownership.lastUsedAt >= createdBefore) continue
+        if (matchingSessions.length > 0 || ownership.lastUsedAt >= createdBefore) return
       } else if (matchingSessions.length > 0) {
         if (
           matchingSessions.length === 1 &&
@@ -404,15 +404,23 @@ const reconcileProvisionalManagedWorkspaces = async (
             dataRoot
           )
         }
-        continue
-      } else if (ownership.createdAt >= createdBefore) continue
+        return
+      } else if (ownership.createdAt >= createdBefore) return
 
       const workspace = await assertManagedWorkspaceDirectory(location.directory, dataRoot)
       if (workspace) await rm(workspace.directory, { recursive: true, force: true })
       await removeManagedWorkspaceOwnership(location.directory, dataRoot)
-    } catch (error) {
-      firstFailure ??= error
-    }
+  })
+}
+
+const reconcileProvisionalManagedWorkspaces = async (
+  sessions: readonly Pick<PersistedChatSession, 'cwd' | 'projectId' | 'id' | 'updatedAt'>[],
+  createdBefore: number,
+  dataRoot = resolveDataRoot()
+): Promise<void> => {
+  let firstFailure: unknown
+  for (const apply of await planProvisionalManagedWorkspaceReconciliation(sessions, createdBefore, dataRoot)) {
+    try { await apply() } catch (error) { firstFailure ??= error }
   }
   if (firstFailure) throw firstFailure
 }
@@ -443,6 +451,7 @@ const removeManagedWorkspaceOwnership = async (cwd: string, dataRoot?: string): 
 }
 
 export {
+  planProvisionalManagedWorkspaceReconciliation,
   MANAGED_WORKSPACE_OWNERSHIP_DIR,
   assertManagedWorkspacesRoot,
   finalizeManagedWorkspaceOwnership,

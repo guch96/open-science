@@ -54,6 +54,7 @@ import type { SessionDeletionReceipt } from '../artifacts/provenance-message-sna
 import type { ManagedFileSoftDeleteToken } from '../project-files/repository'
 import * as computeHostAccess from '../compute/session-compute-host-access'
 import type { ProjectSessionDeletionState, SessionRecoverySnapshot } from './repository'
+import type { RecoveredSessionReference } from './deferred-recovery'
 import { createLogger, diagnosticErrorFields, type Logger } from '@aipoch/diagnostics/node'
 import { startDiagnosticOperation } from '@aipoch/diagnostics/node'
 import type { AcpRuntimeEvent } from '../../shared/acp'
@@ -183,7 +184,7 @@ type SessionFileIndex = {
   ): Promise<void>
   softDeleteProject(projectId: string): Promise<ManagedFileSoftDeleteToken>
   reconcileProjectSessions(projectId: string, sessions: PersistedChatSession[]): Promise<void>
-  reconcileActiveSessions(sessions: PersistedChatSession[]): Promise<void>
+  reconcileActiveSessions(sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]): Promise<void>
   markReconciliationIncomplete(projectId?: string): void
 }
 
@@ -630,6 +631,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
   adoptPublishedSession(publication: PublishedSessionHandoff): Promise<void> {
     // Capture before enqueueing: the publisher and this owner have independent schedulers.
     const { projectId, sessionId, session, pendingProjectImport } = structuredClone(publication)
+    this.hydrationCache.invalidate()
     return this.operationScheduler.runSession(projectId, sessionId, async () => {
       this.assertMutable(projectId, sessionId, 'mutate')
       if (session.id !== sessionId || session.projectId !== projectId)
@@ -713,6 +715,35 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
         }
       }
     })
+  }
+
+  recoveryCatalogGeneration(): number {
+    return this.hydrationCache.generationForLoad()
+  }
+
+  async reconcileRecoveryCatalog(
+    sessions: readonly RecoveredSessionReference[],
+    expectedGeneration: number,
+    commit: (operation: () => Promise<void>) => Promise<boolean>,
+    cancelled: () => boolean = () => false
+  ): Promise<boolean> {
+    // Directory enumeration and receipt planning run before any catalog commit reservation.
+    const workspaceActions = await this.workspaceOwnership?.planProvisional?.(sessions) ?? []
+    const guarded = (operation: () => Promise<void>): Promise<boolean> => this.operationScheduler.runGlobal(async () => {
+      if (cancelled() || this.recoveryCatalogGeneration() !== expectedGeneration) return false
+      return commit(operation)
+    })
+    if (!await guarded(async () => {
+      await this.reconciliationOwner.reconcileCatalogIdentities(sessions)
+      await this.sessionDeletionHandlers?.reconcile(
+        sessions.map(({ id }) => id), sessions.filter(({ archivedAt }) => archivedAt !== undefined).map(({ id }) => id)
+      )
+    })) return false
+    for (const apply of workspaceActions) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      if (!await guarded(apply)) return false
+    }
+    return true
   }
 
   // The primary snapshot reader never repairs files and does not reserve the Project lane while
@@ -1502,6 +1533,8 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       } finally {
         // Force the next save to validate Artifact finalization's binding before reusing topology.
         this.stateOwner.invalidateBindingTopology(projectId, sessionId)
+        // External package publishers may commit through another repository instance.
+        this.hydrationCache.invalidate()
       }
     })
   }

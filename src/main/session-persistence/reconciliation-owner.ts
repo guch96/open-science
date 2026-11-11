@@ -48,7 +48,7 @@ type SessionReconciliationFileIndex = {
     session: PersistedChatSession,
     options?: { force?: boolean }
   ): Promise<ProjectFileSource[]>
-  reconcileActiveSessions(sessions: PersistedChatSession[]): Promise<void>
+  reconcileActiveSessions(sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]): Promise<void>
 }
 
 type SessionReconciliationProvenance = {
@@ -57,7 +57,8 @@ type SessionReconciliationProvenance = {
   ): Promise<PersistedChatSession | undefined>
   captureFinalizedMessages(session: PersistedChatSession): Promise<void>
   reconcileSessionDeletions(activeSessions: PersistedChatSession[]): Promise<void>
-  reconcileSessionCleanup?(activeSessions: PersistedChatSession[]): Promise<void>
+  reconcileSessionCleanup?(activeSessions: readonly Pick<PersistedChatSession, 'id' | 'projectId'>[]): Promise<void>
+  reconcileSessionMessageSnapshots?(session: PersistedChatSession): Promise<void>
   reconcileMessageSnapshots?(activeSessions: PersistedChatSession[]): Promise<void>
 }
 
@@ -665,7 +666,10 @@ class SessionPersistenceReconciliationOwner {
         // Restore active owners before scan-order-dependent sync offers canonical rows elsewhere.
         await this.fileIndex.reconcileActiveSessions(sessions)
       } else {
-        for (const session of sessions) await this.provenance?.captureFinalizedMessages(session)
+        for (const session of sessions) {
+          await this.provenance?.captureFinalizedMessages(session)
+          await this.provenance?.reconcileSessionMessageSnapshots?.(session)
+        }
       }
       for (const session of sessions) {
         await this.fileIndex.syncSession(session)
@@ -675,6 +679,12 @@ class SessionPersistenceReconciliationOwner {
     }
 
     return { status: 'ready', result }
+  }
+
+  async reconcileCatalogIdentities(sessions: readonly Pick<PersistedChatSession, 'projectId' | 'id'>[]): Promise<void> {
+    await this.permissionGrants?.reconcileSessions(sessions.map(({ projectId, id }) => ({ projectId, sessionId: id })))
+    await this.provenance?.reconcileSessionCleanup?.(sessions)
+    await this.fileIndex.reconcileActiveSessions(sessions)
   }
 
   async repairFileProjection(sessions: PersistedChatSession[]): Promise<void> {

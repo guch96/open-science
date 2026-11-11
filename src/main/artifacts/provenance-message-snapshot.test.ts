@@ -794,7 +794,11 @@ describe('Provenance Message snapshots', () => {
     ).resolves.toBeNull()
 
     failDurability = false
-    await snapshots.reconcileSessionDeletions([])
+    await client.fileOriginSession.create({ data: { projectId: 'project-1', sessionId: 'other-session' } })
+    await createStagingSnapshot('snapshot-unrelated', true)
+    await client.artifactMessageSnapshot.update({ where: { id: 'snapshot-unrelated' }, data: { sessionId: 'other-session' } })
+    await snapshots.reconcileSessionMessageSnapshots({ id: 'session-1', projectId: 'project-1', title: '', cwd: '', status: 'idle', messages: [], createdAt: 1, updatedAt: 1 })
+    expect(await client.artifactMessageSnapshot.findUnique({ where: { id: 'snapshot-unrelated' } })).toMatchObject({ state: 'staging' })
 
     await expect(
       client.artifactMessageSnapshot.findUniqueOrThrow({ where: { id: 'snapshot-valid-1' } })

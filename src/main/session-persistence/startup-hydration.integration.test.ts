@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -20,7 +20,8 @@ import { SessionRepository } from './repository'
 import { SessionProjectionRepository } from './projection'
 import { SessionPersistenceCoordinator, type SessionFileIndex } from './coordinator'
 import { composeSessionProjection } from '../composition/session-projection'
-import type { PersistedChatSession } from '../../shared/session-persistence'
+import { materializeSessionConversationGraph, type PersistedChatSession } from '../../shared/session-persistence'
+import { RuntimeSessionOwner } from './runtime-session-owner'
 
 let root: string
 let client: PrismaClient
@@ -30,7 +31,7 @@ afterEach(async () => {
   if (root) await rm(root, { recursive: true, force: true })
 })
 
-it('hydrates interrupted authority without reading idle history or removing its indexed ownership', async () => {
+async function createStartupHarness(dependencies: ConstructorParameters<typeof SessionRepository>[1] = {}, syncSession: SessionFileIndex['syncSession'] = async () => []) {
   root = await mkdtemp(join(tmpdir(), 'targeted-session-startup-'))
   initDataRoot(root)
   client = createProjectDbClient(root)
@@ -41,9 +42,10 @@ it('hydrates interrupted authority without reading idle history or removing its 
   const repository = new SessionRepository(
     root,
     {
+      ...dependencies,
       readSessionFile: async (path) => {
         reads.push(path)
-        return readFile(path, 'utf8')
+        return dependencies.readSessionFile ? dependencies.readSessionFile(path) : readFile(path, 'utf8')
       }
     },
     projection
@@ -79,7 +81,7 @@ it('hydrates interrupted authority without reading idle history or removing its 
   await projection.replaceAll([historical, interrupted, selected])
   const owners = new Set(['historical', 'interrupted'])
   const fileIndex: SessionFileIndex = {
-    syncSession: async () => [],
+    syncSession,
     softDeleteSession: async () => 'unused',
     restoreSession: async () => undefined,
     softDeleteProject: async () => 'unused',
@@ -110,6 +112,11 @@ it('hydrates interrupted authority without reading idle history or removing its 
     auxiliaryUsageRecorder: {},
     archiveCoordinator: {}
   } as unknown as Parameters<typeof composeSessionProjection>[0])
+  return { composed, coordinator, repository, projection, makeSession, reads, owners }
+}
+
+it('loads selected context while pending and idle history remain summary-only until deferred work starts', async () => {
+  const { composed, reads, owners } = await createStartupHarness()
   const hydrated = await composed.loadStartupSessions()
   expect(diagnostics.debug).toHaveBeenCalledWith(
     'Session summaries loaded',
@@ -130,8 +137,9 @@ it('hydrates interrupted authority without reading idle history or removing its 
   ])
   expect(reads.some((path) => path.endsWith('/historical.json'))).toBe(false)
   expect(owners.has('historical')).toBe(true)
-  expect(hydrated.map(({ id }) => id).sort()).toEqual(['interrupted', 'selected'])
-  expect(catalog.sessions.find(({ id }) => id === 'interrupted')?.status).toBe('error')
+  expect(hydrated.map(({ id }) => id)).toEqual(['selected'])
+  expect(reads.some((path) => path.endsWith('/interrupted.json'))).toBe(false)
+  expect(catalog.sessions.find(({ id }) => id === 'interrupted')?.status).toBe('running')
   expect(
     await composed.sessionPersistenceBackend.loadOne({
       projectId: 'project',
@@ -205,4 +213,107 @@ it('marks pending metadata and permission recovery while leaving completed histo
     }).summary.needsStartupRecovery
   ).toBe(false)
   expect(buildSessionProjection(base).summary.needsStartupRecovery).toBe(false)
+})
+
+
+it('keeps a same-Project terminal durable while production deferred recovery reads history', async () => {
+  let release!: () => void
+  let enter!: () => void
+  const entered = new Promise<void>((resolve) => { enter = resolve })
+  const blocked = new Promise<void>((resolve) => { release = resolve })
+  let delaying = false
+  const h = await createStartupHarness({
+    hasLiveRuntimeSession: (_projectId, sessionId) => sessionId === 'active',
+    hasActiveRuntimePrompt: (_projectId, sessionId) => sessionId === 'active',
+    readSessionFile: async (path) => {
+      if (delaying && path.endsWith('/interrupted.json')) { enter(); await blocked }
+      return readFile(path, 'utf8')
+    }
+  })
+  const active = await h.repository.saveSession(materializeSessionConversationGraph({
+    ...h.makeSession('active'), status: 'running', activeRun: { promptMessageId: 'active-message', startedAt: 1 }
+  }))
+  await h.repository.saveManifest({ lastSessionId: 'active' })
+  const graph = active.conversationGraph!
+  const owner = new RuntimeSessionOwner({
+    loadSession: (key) => h.coordinator.loadSessionForContinuation(key.projectId, key.sessionId),
+    mutateSession: (key, mutate, committed) => h.coordinator.mutateRuntimeSession(key, mutate, committed),
+    finalizeArtifacts: async () => [], scheduleFlush: () => () => undefined, now: () => 10
+  })
+  await owner.begin({ projectId: 'project', sessionId: 'active', promptMessageId: 'active-message',
+    agentFrameId: graph.rootFrameId, messageBranchId: graph.branches[0].id,
+    runtimeSegmentId: graph.runtimeSegments[0].id, executionId: 'execution' })
+  const selected = await h.composed.loadStartupSessions()
+  expect(selected.map(({ id }) => id)).toEqual(['active'])
+  delaying = true
+  const workflow = h.composed.createDeferredRecovery(async () => undefined)
+  workflow.start()
+  await entered
+  let committed = false
+  const terminal = owner.commitTerminal({ id: 'terminal', timestamp: 20, sessionId: 'active',
+    promptMessageId: 'active-message', promptExecutionId: 'execution', kind: 'stop', level: 'info', text: 'end_turn'
+  }, () => { committed = true })
+  try {
+    await expect.poll(() => committed, { timeout: 1500 }).toBe(true)
+    expect(await h.repository.loadSession('project', 'active')).toMatchObject({ status: 'idle' })
+    // Keep the actual read blocked beyond the former terminal admission budget.
+    await new Promise((resolve) => setTimeout(resolve, 2600))
+  } finally {
+    delaying = false
+    release()
+    await terminal
+    await workflow.settled()
+    await workflow.dispose()
+    await h.coordinator.readSessionSnapshot('project', 'active')
+  }
+  expect(await h.repository.loadSession('project', 'interrupted')).toMatchObject({ status: 'error' })
+})
+
+
+it.each(['unreadable', 'oversized', 'index'] as const)('isolates %s history with bounded retries while navigation and healthy recovery remain usable', async (failure) => {
+  let attempts = 0
+  const complete = vi.fn(async () => undefined)
+  const h = await createStartupHarness({ maxSessionBytes: 4096 }, async (session) => {
+    if (session.id === 'historical' && failure === 'index') { attempts += 1; throw new Error('Index unavailable') }
+    return []
+  })
+  if (failure !== 'index') await writeFile(join(root, 'sessions/project/historical.json'), failure === 'oversized' ? 'x'.repeat(8192) : '{invalid')
+  const selected = await h.composed.loadStartupSessions()
+  expect(selected.map(({ id }) => id)).toEqual(['selected'])
+  expect((await h.composed.sessionPersistenceBackend.list!()).sessions).toHaveLength(3)
+  expect(h.reads.some((path) => path.endsWith('/historical.json'))).toBe(false)
+  const workflow = h.composed.createDeferredRecovery(async () => undefined, complete)
+  workflow.start()
+  try {
+    await expect.poll(async () => (await h.repository.loadSessionSummaries()).find(({ id }) => id === 'interrupted')?.status).toBe('error')
+    const active = await h.repository.loadSession('project', 'selected')
+    await h.coordinator.saveSession({ ...active!, title: 'Foreground save remains durable' })
+    await workflow.settled()
+    expect((await h.repository.loadSession('project', 'selected'))?.title).toBe('Foreground save remains durable')
+    expect(complete).not.toHaveBeenCalled()
+    if (failure === 'index') expect(attempts).toBe(3)
+    expect(h.owners.has('historical')).toBe(true)
+    expect(h.coordinator.listRuntimeTerminalFailures()).toEqual([])
+  } finally { await workflow.dispose(); await workflow.settled() }
+})
+
+it('cancels a deferred snapshot without admitting repair after shutdown', async () => {
+  let release!: () => void
+  let enter!: () => void
+  const entered = new Promise<void>((resolve) => { enter = resolve })
+  const blocked = new Promise<void>((resolve) => { release = resolve })
+  let delaying = false
+  const repaired: string[] = []
+  const h = await createStartupHarness({ readSessionFile: async (path) => {
+    if (delaying && path.endsWith('/interrupted.json')) { enter(); await blocked }
+    return readFile(path, 'utf8')
+  } }, async (session) => { repaired.push(session.id); return [] })
+  await h.composed.loadStartupSessions()
+  delaying = true
+  const workflow = h.composed.createDeferredRecovery(async () => undefined)
+  workflow.start()
+  await entered
+  try { await workflow.dispose() } finally { delaying = false; release(); await workflow.settled() }
+  expect(repaired).toEqual([])
+  expect((await h.repository.loadSessionSummaries()).find(({ id }) => id === 'interrupted')?.status).toBe('running')
 })

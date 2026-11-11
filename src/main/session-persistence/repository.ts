@@ -37,7 +37,6 @@ import {
 import {
   DurableJsonReadLimitError,
   DurableJsonRecoveryBarrierError,
-  isRecoverableDurableJsonTemporaryFile,
   readDurableJsonFile,
   readFileWithinLimit,
   recoverDurableJsonDirectory,
@@ -631,44 +630,15 @@ class SessionRepository {
       recoveredSessions?: PersistedChatSession[]
     }> => {
       const summaries = await this.listProjectionSummaries()
-      if (recoverSession && !(await this.hasOversizedProjectedSession(summaries))) {
-        const recoveredSessions: PersistedChatSession[] = []
-        for (const summary of summaries.filter((candidate) => candidate.needsStartupRecovery)) {
-          const session = await recoverSession(summary)
-          if (session) recoveredSessions.push(session)
-        }
-        return {
-          sessions: await this.listProjectionSummaries(),
-          recoveredSessions
-        }
+      // A ready catalog is navigation authority, not a request to inspect historical bodies.
+      // Oversized/corrupt files and temporary evidence are isolated by targeted recovery/open.
+      if (!recoverSession) return { sessions: summaries }
+      const recoveredSessions: PersistedChatSession[] = []
+      for (const summary of summaries.filter((candidate) => candidate.needsStartupRecovery)) {
+        const session = await recoverSession(summary)
+        if (session) recoveredSessions.push(session)
       }
-      const needsAuthorityScan =
-        summaries.some((session) => session.needsStartupRecovery) ||
-        (await this.hasOversizedProjectedSession(summaries))
-      if (!needsAuthorityScan) {
-        return { sessions: summaries }
-      }
-      const result = await this.loadAuthorityWithSuspendedProjection(loadAuthority)
-      return this.operationScheduler.runGlobal(async () => {
-        const freshResult = await this.refreshProjectionBuildAuthority(result)
-        const numbers = new Map(summaries.map((session) => [session.id, session.number]))
-        if (freshResult.diagnostics?.isComplete === false) {
-          await this.retainOversizedProjectionRecovery(freshResult.diagnostics.warnings)
-          return {
-            result: freshResult,
-            sessions: projectIncompleteSummaries(freshResult, numbers)
-          }
-        }
-        const numbered = freshResult.sessions.map((session) => ({
-          ...session,
-          number: session.number ?? numbers.get(session.id)
-        }))
-        await this.projection!.replaceAll(numbered)
-        return {
-          result: { ...freshResult, sessions: numbered },
-          sessions: await this.projection!.list()
-        }
-      })
+      return { sessions: await this.listProjectionSummaries(), recoveredSessions }
     }
 
     if (await this.projection.isInitialized()) {
@@ -829,89 +799,6 @@ class SessionRepository {
       throw new Error('Session projection is not ready.')
     }
     return this.listProjectionSummaries()
-  }
-
-  private async hasOversizedProjectedSession(
-    summaries: readonly SessionSummary[]
-  ): Promise<boolean> {
-    const projectedFilesByProject = new Map<string, Set<string>>()
-    for (const summary of summaries) {
-      const projectedFiles = projectedFilesByProject.get(summary.projectId) ?? new Set<string>()
-      projectedFiles.add(`${summary.id}.json`)
-      projectedFilesByProject.set(summary.projectId, projectedFiles)
-      try {
-        const metadata = await lstat(this.sessionFilePath(summary.projectId, summary.id))
-        if (
-          metadata.isFile() &&
-          !metadata.isSymbolicLink() &&
-          metadata.size > this.dependencies.maxSessionBytes
-        ) {
-          return true
-        }
-      } catch (error) {
-        if (!isMissingFileError(error)) throw error
-      }
-    }
-
-    for (const [projectId, projectedFiles] of projectedFilesByProject) {
-      const directory = this.projectDir(projectId)
-      let entries: SessionDirectoryEntry[]
-      try {
-        entries = await this.dependencies.readDirectoryEntries(directory)
-      } catch (error) {
-        if (isMissingFileError(error)) continue
-        throw error
-      }
-      for (const entry of entries) {
-        if (!entry.isFile()) continue
-        const sessionExtensionIndex = entry.name.lastIndexOf('.json.')
-        if (sessionExtensionIndex < 0) continue
-        const primaryName = entry.name.slice(0, sessionExtensionIndex + '.json'.length)
-        if (!projectedFiles.has(primaryName)) continue
-        const primaryPath = join(directory, primaryName)
-        if (!isRecoverableDurableJsonTemporaryFile(primaryPath, entry.name)) continue
-        try {
-          const metadata = await lstat(join(directory, entry.name))
-          if (
-            metadata.isFile() &&
-            !metadata.isSymbolicLink() &&
-            metadata.size > this.dependencies.maxSessionBytes
-          ) {
-            return true
-          }
-        } catch (error) {
-          if (!isMissingFileError(error)) throw error
-        }
-      }
-    }
-    return false
-  }
-
-  private async retainOversizedProjectionRecovery(
-    warnings: readonly SessionLoadWarning[] | undefined
-  ): Promise<void> {
-    if (!this.projection) return
-    for (const warning of warnings ?? []) {
-      if (
-        warning.kind !== 'too-large' ||
-        !warning.fileName.endsWith('.json') ||
-        warning.fileName.length === '.json'.length
-      ) {
-        continue
-      }
-      const sessionId = warning.fileName.slice(0, -'.json'.length)
-      let projectId: string
-      let safeSessionId: string
-      try {
-        projectId = assertSafeSegment(warning.projectId)
-        safeSessionId = assertSafeSegment(sessionId)
-      } catch {
-        // Unsafe warning identities already keep the scan incomplete; they cannot become a safe
-        // projection reconciliation target.
-        continue
-      }
-      await this.projection.markPending(projectId, safeSessionId)
-    }
   }
 
   async loadSessionUsageProjection(): Promise<SessionUsageProjection> {
