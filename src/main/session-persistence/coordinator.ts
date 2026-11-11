@@ -4,6 +4,9 @@ import type { ProjectFileSource, ProjectFilesChangedEvent } from '../../shared/p
 import type { ReconcilePendingArtifactsRequest } from '../../shared/artifacts'
 import {
   SessionDeletionCommittedError,
+  SessionRevisionConflictError,
+  isSessionRevisionConflictError,
+  sessionRevision,
   deleteSessionRecoveryFileRequestSchema,
   type DeleteSessionRecoveryFileRequest,
   type DelegationPolicy,
@@ -50,7 +53,7 @@ import type {
 import type { SessionDeletionReceipt } from '../artifacts/provenance-message-snapshot'
 import type { ManagedFileSoftDeleteToken } from '../project-files/repository'
 import * as computeHostAccess from '../compute/session-compute-host-access'
-import type { ProjectSessionDeletionState } from './repository'
+import type { ProjectSessionDeletionState, SessionRecoverySnapshot } from './repository'
 import { createLogger, diagnosticErrorFields, type Logger } from '@aipoch/diagnostics/node'
 import { startDiagnosticOperation } from '@aipoch/diagnostics/node'
 import type { AcpRuntimeEvent } from '../../shared/acp'
@@ -144,6 +147,10 @@ type SessionMutationRepository = {
     | { status: 'missing' }
     | { status: 'unreadable' }
   >
+  loadSessionRecoverySnapshot?(
+    projectId: string,
+    sessionId: string
+  ): Promise<SessionRecoverySnapshot>
   assertSessionIdentityOwnership(sessionId: string, expectedProjectId: string): Promise<void>
   saveSession(
     session: PersistedChatSession,
@@ -210,6 +217,13 @@ const emitRecoverableDiagnostic = (
 }
 
 type SessionAuthorityScan = Awaited<ReturnType<SessionMutationRepository['loadAllWithDiagnostics']>>
+
+type PreparedSessionRecovery = Readonly<
+  { projectId: string; sessionId: string } & (
+    | { status: 'prepared'; session: PersistedChatSession; expectedRevision: number }
+    | { status: 'repair-required' }
+  )
+>
 
 const HYDRATION_CACHE_IDLE_MS = 30_000
 const HYDRATION_CACHE_MAX_SESSIONS = 32
@@ -701,39 +715,136 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     })
   }
 
-  // Targeted startup recovery owns only this Session. It must never authorize catalog absence
-  // cleanup, and it must not consume the full-scan startup cleanup boundary.
-  recoverStartupSession(
+  // The primary snapshot reader never repairs files and does not reserve the Project lane while
+  // reading/parsing history. Temporary or uncertain authority is deferred to guarded commit.
+  async prepareSessionRecovery(
+    projectId: string,
+    sessionId: string
+  ): Promise<PreparedSessionRecovery | undefined> {
+    const operation = startDiagnosticOperation(this.log, {
+      operation: 'session-recovery',
+      fields: { mode: 'prepare' }
+    })
+    operation.phase('read-snapshot')
+    try {
+      this.assertMutable(projectId, sessionId, 'mutate')
+      const loaded = this.repository.loadSessionRecoverySnapshot
+        ? await this.repository.loadSessionRecoverySnapshot(projectId, sessionId)
+        : await this.operationScheduler.runSession(projectId, sessionId, () => {
+            this.assertMutable(projectId, sessionId, 'mutate')
+            return this.repository.loadSessionWithDiagnostics(projectId, sessionId)
+          })
+      this.assertMutable(projectId, sessionId, 'mutate')
+      if (loaded.status === 'unreadable')
+        throw new Error('Cannot recover a Session whose durable JSON is unreadable.')
+      operation.complete({ status: loaded.status })
+      if (loaded.status === 'repair-required')
+        return { status: loaded.status, projectId, sessionId }
+      if (loaded.status !== 'found') return undefined
+      return {
+        status: 'prepared',
+        projectId,
+        sessionId,
+        session: structuredClone(loaded.session),
+        expectedRevision: sessionRevision(loaded.session)
+      }
+    } catch (error) {
+      operation.fail(error, { status: 'failed' })
+      throw error
+    }
+  }
+
+  // A candidate is not authority. Revalidate before any upload/artifact/index side effects, then
+  // keep explicit repository CAS at each JSON save to cover writers outside this coordinator.
+  async commitSessionRecovery(
+    prepared: PreparedSessionRecovery
+  ): Promise<PersistedChatSession | undefined> {
+    const { projectId, sessionId } = prepared
+    const preparedRevision = prepared.status === 'prepared' ? prepared.expectedRevision : undefined
+    const queuedAt = Date.now()
+    const operation = startDiagnosticOperation(this.log, {
+      operation: 'session-recovery',
+      fields: { mode: 'commit' }
+    })
+    operation.phase('wait-for-session')
+    try {
+      const result = await this.operationScheduler.runSession(projectId, sessionId, async () => {
+        operation.phase('revalidate-authority', { queueWaitMs: Math.max(0, Date.now() - queuedAt) })
+        this.assertMutable(projectId, sessionId, 'mutate')
+        const loaded = await this.repository.loadSessionWithDiagnostics(projectId, sessionId)
+        if (loaded.status === 'unreadable')
+          throw new Error('Cannot recover a Session whose durable JSON is unreadable.')
+        if (loaded.status !== 'found') return undefined
+        const actualRevision = sessionRevision(loaded.session)
+        const expectedRevision = preparedRevision ?? actualRevision
+        if (actualRevision !== expectedRevision)
+          throw new SessionRevisionConflictError(expectedRevision, actualRevision)
+        // Normal reads preserve active runtime state. Never restart an owned run or preparation.
+        if (loaded.session.activeRun || this.stateOwner.ownsPromptPreparation(loaded.session))
+          return loaded.session
+        // Runtime ownership can change without a JSON revision. Replan from the validated read so
+        // stale restore normalization cannot resurrect a released run or disturb a new owner.
+        const recovered = recoverInterruptedDelegatedWorkSession(loaded.session)
+        const session = recovered.interrupted.length
+          ? await saveSessionWithRevision(this.repository, recovered.session, expectedRevision)
+          : loaded.session
+        const outcome = await this.reconciliationOwner.reconcileLoadedSessions({
+          result: { sessions: [session], manifest: { version: 1 } },
+          allowDestructiveCleanup: false,
+          scope: 'session',
+          phase: (phase) => operation.phase(phase),
+          onPermissionFailure: () => undefined
+        })
+        if (outcome.status === 'degraded') throw outcome.failure
+        const persisted = outcome.result.sessions[0]
+        this.stateOwner.recordSession(persisted)
+        return persisted
+      })
+      operation.complete({ status: result ? 'ready' : 'unavailable', revisionConflicts: 0 })
+      return result
+    } catch (error) {
+      const conflict = isSessionRevisionConflictError(error)
+      operation.fail(error, {
+        status: conflict ? 'conflict' : 'failed',
+        revisionConflicts: conflict ? 1 : 0
+      })
+      throw error
+    }
+  }
+
+  // Targeted startup recovery never authorizes catalog absence cleanup or consumes the full-scan
+  // startup cleanup boundary. Background callers may also separate preparation from commit.
+  async recoverStartupSession(
     projectId: string,
     sessionId: string
   ): Promise<PersistedChatSession | undefined> {
-    return this.operationScheduler.runSession(projectId, sessionId, async () => {
-      this.assertMutable(projectId, sessionId, 'mutate')
-      const loaded = await this.repository.loadSessionWithDiagnostics(projectId, sessionId)
-      if (loaded.status !== 'found') return undefined
-      // Normal reads preserve active runtime state. Never restart an owned run or preparation.
-      if (loaded.session.activeRun || this.stateOwner.ownsPromptPreparation(loaded.session))
-        return loaded.session
-      const recovered = recoverInterruptedDelegatedWorkSession(loaded.session)
-      const session = recovered.interrupted.length
-        ? await saveSessionWithRevision(
-            this.repository,
-            recovered.session,
-            loaded.session.revision ?? 0
-          )
-        : loaded.session
-      const outcome = await this.reconciliationOwner.reconcileLoadedSessions({
-        result: { sessions: [session], manifest: { version: 1 } },
-        allowDestructiveCleanup: false,
-        scope: 'session',
-        phase: () => undefined,
-        onPermissionFailure: () => undefined
-      })
-      if (outcome.status === 'degraded') throw outcome.failure
-      const persisted = outcome.result.sessions[0]
-      this.stateOwner.recordSession(persisted)
-      return persisted
+    let revisionConflicts = 0
+    const operation = startDiagnosticOperation(this.log, {
+      operation: 'session-recovery',
+      fields: { mode: 'startup' }
     })
+    try {
+      for (;;) {
+        operation.phase('prepare', { revisionConflicts })
+        const prepared = await this.prepareSessionRecovery(projectId, sessionId)
+        try {
+          const result = prepared ? await this.commitSessionRecovery(prepared) : undefined
+          operation.complete({ status: result ? 'ready' : 'unavailable', revisionConflicts })
+          return result
+        } catch (error) {
+          if (!isSessionRevisionConflictError(error)) throw error
+          revisionConflicts += 1
+          if (revisionConflicts >= 2) throw error
+        }
+      }
+    } catch (error) {
+      operation.fail(error, {
+        status: 'deferred',
+        revisionConflicts,
+        retryable: isSessionRevisionConflictError(error)
+      })
+      throw error
+    }
   }
 
   /**
@@ -1742,6 +1853,7 @@ type SessionDeletion = Pick<
 
 export { SessionPersistenceCoordinator, SessionRuntimeContextRevisionConflictError }
 export type {
+  PreparedSessionRecovery,
   SessionPersistenceCommands,
   ComputeJobDeletionParticipant,
   DelegatedWorkRecordCommands,

@@ -46,3 +46,28 @@ engineering defaults and should be assessed against measured retention and reloa
 Metrics contain counts, durations, modes, and outcomes. They do not include conversation bodies,
 titles, or workspace paths. Scoped recovery conflicts/retries and background admission are reported
 by their recovery owners; these cache metrics do not replace their durability checks.
+
+## Scoped recovery commits
+
+`prepareSessionRecovery` reads a bounded primary JSON snapshot without reserving the Project
+persistence lane. It checks filesystem boundaries and file identity before and after reading.
+This reader never promotes temporary files, removes them, or quarantines a primary. Temporary,
+malformed, missing-primary, or changing-file evidence produces a `repair-required` handoff;
+normal durable-file recovery then runs inside the guarded commit. No JSON format changes are needed.
+
+`commitSessionRecovery` checks deletion/export guards, reloads authority, and compares the prepared
+revision before upload, artifact, or file-index effects. It checks current runtime/preparation
+ownership again and uses explicit revision comparisons on JSON saves. A stale candidate cannot
+replace newer messages or metadata. `recoverStartupSession` reloads once after a revision conflict;
+a second conflict remains a failure for the background owner to record and reschedule. Missing
+Sessions return no result; unreadable authority throws and must not be counted as recovered.
+
+This keeps historical primary reads from blocking a current Session's terminal save in the same
+Project. Commit still uses the established Project-and-Session lane: already-started revalidation,
+durable-temp recovery, and effectful repair are not preemptible. Synchronous JSON parsing also
+still occupies Main's event loop. Background admission must yield between Sessions and avoid
+queuing an entire catalog ahead of foreground work.
+
+Recovery diagnostics use `operation: session-recovery` with prepare/commit/startup modes, phase
+durations, commit `queueWaitMs`, and `revisionConflicts`. They contain no message bodies, titles,
+or paths. These timings distinguish snapshot reading, persistence waiting, and effectful repair.

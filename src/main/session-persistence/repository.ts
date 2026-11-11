@@ -198,6 +198,8 @@ type SessionLoadDiagnostic =
   | { status: 'missing' }
   | { status: 'unreadable' }
 
+type SessionRecoverySnapshot = SessionLoadDiagnostic | { status: 'repair-required' }
+
 type SessionMutationAuthorityRepository = {
   loadSessionWithDiagnostics(
     projectId: string,
@@ -975,6 +977,50 @@ class SessionRepository {
     if (!quarantine.isComplete) return { status: 'unreadable' }
     if (read.session) return { status: 'found', session: read.session }
     return quarantine.exists ? { status: 'unreadable' } : { status: 'missing' }
+  }
+
+  // Off-lane recovery planning must not use the durable reader: even read-only diagnostics can
+  // promote or remove temporary files. Defer that evidence to the guarded commit instead.
+  async loadSessionRecoverySnapshot(
+    projectIdValue: string,
+    sessionIdValue: string
+  ): Promise<SessionRecoverySnapshot> {
+    const projectId = assertSafeSegment(projectIdValue)
+    const sessionId = assertSafeSegment(sessionIdValue)
+    const boundary = await this.inspectActiveProjectBoundary(projectId)
+    if (boundary !== 'valid') return { status: boundary === 'missing' ? 'missing' : 'unreadable' }
+    const fileName = `${sessionId}.json`
+    const filePath = this.sessionFilePath(projectId, sessionId)
+    try {
+      const entries = await this.dependencies.readDirectoryEntries(this.projectDir(projectId))
+      if (entries.some((entry) => temporarySessionPrimaryName(entry.name) === fileName))
+        return { status: 'repair-required' }
+      const before = await lstat(filePath)
+      if (!before.isFile() || before.isSymbolicLink()) return { status: 'unreadable' }
+      const contents = await this.dependencies.readSessionFileWithinLimit(
+        filePath,
+        this.dependencies.maxSessionBytes
+      )
+      const after = await lstat(filePath)
+      if (
+        !after.isFile() ||
+        after.isSymbolicLink() ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs ||
+        before.ctimeMs !== after.ctimeMs
+      )
+        return { status: 'repair-required' }
+      return {
+        status: 'found',
+        session: this.decodeSessionContents(filePath, projectId, contents).session
+      }
+    } catch {
+      // Missing, malformed, or changing authority may have temp/quarantine evidence. Only the
+      // guarded diagnostic reader can classify and repair it; never infer absence here.
+      return { status: 'repair-required' }
+    }
   }
 
   // Verifies durable Session identity from directory/file authority without parsing JSON. This lets
@@ -2431,6 +2477,7 @@ const isMissingFileError = (error: unknown): boolean =>
 export { DEV_SESSION_DIR_NAME, PROD_SESSION_DIR_NAME, getSessionPersistenceDir } from './paths'
 export { SessionRepository }
 export type {
+  SessionRecoverySnapshot,
   ProjectSessionDeletionState,
   ProjectSessionLoadDiagnostics,
   SessionLoadDiagnostic,
