@@ -995,6 +995,23 @@ class ArtifactProvenanceRepository {
     return this.finalizationRecovery.prepareProjectReconciliation(projectId)
   }
 
+  async planOrphanStagingCleanup(
+    projectIdInput: string,
+    appSessionIdInput: string,
+    startupCutoff: number
+  ): Promise<Array<() => Promise<void>>> {
+    const projectId = assertSafeSegment(projectIdInput, 'project id')
+    const appSessionId = assertSafeSegment(appSessionIdInput, 'session id')
+    const actions = await this.stagingRecovery.planOrphanStagingCleanup(
+      projectId,
+      appSessionId,
+      startupCutoff
+    )
+    return actions.map(
+      (apply) => () => this.versionWriter.withSessionWrite({ projectId, appSessionId }, apply)
+    )
+  }
+
   async reconcileSession(
     projectIdInput: string,
     appSessionIdInput: string,
