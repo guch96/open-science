@@ -633,6 +633,41 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     })
   }
 
+  // Targeted startup recovery owns only this Session. It must never authorize catalog absence
+  // cleanup, and it must not consume the full-scan startup cleanup boundary.
+  recoverStartupSession(
+    projectId: string,
+    sessionId: string
+  ): Promise<PersistedChatSession | undefined> {
+    return this.operationScheduler.runSession(projectId, sessionId, async () => {
+      this.assertMutable(projectId, sessionId, 'mutate')
+      const loaded = await this.repository.loadSessionWithDiagnostics(projectId, sessionId)
+      if (loaded.status !== 'found') return undefined
+      // Normal reads preserve active runtime state. Never restart an owned run or preparation.
+      if (loaded.session.activeRun || this.stateOwner.ownsPromptPreparation(loaded.session))
+        return loaded.session
+      const recovered = recoverInterruptedDelegatedWorkSession(loaded.session)
+      const session = recovered.interrupted.length
+        ? await saveSessionWithRevision(
+            this.repository,
+            recovered.session,
+            loaded.session.revision ?? 0
+          )
+        : loaded.session
+      const outcome = await this.reconciliationOwner.reconcileLoadedSessions({
+        result: { sessions: [session], manifest: { version: 1 } },
+        allowDestructiveCleanup: false,
+        scope: 'session',
+        phase: () => undefined,
+        onPermissionFailure: () => undefined
+      })
+      if (outcome.status === 'degraded') throw outcome.failure
+      const persisted = outcome.result.sessions[0]
+      this.stateOwner.recordSession(persisted)
+      return persisted
+    })
+  }
+
   /**
    * Loads durable sessions, reconciles Upload storage, and backfills the file projection only after a
    * complete scan has restored active ownership. Chat hydration remains available on any failure.
