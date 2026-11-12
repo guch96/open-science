@@ -12,6 +12,11 @@ suspend or clock rollback cannot leave old execution authority valid. Sampling w
 seconds, coalesces callers within an execution domain, and does not overlap a timed-out underlying
 read. Errors back off for at least thirty seconds. Cancellation ends that caller's wait without
 cancelling other callers. Invalidation/disposal ends policy waits and discards late results.
+Sample age starts before adapter sampling begins, so time spent collecting facts also consumes the
+freshness budget. Each caller receives its own freshness decision when a shared read completes;
+subscriber notifications use the execution freshness bound. Notification failures cannot change
+sampled facts or prevent later subscribers from receiving the decision, and diagnostics report only
+the first such failure per policy owner.
 
 Periodic sampling is off until the lifecycle owner calls `setActive(true)`. It runs every ten
 seconds when healthy, every five seconds while pressure is latched, and respects failure backoff.

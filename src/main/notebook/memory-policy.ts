@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks'
+import { createLogger, errorLogFields } from '@aipoch/diagnostics/node'
 import { DEFAULT_NOTEBOOK_MEMORY_POLICY, type NotebookMemoryPolicy } from './memory-policy-config'
 
 export type MemoryPressureLevel = 'normal' | 'warning' | 'critical'
@@ -143,6 +144,7 @@ export class MemoryPolicyService {
   private readonly unsubscribe?: () => void
   private active = false
   private closed = false
+  private notificationFailureLogged = false
   private timer?: ReturnType<typeof setTimeout>
 
   constructor(private readonly options: Options) {
@@ -163,7 +165,7 @@ export class MemoryPolicyService {
     if (!request.force && current.reason.code !== 'sample-expired' && state.sample) {
       return Promise.resolve(current)
     }
-    if (state.pending) return this.waitFor(state.pending, request.signal)
+    if (state.pending) return this.waitFor(state.pending, request)
     if (state.settling || this.now() < state.nextSampleAt) {
       const next = state.observation ?? this.unavailableState(key, 'sample-pending')
       return Promise.resolve({
@@ -180,7 +182,7 @@ export class MemoryPolicyService {
       if (state.pending === work) state.pending = undefined
       this.schedule()
     })
-    return this.waitFor(work, request.signal)
+    return this.waitFor(work, request)
   }
 
   // Call immediately before a synchronous dispatch/teardown commit, after all async gates.
@@ -267,6 +269,7 @@ export class MemoryPolicyService {
   ): Promise<MemoryPolicyObservation> {
     const generation = state.generation
     const started = this.now()
+    const wallStarted = this.wallNow()
     const controller = new AbortController()
     state.controller = controller
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -312,8 +315,8 @@ export class MemoryPolicyService {
       }
       const reason = this.evaluate(state, result)
       state.sample = result
-      state.sampledAt = this.now()
-      state.wallSampledAt = this.wallNow()
+      state.sampledAt = started
+      state.wallSampledAt = wallStarted
       state.nextSampleAt = -Infinity
       state.observation = {
         status: state.pressure ? 'pressured' : 'healthy',
@@ -321,10 +324,10 @@ export class MemoryPolicyService {
         source: result.source,
         executionScope: result.executionScope,
         sampledAt: state.sampledAt,
-        sampleAgeMs: 0,
+        sampleAgeMs: Math.max(0, this.now() - started),
         facts: result.facts
       }
-      this.publish(state.observation)
+      this.publish(this.currentState({ executionScope: key }))
       return state.observation
     } catch (error) {
       if (this.closed || state.generation !== generation) {
@@ -509,22 +512,41 @@ export class MemoryPolicyService {
 
   private waitFor(
     work: Promise<MemoryPolicyObservation>,
-    signal?: AbortSignal
+    request: Request
   ): Promise<MemoryPolicyObservation> {
-    if (!signal) return work
+    const current = work.then((observation) =>
+      observation.status === 'unavailable' ? observation : this.currentState(request)
+    )
+    const { signal } = request
+    if (!signal) return current
     return new Promise((resolve, reject) => {
       const abort = (): void => {
         signal.removeEventListener('abort', abort)
         reject(abortError())
       }
       signal.addEventListener('abort', abort, { once: true })
-      void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+      void current.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
     })
   }
 
   private publish(observation: MemoryPolicyObservation): void {
     if (this.closed) return
-    for (const listener of this.listeners) listener(observation)
+    for (const listener of this.listeners) {
+      try {
+        listener(observation)
+      } catch (error) {
+        if (this.notificationFailureLogged) continue
+        this.notificationFailureLogged = true
+        try {
+          createLogger('notebook:memory-policy').warn(
+            'Memory policy notification failed; further notification errors will be suppressed',
+            errorLogFields(error)
+          )
+        } catch {
+          // Notification and diagnostic failures cannot change sampled memory facts.
+        }
+      }
+    }
   }
 
   private schedule(immediate = false): void {
