@@ -3355,6 +3355,7 @@ describe('startWebHttpServer', () => {
       'notebook:execute',
       'notebook:finish-code-cell',
       'notebook:background-run',
+      'notebook:memory-policy-state',
       'notebook:project-activity',
       'notebook:reference',
       'notebook:inspect-namespace',
