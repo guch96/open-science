@@ -3830,22 +3830,32 @@ describe('notebook runtime service', () => {
       'session-token',
       'session-token'
     ])
-    expect(beginControlInvocation).toHaveBeenNthCalledWith(1, {
-      turnId: 'notebook-run-42-1',
-      controlInvocationGeneration: 1,
-      toolInvocationId: 'notebook-run-42-1',
-      executionMode: 'foreground',
-      attachmentIds: [],
-      artifactIds: []
-    })
-    expect(beginControlInvocation).toHaveBeenNthCalledWith(2, {
-      turnId: 'notebook-run-42-2',
-      controlInvocationGeneration: 2,
-      toolInvocationId: 'notebook-run-42-2',
-      executionMode: 'foreground',
-      attachmentIds: [],
-      artifactIds: []
-    })
+    expect(beginControlInvocation).toHaveBeenNthCalledWith(
+      1,
+      {
+        rootExecutionId: undefined,
+        turnId: 'notebook-run-42-1',
+        controlInvocationGeneration: 1,
+        toolInvocationId: 'notebook-run-42-1',
+        executionMode: 'foreground',
+        attachmentIds: [],
+        artifactIds: []
+      },
+      undefined
+    )
+    expect(beginControlInvocation).toHaveBeenNthCalledWith(
+      2,
+      {
+        rootExecutionId: undefined,
+        turnId: 'notebook-run-42-2',
+        controlInvocationGeneration: 2,
+        toolInvocationId: 'notebook-run-42-2',
+        executionMode: 'foreground',
+        attachmentIds: [],
+        artifactIds: []
+      },
+      undefined
+    )
     expect(releaseInvocation).toHaveBeenCalledTimes(2)
     expect(completeControlInvocation).toHaveBeenCalledTimes(2)
     expect(discardControlInvocation).not.toHaveBeenCalled()
@@ -3916,16 +3926,20 @@ describe('notebook runtime service', () => {
     })
     await dispatched.promise
 
-    expect(beginControlInvocation).toHaveBeenCalledWith({
-      turnId: receipt.runId,
-      controlInvocationGeneration: expect.any(Number),
-      toolInvocationId: receipt.runId,
-      executionMode: 'background',
-      originatingTurnId: 'prompt-child',
-      originatingUserMessageId: 'prompt-child',
-      attachmentIds: [],
-      artifactIds: []
-    })
+    expect(beginControlInvocation).toHaveBeenCalledWith(
+      {
+        rootExecutionId: undefined,
+        turnId: receipt.runId,
+        controlInvocationGeneration: expect.any(Number),
+        toolInvocationId: receipt.runId,
+        executionMode: 'background',
+        originatingTurnId: 'prompt-child',
+        originatingUserMessageId: 'prompt-child',
+        attachmentIds: [],
+        artifactIds: []
+      },
+      undefined
+    )
     expect(releaseInvocation).not.toHaveBeenCalled()
     expect(completionInterceptor).not.toHaveBeenCalled()
 
@@ -3970,7 +3984,7 @@ describe('notebook runtime service', () => {
     service.setMcpRpcConnectionResolver(async () => ({
       endpoint: 'http://127.0.0.1:1/x',
       token: 'session-token',
-      beginControlInvocation: () => vi.fn(),
+      beginControlInvocation: () => vi.fn<() => void>(),
       completeControlInvocation,
       discardControlInvocation
     }))
@@ -4040,7 +4054,8 @@ describe('notebook runtime service', () => {
       expect.objectContaining({
         originatingTurnId: 'synthetic-message-prompt',
         originatingUserMessageId: 'durable-root-message'
-      })
+      }),
+      undefined
     )
   })
 

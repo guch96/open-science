@@ -1441,6 +1441,7 @@ describe('notebook local RPC server', () => {
       { role: 'main' },
       '/trusted/workspace'
     )
+    let invocationNonce: string | undefined
     const call = (params: Record<string, unknown>): Promise<Response> =>
       fetchLocalRpc(
         connection,
@@ -1448,7 +1449,8 @@ describe('notebook local RPC server', () => {
           method: 'POST',
           headers: {
             authorization: `Bearer ${connection.token}`,
-            'content-type': 'application/json'
+            'content-type': 'application/json',
+            ...(invocationNonce ? { 'x-open-science-control-invocation': invocationNonce } : {})
           },
           body: JSON.stringify({ method: 'viewImageCall', params })
         },
@@ -1461,7 +1463,8 @@ describe('notebook local RPC server', () => {
           method: 'POST',
           headers: {
             authorization: `Bearer ${connection.token}`,
-            'content-type': 'application/json'
+            'content-type': 'application/json',
+            ...(invocationNonce ? { 'x-open-science-control-invocation': invocationNonce } : {})
           },
           body: JSON.stringify({ method: 'capabilitiesCall', params: {} })
         },
@@ -1474,7 +1477,8 @@ describe('notebook local RPC server', () => {
           method: 'POST',
           headers: {
             authorization: `Bearer ${connection.token}`,
-            'content-type': 'application/json'
+            'content-type': 'application/json',
+            ...(invocationNonce ? { 'x-open-science-control-invocation': invocationNonce } : {})
           },
           body: JSON.stringify({
             method: 'hostSdkHelp',
@@ -1499,6 +1503,7 @@ describe('notebook local RPC server', () => {
         controlInvocationGeneration: 3,
         toolInvocationId: 'run-1'
       })
+      invocationNonce = release.nonce
       await expect(capabilities().then((response) => response.json())).resolves.toMatchObject({
         result: { viewImage: true }
       })
@@ -3685,6 +3690,7 @@ describe('notebook local RPC server', () => {
     const releaseInvocation = control.beginControlInvocation({
       turnId: 'trusted-turn-1',
       controlInvocationGeneration: 7,
+      originatingUserMessageId: 'prompt-1',
       toolInvocationId: 'trusted-tool-1'
     })
 
@@ -3693,6 +3699,7 @@ describe('notebook local RPC server', () => {
         method: 'POST',
         headers: {
           authorization: `Bearer ${control.token}`,
+          'x-open-science-control-invocation': releaseInvocation.nonce,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -4636,6 +4643,7 @@ describe('notebook local RPC server', () => {
         method: 'POST',
         headers: {
           authorization: `Bearer ${connection.token}`,
+          'x-open-science-control-invocation': release.nonce,
           'content-type': 'application/json'
         },
         body: JSON.stringify({ method: 'agentsCall', params: { op: 'switch', name: null } })
@@ -4656,6 +4664,7 @@ describe('notebook local RPC server', () => {
         method: 'POST',
         headers: {
           authorization: `Bearer ${connection.token}`,
+          'x-open-science-control-invocation': release.nonce,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -5625,7 +5634,8 @@ describe('real ACP / RPC / Runtime approval wiring', () => {
     h.state.profile = 'auto'
     await h.outer()
     h.runtimes[0] = { ...h.runtimes[0], provenance: 'user-own', condaEnv: undefined }
-    expect((await h.rpc()).body.result?.ok).toBe(false)
+    const response = await h.rpc()
+    expect(response.body.result?.ok, JSON.stringify(response)).toBe(false)
     expect(h.emitted).toHaveLength(0)
   })
 

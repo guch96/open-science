@@ -432,7 +432,7 @@ const composeAcpRuntimePromptOwners = (
       beforePromptDispatch: beforeFrameworkPromptDispatch,
       prepareNotebookIntent: (request, mode) => {
         const notebook = options.notebook
-        if (!notebook?.createExecutionIntent) return
+        if (!notebook) return
         const scope = { projectId: projectId(request.sessionId), sessionId: request.sessionId }
         const current = base.sessionCapabilities.notebookExecutionIntentFor(request.sessionId)
         const operation = notebookUserOperation(request)
@@ -442,7 +442,7 @@ const composeAcpRuntimePromptOwners = (
           mode.runtimeReviewOwner !== 'task' &&
           !request.continuation &&
           !request.suppressUserMessage
-        if (humanTurn && operation) {
+        if (humanTurn && operation && notebook.createExecutionIntent) {
           operation.assertCurrent()
           if (operation.projectId && operation.projectId !== scope.projectId)
             throw new Error('Notebook continuation does not belong to this Project.')

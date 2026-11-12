@@ -1,3 +1,4 @@
+import type { NotebookExecutionIntent } from './execution-intent'
 import { randomUUID } from 'node:crypto'
 import type { NotebookKernelEpochOwnership } from './execution-model-contract'
 export type { NotebookKernelEpochOwnership } from './execution-model-contract'
@@ -133,6 +134,7 @@ export type NotebookSessionExecutionRequest = {
   // Opaque per-control invocation identity forwarded through the REPL request frame. It binds a
   // host.agents.switch approval to this exact outer repl_execute completion.
   controlInvocationId?: string
+  controlInvocationNonce?: string
 }
 
 export type NotebookSessionExecutionResult = {
@@ -225,7 +227,10 @@ export type NotebookSessionMcpRpcConnection = {
   endpoint: string
   socketPath?: string
   token: string
-  beginControlInvocation?: (context: TrustedControlInvocationIdentity) => () => void
+  beginControlInvocation?: (
+    context: TrustedControlInvocationIdentity,
+    intent?: NotebookExecutionIntent
+  ) => (() => void) & { readonly nonce?: string }
   completeControlInvocation?: (
     controlInvocationId: string,
     signal?: AbortSignal

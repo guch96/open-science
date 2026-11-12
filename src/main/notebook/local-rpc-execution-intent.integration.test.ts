@@ -8,6 +8,7 @@ import { NotebookLocalRpcServer } from './local-rpc-server'
 import type { NotebookRpcConnection } from './mcp-server'
 import type { MemoryPolicyObservation } from './memory-policy'
 import { NotebookRuntimeService } from './runtime-service'
+import { NotebookExecutionIntent } from './execution-intent'
 
 it('requires a new user intent after rejection and never lends it to an old RPC credential', async () => {
   const root = await mkdtemp(join(tmpdir(), 'notebook-execution-intent-'))
@@ -102,5 +103,74 @@ it('requires a new user intent after rejection and never lends it to an old RPC 
     await server.close()
     await service.dispose()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('pins late control callbacks to their original invocation instead of lending the next intent', async () => {
+  const dispatch = vi.fn(async (_request: unknown, context: unknown) => context)
+  const server = new NotebookLocalRpcServer({} as never, {
+    transport: 'tcp',
+    agentsService: { read: dispatch }
+  })
+  const control = await server.issueControlConnection('session', 'project', 'frame')
+  const oldIntent = new NotebookExecutionIntent({ projectId: 'project', sessionId: 'session' })
+  const freshIntent = new NotebookExecutionIntent({ projectId: 'project', sessionId: 'session' })
+  const old = control.beginControlInvocation(
+    {
+      turnId: 'old',
+      toolInvocationId: 'old',
+      controlInvocationGeneration: 1,
+      originatingUserMessageId: 'user-old'
+    },
+    oldIntent
+  )
+  const fresh = control.beginControlInvocation(
+    {
+      turnId: 'fresh',
+      toolInvocationId: 'fresh',
+      controlInvocationGeneration: 2,
+      originatingUserMessageId: 'user-fresh'
+    },
+    freshIntent
+  )
+  const call = async (
+    nonce?: string,
+    op = 'switch'
+  ): Promise<{ status: number; body: unknown }> => {
+    const response = await fetchLocalRpc(
+      control,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${control.token}`,
+          'content-type': 'application/json',
+          ...(nonce ? { 'x-open-science-control-invocation': nonce } : {})
+        },
+        body: JSON.stringify({
+          method: 'agentsCall',
+          params: { op, control_invocation_id: 'forged-fresh', turn_id: 'forged-fresh' }
+        })
+      },
+      'control intent integration'
+    )
+    return { status: response.status, body: await response.json() }
+  }
+  try {
+    expect(old.nonce).toEqual(expect.any(String))
+    expect((await call(old.nonce)).body).toMatchObject({
+      result: { turnId: 'old', toolInvocationId: 'old' }
+    })
+    oldIntent.block('memory-pressure')
+    expect(JSON.stringify((await call(old.nonce)).body)).toContain(
+      'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION'
+    )
+    expect((await call(fresh.nonce)).body).toMatchObject({ result: { turnId: 'fresh' } })
+    expect((await call()).status).toBe(403)
+    expect((await call(undefined, 'list')).status).toBe(200)
+    expect(dispatch).toHaveBeenCalledTimes(3)
+  } finally {
+    old()
+    fresh()
+    await server.close()
   }
 })

@@ -129,6 +129,8 @@ import {
 import type { NotebookRpcConnection } from './mcp-server'
 import {
   withNotebookExecutionIntent,
+  notebookExecutionIntent,
+  markNotebookExecutionIntent,
   NotebookExecutionIntent,
   type NotebookExecutionIntentScope
 } from './execution-intent'
@@ -415,6 +417,14 @@ type NotebookRpcSessionBinding = {
   allowedMethods?: ReadonlySet<string>
   capabilityLifetime?: AbortController
   activeControlInvocation?: TrustedControlInvocationIdentity
+  controlInvocations?: Map<
+    string,
+    {
+      readonly identity: TrustedControlInvocationIdentity
+      readonly intent?: NotebookExecutionIntent
+      active: boolean
+    }
+  >
   executionCwd?: string
   isControl?: true
   executionIntent?: NotebookExecutionIntent
@@ -448,6 +458,7 @@ type ActiveArtifactTurnBinding = Readonly<{
 type DelegatedNotebookConnectionRequest = Readonly<{
   viewImageBackend?: HostViewImageBackend
   permissionPrompts?: 'none'
+  executionIntent?: NotebookExecutionIntent
   projectId: string
   sessionId: string
   rootFrameId: string
@@ -461,6 +472,7 @@ type DelegatedNotebookConnectionRequest = Readonly<{
 }>
 
 type DelegatedNotebookConnection = NotebookRpcConnection & {
+  refreshExecutionIntent(intent: NotebookExecutionIntent): Promise<NotebookRpcConnection>
   revoke(): Promise<void>
 }
 
@@ -1547,7 +1559,26 @@ class NotebookLocalRpcServer {
       inFlightRequests: 0,
       drainWaiters: new Set()
     }
-    this.sessionRpcCapabilities.set(token, {
+    let intent =
+      scope.executionIntent ??
+      this.service.resolveExecutionIntent?.(
+        { projectId: scope.projectId, sessionId: scope.sessionId },
+        scope.promptMessageId
+      )
+    if (!intent && this.service.createExecutionIntent) {
+      intent = new NotebookExecutionIntent({
+        projectId: scope.projectId,
+        sessionId: scope.sessionId
+      })
+      intent.block('originating-execution-context-unavailable')
+    }
+    if (intent)
+      this.service.rememberExecutionIntent?.(
+        { projectId: scope.projectId, sessionId: scope.sessionId },
+        scope.promptMessageId,
+        intent
+      )
+    const binding: NotebookRpcSessionBinding = {
       sessionId: scope.sessionId,
       projectId: scope.projectId,
       agentFrameId: scope.agentFrameId,
@@ -1562,13 +1593,17 @@ class NotebookLocalRpcServer {
       delegatedWorkRole: 'delegate',
       delegatedWorkAttemptId: scope.attemptId,
       capabilityLifetime: new AbortController(),
+      executionIntent: intent,
       delegatedNotebook
-    })
+    }
+    this.sessionRpcCapabilities.set(token, binding)
+    const ownedTokens = new Set([token])
     let revokePromise: Promise<void> | undefined
     const revoke = (): Promise<void> => {
       if (revokePromise) return revokePromise
       delegatedNotebook.revoked = true
-      this.revokeSessionCapability(token)
+      for (const ownedToken of ownedTokens) this.revokeSessionCapability(ownedToken)
+      ownedTokens.clear()
       const drained =
         delegatedNotebook.inFlightRequests === 0
           ? Promise.resolve()
@@ -1593,13 +1628,48 @@ class NotebookLocalRpcServer {
       )
       return revokePromise
     }
-    return {
+    const result = {
       endpoint: connection.endpoint,
       socketPath: connection.socketPath,
       token,
+      refreshExecutionIntent: async (
+        nextIntent: NotebookExecutionIntent
+      ): Promise<NotebookRpcConnection> => {
+        if (delegatedNotebook.revoked || !(await delegatedNotebook.isAttemptWritable()))
+          throw new RpcHttpError(403, 'Delegated Notebook execution authority expired.')
+        if (delegatedNotebook.revoked)
+          throw new RpcHttpError(403, 'Delegated Notebook execution authority expired.')
+        const nextToken = randomUUID()
+        for (const ownedToken of ownedTokens) this.revokeSessionCapability(ownedToken)
+        ownedTokens.clear()
+        ownedTokens.add(nextToken)
+        this.sessionRpcCapabilities.set(nextToken, {
+          ...binding,
+          executionIntent: nextIntent,
+          capabilityLifetime: new AbortController()
+        })
+        this.service.rememberExecutionIntent?.(
+          { projectId: scope.projectId, sessionId: scope.sessionId },
+          `notebook-capability:${nextToken}`,
+          nextIntent
+        )
+        return withNotebookExecutionIntent(
+          {
+            endpoint: connection.endpoint,
+            socketPath: connection.socketPath,
+            token: nextToken,
+            release: () => {
+              ownedTokens.delete(nextToken)
+              this.revokeSessionCapability(nextToken)
+            }
+          },
+          nextIntent
+        )
+      },
       release: () => void revoke().catch(() => undefined),
       revoke
     }
+    return intent ? withNotebookExecutionIntent(result, intent) : result
   }
 
   async issueSkillImportConnection(sessionId: string): Promise<NotebookRpcConnection> {
@@ -1715,7 +1785,10 @@ class NotebookLocalRpcServer {
     executionCwd?: string
   ): Promise<
     NotebookRpcConnection & {
-      beginControlInvocation(context: TrustedControlInvocationIdentity): () => void
+      beginControlInvocation(
+        context: TrustedControlInvocationIdentity,
+        intent?: NotebookExecutionIntent
+      ): (() => void) & { readonly nonce: string }
       completeControlInvocation(
         controlInvocationId: string,
         signal?: AbortSignal
@@ -1758,14 +1831,23 @@ class NotebookLocalRpcServer {
       endpoint: connection.endpoint,
       socketPath: connection.socketPath,
       token,
-      beginControlInvocation: (context) => {
+      beginControlInvocation: (context, intent) => {
+        const nonce = randomUUID()
+        const identity = Object.freeze({ ...context })
+        binding.controlInvocations ??= new Map()
+        const authority = { identity, intent, active: true }
+        binding.controlInvocations.set(nonce, authority)
         binding.activeControlInvocation = context
         ownedControlInvocationIds.add(context.toolInvocationId)
-        return () => {
-          if (binding.activeControlInvocation === context) {
-            delete binding.activeControlInvocation
-          }
-        }
+        return Object.assign(
+          () => {
+            authority.active = false
+            if (binding.activeControlInvocation === context) {
+              delete binding.activeControlInvocation
+            }
+          },
+          { nonce }
+        )
       },
       completeControlInvocation: async (controlInvocationId, signal) => {
         if (!ownedControlInvocationIds.has(controlInvocationId)) return []
@@ -1992,7 +2074,8 @@ class NotebookLocalRpcServer {
   }
 
   private async projectHostCapabilityState(
-    sessionBinding: NotebookRpcSessionBinding
+    sessionBinding: NotebookRpcSessionBinding,
+    controlInvocation?: TrustedControlInvocationIdentity
   ): Promise<Readonly<{ capabilities: HostCapabilityProjection; delegationAllowed: boolean }>> {
     const allowsMethod = (method: string): boolean =>
       !sessionBinding.allowedMethods || sessionBinding.allowedMethods.has(method)
@@ -2004,14 +2087,14 @@ class NotebookLocalRpcServer {
     )
     const hasDelegatedOrigin = sessionBinding.delegatedNotebook
       ? Boolean(sessionBinding.delegatedNotebook.provenanceContext.promptMessageId)
-      : Boolean(sessionBinding.activeControlInvocation?.originatingUserMessageId)
+      : Boolean(controlInvocation?.originatingUserMessageId)
     const delegatedWorkReady =
       hasDelegatedIdentity &&
       hasDelegatedOrigin &&
       (sessionBinding.delegatedNotebook
         ? !sessionBinding.delegatedNotebook.revoked &&
           (await sessionBinding.delegatedNotebook.isAttemptWritable())
-        : Boolean(sessionBinding.isControl && sessionBinding.activeControlInvocation))
+        : Boolean(sessionBinding.isControl && controlInvocation))
     let delegationAllowed = true
     if (
       callerRole === 'main' &&
@@ -2029,7 +2112,7 @@ class NotebookLocalRpcServer {
       capabilities: projectHostCapabilities({
         callerRole,
         isControl: Boolean(sessionBinding.isControl),
-        hasActiveControlInvocation: Boolean(sessionBinding.activeControlInvocation),
+        hasActiveControlInvocation: Boolean(controlInvocation),
         allowsMethod,
         delegatedWorkReady,
         delegationAllowed,
@@ -2146,7 +2229,12 @@ class NotebookLocalRpcServer {
       // A session capability can outlive its turn. Snapshot before reading the body so a
       // slow request cannot acquire a later turn's authority after cleanup has returned.
       const initialSessionBinding = this.sessionRpcCapabilities.get(bearerToken)
-      const initialControlInvocation = initialSessionBinding?.activeControlInvocation
+      const controlNonce = request.headers['x-open-science-control-invocation']
+      const controlAuthority =
+        typeof controlNonce === 'string'
+          ? initialSessionBinding?.controlInvocations?.get(controlNonce)
+          : undefined
+      const initialControlInvocation = controlAuthority?.identity
       const initialSessionId = initialSessionBinding
         ? (this.sessionAliases.get(initialSessionBinding.sessionId) ??
           initialSessionBinding.sessionId)
@@ -2252,7 +2340,7 @@ class NotebookLocalRpcServer {
             }
             await checkMemoryAccess()
           }
-          if (sessionBinding.activeControlInvocation?.executionMode === 'background') {
+          if (initialControlInvocation?.executionMode === 'background') {
             if (method === 'requestUserInput') {
               throw new BackgroundHostMethodUnsafeError('host.requestUserInput')
             }
@@ -2319,7 +2407,7 @@ class NotebookLocalRpcServer {
             )
           }
           if (method === 'viewImageCall') {
-            if (!sessionBinding.isControl || !sessionBinding.activeControlInvocation) {
+            if (!sessionBinding.isControl || !controlAuthority?.active) {
               throw new RpcHttpError(
                 403,
                 'host.viewImage requires an active trusted control invocation.'
@@ -2329,22 +2417,25 @@ class NotebookLocalRpcServer {
             if (Object.hasOwn(source ?? {}, 'path') && !sessionBinding.executionCwd) {
               throw new RpcHttpError(403, 'host.viewImage requires a trusted execution workspace.')
             }
-            if (Object.keys(params).some((key) => key !== 'source' && key !== 'options')) {
+            if (
+              Object.keys(params).some(
+                (key) => key !== 'source' && key !== 'options' && key !== 'control_invocation_id'
+              )
+            ) {
               throw new RpcHttpError(400, 'host.viewImage RPC params are invalid.')
             }
           }
-          if (
-            method === 'agentsCall' &&
-            params.op === 'switch' &&
-            !sessionBinding.activeControlInvocation
-          ) {
+          if (method === 'agentsCall' && params.op === 'switch' && !initialControlInvocation) {
             throw new RpcHttpError(
               403,
               'host.agents.switch requires an active trusted control invocation.'
             )
           }
           if (method === 'capabilitiesCall' || method === 'hostSdkHelp') {
-            const state = await this.projectHostCapabilityState(sessionBinding)
+            const state = await this.projectHostCapabilityState(
+              sessionBinding,
+              initialControlInvocation
+            )
             hostCapabilities = state.capabilities
             delegationAllowed = state.delegationAllowed
           }
@@ -2359,7 +2450,7 @@ class NotebookLocalRpcServer {
             !sessionBinding.delegatedNotebook &&
             (!sessionBinding.projectId ||
               !sessionBinding.agentFrameId ||
-              sessionBinding.activeControlInvocation !== initialControlInvocation ||
+              !controlAuthority?.active ||
               !initialControlInvocation?.toolInvocationId ||
               !initialControlInvocation.originatingUserMessageId)
           ) {
@@ -2415,7 +2506,7 @@ class NotebookLocalRpcServer {
             ...(method === 'viewImageCall'
               ? {
                   executionCwd: sessionBinding.executionCwd,
-                  controlInvocationId: sessionBinding.activeControlInvocation?.toolInvocationId,
+                  controlInvocationId: initialControlInvocation?.toolInvocationId,
                   agentFrameId: sessionBinding.agentFrameId,
                   attemptId: sessionBinding.delegatedWorkAttemptId,
                   role: sessionBinding.delegatedWorkRole ?? 'main'
@@ -2424,7 +2515,7 @@ class NotebookLocalRpcServer {
             ...(method === 'computeCall'
               ? {
                   // Bound by beginControlInvocation; an agent-controlled body value is overwritten.
-                  producerRunId: sessionBinding.activeControlInvocation?.toolInvocationId
+                  producerRunId: initialControlInvocation?.toolInvocationId
                 }
               : {}),
             ...(method === 'agentsCall' || method === 'skillsCall'
@@ -2432,10 +2523,11 @@ class NotebookLocalRpcServer {
                   session_id: sessionBinding.sessionId,
                   caller_role:
                     sessionBinding.delegatedWorkRole === 'delegate' ? 'delegate' : 'main',
-                  turn_id: sessionBinding.activeControlInvocation?.turnId,
+                  turn_id: initialControlInvocation?.turnId,
                   control_invocation_generation:
-                    sessionBinding.activeControlInvocation?.controlInvocationGeneration,
-                  control_invocation_id: sessionBinding.activeControlInvocation?.toolInvocationId
+                    initialControlInvocation?.controlInvocationGeneration,
+                  control_invocation_id: initialControlInvocation?.toolInvocationId,
+                  originating_user_message_id: initialControlInvocation?.originatingUserMessageId
                 }
               : {}),
             ...(method === 'delegatedWorkCall' || method === 'requestUserInput'
@@ -2449,12 +2541,12 @@ class NotebookLocalRpcServer {
                   permissionPrompts: sessionBinding.delegatedNotebook?.permissionPrompts,
                   origin_message_id:
                     sessionBinding.delegatedNotebook?.provenanceContext.promptMessageId ??
-                    sessionBinding.activeControlInvocation?.originatingUserMessageId,
+                    initialControlInvocation?.originatingUserMessageId,
                   tool_invocation_id:
                     delegatedQuestionInvocationId ??
                     (sessionBinding.delegatedNotebook
                       ? `delegated-notebook-capability:${randomUUID()}`
-                      : sessionBinding.activeControlInvocation?.toolInvocationId)
+                      : initialControlInvocation?.toolInvocationId)
                 }
               : method === 'delegatedOutputCall'
                 ? {
@@ -2465,7 +2557,7 @@ class NotebookLocalRpcServer {
                     root_execution_id: initialControlInvocation?.rootExecutionId,
                     origin_message_id:
                       sessionBinding.delegatedNotebook?.provenanceContext.promptMessageId ??
-                      sessionBinding.activeControlInvocation?.originatingUserMessageId
+                      initialControlInvocation?.originatingUserMessageId
                   }
                 : method === 'hostSdkHelp'
                   ? {
@@ -2480,7 +2572,7 @@ class NotebookLocalRpcServer {
                   projectId: sessionBinding.projectId,
                   agentId: this.sessionSpecialists.get(sessionBinding.sessionId),
                   turnId:
-                    sessionBinding.activeControlInvocation?.turnId ??
+                    initialControlInvocation?.turnId ??
                     this.activeArtifactTurnBindings.get(sessionBinding.sessionId)?.provenanceContext
                       .promptMessageId
                 }
@@ -2610,7 +2702,19 @@ class NotebookLocalRpcServer {
       ]
       const dispatchSignal =
         dispatchSignals.length === 1 ? dispatchSignals[0] : AbortSignal.any(dispatchSignals)
-      const executionIntent = authenticatedBinding?.executionIntent
+      const executionIntent = authenticatedBinding?.isControl
+        ? controlAuthority?.intent
+        : authenticatedBinding?.executionIntent
+      const startsDerivedWork =
+        (method === 'agentsCall' && resolvedParams.op === 'switch') ||
+        (method === 'delegatedWorkCall' &&
+          resolvedParams.operation !== 'stop_children' &&
+          (resolvedParams.op === undefined ||
+            resolvedParams.op === 'delegate' ||
+            resolvedParams.op === 'send_message'))
+      if (authenticatedBinding?.isControl && startsDerivedWork && !controlAuthority?.active)
+        throw new RpcHttpError(403, 'New execution requires an exact trusted control invocation.')
+      if (startsDerivedWork) executionIntent?.assertExecutable()
       if (executionIntent) {
         if (
           [
@@ -2623,7 +2727,7 @@ class NotebookLocalRpcServer {
           ].includes(method)
         )
           executionIntent.assertExecutable()
-        resolvedParams = withNotebookExecutionIntent(resolvedParams, executionIntent)
+        markNotebookExecutionIntent(resolvedParams, executionIntent)
       }
       const result =
         method === 'capabilitiesCall'
@@ -2932,19 +3036,18 @@ class NotebookLocalRpcServer {
         ) {
           throw new RpcHttpError(403, 'delegated user question capability identity is incomplete.')
         }
-        return this.delegatedWorkService.requestUserInput(
-          {
-            session: { projectId, sessionId },
-            frameId,
-            attemptId,
-            role: 'delegate',
-            permissionPrompts: params.permissionPrompts === 'none' ? 'none' : undefined,
-            originMessageId,
-            toolInvocationId
-          },
-          request,
+        const caller: AuthenticatedDelegateCaller = {
+          session: { projectId, sessionId },
+          frameId,
+          attemptId,
+          role: 'delegate',
+          permissionPrompts: params.permissionPrompts === 'none' ? 'none' : undefined,
+          originMessageId,
           toolInvocationId
-        )
+        }
+        const intent = notebookExecutionIntent(params)
+        if (intent) markNotebookExecutionIntent(caller, intent)
+        return this.delegatedWorkService.requestUserInput(caller, request, toolInvocationId)
       }
       if (!this.requestUserInput) throw new Error('User input is not configured.')
       return this.requestUserInput(request)
@@ -3466,11 +3569,13 @@ class NotebookLocalRpcServer {
         provenanceContext: _provenanceContext,
         registeredInputFiles: _registeredInputFiles,
         inputRunLeaseId: _inputRunLeaseId,
+        originating_user_message_id: _originatingUserMessageId,
         ...rest
       } = strippedParams
       void _provenanceContext
       void _registeredInputFiles
       void _inputRunLeaseId
+      void _originatingUserMessageId
       return this.agentsService.read(
         { op, params: rest },
         turnId && controlInvocationGeneration !== undefined && toolInvocationId
@@ -3480,10 +3585,10 @@ class NotebookLocalRpcServer {
               turnId,
               controlInvocationGeneration,
               toolInvocationId,
-              ...(provenanceContext
+              ...(typeof params.originating_user_message_id === 'string'
                 ? {
-                    originatingTurnId: provenanceContext.promptMessageId,
-                    originatingUserMessageId: provenanceContext.promptMessageId
+                    originatingTurnId: params.originating_user_message_id,
+                    originatingUserMessageId: params.originating_user_message_id
                   }
                 : {}),
               attachmentIds:
@@ -3572,6 +3677,8 @@ class NotebookLocalRpcServer {
           ? createNestedDelegateInvocationId(toolInvocationId, delegationCallId)
           : toolInvocationId
       }
+      const intent = notebookExecutionIntent(params)
+      if (intent) markNotebookExecutionIntent(caller, intent)
       if (params.operation === 'stop_children') {
         if (!this.delegatedWorkService.stopChildren) {
           throw new Error('host.stop_child is not configured.')

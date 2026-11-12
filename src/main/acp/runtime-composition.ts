@@ -220,7 +220,11 @@ type AcpRuntimeCompositionOptions = AcpRuntimeArtifacts & {
   preparedSkills?: Awaited<
     ReturnType<NonNullable<AcpSettingsCapabilities['prepareDelegatedSkills']>>
   >
-  delegatedNotebookConnection?: NotebookRpcConnection
+  delegatedNotebookConnection?: NotebookRpcConnection & {
+    refreshExecutionIntent?(
+      intent: import('../notebook/execution-intent').NotebookExecutionIntent
+    ): Promise<NotebookRpcConnection>
+  }
   // Disposable delegated framework homes contain copied authentication and Skill material.
   // Keep the per-attempt home protected even when a parent data directory is granted.
   delegatedRuntimeHome?: string
@@ -837,7 +841,9 @@ const createAcpRuntime = ({
           getShellRuntimeBinding,
           getRpcConnection: ({ sessionId, projectId, memoryTools, executionIntent }) =>
             delegatedNotebookConnection
-              ? Promise.resolve(delegatedNotebookConnection)
+              ? executionIntent && delegatedNotebookConnection.refreshExecutionIntent
+                ? delegatedNotebookConnection.refreshExecutionIntent(executionIntent)
+                : Promise.resolve(delegatedNotebookConnection)
               : notebookRpcServer.issueSessionConnection(
                   sessionId,
                   projectId,
