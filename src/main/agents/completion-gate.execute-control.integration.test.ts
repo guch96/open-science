@@ -415,7 +415,12 @@ describe('completion gate through the real host.agents SDK and executeControl se
     const connection = await harness.server.issueSessionConnection(
       'trusted-session',
       'default-project',
-      'root-frame-trusted-session'
+      'root-frame-trusted-session',
+      true,
+      harness.service.createExecutionIntent({
+        projectId: 'default-project',
+        sessionId: 'trusted-session'
+      })
     )
     harness.server.setArtifactTurnBinding('trusted-session', {
       ownerExecutionId: 'turn-1',
