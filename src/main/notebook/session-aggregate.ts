@@ -1,7 +1,9 @@
-import type { NotebookExecutionIntent } from './execution-intent'
 import { randomUUID } from 'node:crypto'
 import type { NotebookOwnedResource } from './owned-resources'
-import type { NotebookKernelEpochOwnership } from './execution-model-contract'
+import type {
+  NotebookExecutionIntentReference,
+  NotebookKernelEpochOwnership
+} from './execution-model-contract'
 export type { NotebookKernelEpochOwnership } from './execution-model-contract'
 
 import type {
@@ -230,11 +232,11 @@ export type NotebookSessionMcpRpcConnection = {
   endpoint: string
   socketPath?: string
   token: string
-  beginControlInvocation?: (
+  beginControlInvocation?(
     context: TrustedControlInvocationIdentity,
-    intent?: NotebookExecutionIntent,
+    intent?: NotebookExecutionIntentReference,
     credential?: string
-  ) => (() => void) & { readonly nonce?: string }
+  ): (() => void) & { readonly nonce?: string }
   completeControlInvocation?: (
     controlInvocationId: string,
     signal?: AbortSignal

@@ -25,7 +25,6 @@ type Release = {
   view: NotebookResourceRelease
   resources: NotebookOwnedResource[]
   results: Map<object, NotebookResourceCleanupResult>
-  settled?: Promise<void>
 }
 type Dependencies = {
   resources: (scope: { projectId?: string; sessionId?: string }) => NotebookOwnedResource[]
@@ -376,7 +375,6 @@ export class NotebookResourceReleaseOwner {
           })
           this.dependencies.changed()
         })
-      release.settled = operation
       this.dependencies.observe(scope, operation)
       this.dependencies.changed()
       return { view: this.view(release) }
