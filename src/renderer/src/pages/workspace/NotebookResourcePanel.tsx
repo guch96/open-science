@@ -25,6 +25,7 @@ import {
   dialogTitleClassName
 } from '@/components/ui/dialog-chrome'
 import { useSessionStore } from '@/stores/session-store'
+import { useProjectStore } from '@/stores/project-store'
 import { useDateTimeFormat } from '@/hooks/useDateTimeFormat'
 import { formatDisplayNumber } from '@/lib/locale-format'
 import { formatByteSize } from '@/lib/utils'
@@ -45,6 +46,9 @@ const NotebookContinuation = ({
     state.sessions.find(
       (session) => session.id === decision.sessionId && session.projectId === decision.projectId
     )
+  )
+  const projectName = useProjectStore(
+    (state) => state.projects.find((project) => project.id === decision.projectId)?.name
   )
   const [sending, setSending] = useState(false)
   const continueWork = async (): Promise<void> => {
@@ -79,6 +83,9 @@ const NotebookContinuation = ({
   return (
     <div className="space-y-2 rounded-lg border border-border-200 bg-bg-000 p-3 text-xs">
       <p className="font-medium">{session.title}</p>
+      <p className="text-text-100">
+        {t('Project: {{name}}', { name: projectName ?? decision.projectId })}
+      </p>
       <p className="text-text-100">
         {t(
           'Notebook work remains stopped until you explicitly continue. This sends a new guidance message and checks memory again.'

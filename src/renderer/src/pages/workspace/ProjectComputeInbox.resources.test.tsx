@@ -11,6 +11,7 @@ import type {
 } from '../../../../shared/notebook-resources'
 import { useNavigationStore } from '@/stores/navigation-store'
 import { useSessionStore } from '@/stores/session-store'
+import { useProjectStore } from '@/stores/project-store'
 import {
   dismissNotebookMemoryRejection,
   observeNotebookMemoryPolicy,
@@ -93,6 +94,7 @@ describe('Compute Notebook resource controls', () => {
     })
     sendMessage.mockResolvedValue({ id: 'fresh-user-message' })
     useNavigationStore.setState({ view: 'workspace', activeProjectId: 'project-1' })
+    useProjectStore.setState({ projects: [] })
     useSessionStore.setState({
       sessions: [
         {
@@ -452,6 +454,18 @@ describe('Compute Notebook resource controls', () => {
       sessionId: 'session-origin',
       refusalId: 'origin-refusal'
     }
+    useProjectStore.setState({
+      projects: [
+        {
+          id: origin.projectId,
+          name: 'Original project',
+          description: '',
+          isExample: false,
+          createdAt: 1,
+          updatedAt: 1
+        }
+      ]
+    })
     const existing = useSessionStore.getState().sessions[0]
     useSessionStore.setState({
       sessions: [
@@ -471,6 +485,7 @@ describe('Compute Notebook resource controls', () => {
       releases: [release({ status: 'released', continuations: [origin] })]
     }
     await render()
+    expect(container.textContent).toContain('Project: Original project')
     expect(
       [...container.querySelectorAll('button')].filter(
         (item) => item.textContent === 'Continue Notebook work'
