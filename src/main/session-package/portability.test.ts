@@ -294,3 +294,61 @@ it.each([
     }
   }
 )
+
+it('imports a legacy Notebook run without kernelKind as a cold historical session', async () => {
+  const archive = await archiveWithFiles([], {
+    version: 1,
+    projectId: 'project',
+    sessionId: 'session',
+    updatedAt: 2,
+    workspaceCwd: '$DATA/notebooks/project/session',
+    notebookSessionRoot: '$DATA/notebooks/project/session',
+    dataRoot: '$DATA/notebooks/project/session/data',
+    kernel: { runtimeRoot: '$DATA/runtime', pythonPath: '/source/runtime/python' },
+    runs: [
+      {
+        runId: 'legacy-run',
+        cellId: 'legacy-cell',
+        source: 'agent',
+        status: 'completed',
+        startedAt: 1,
+        endedAt: 2,
+        script: "print('legacy')",
+        text: { stdout: 'legacy\n', stderr: '', traceback: '', plain: ['legacy'] },
+        outputs: [],
+        artifacts: [],
+        workingFiles: []
+      }
+    ]
+  })
+  const target = await createProvenanceTestFixture()
+  const service = new SessionPackageService({
+    storageRoot: target.storageRoot,
+    configRoot: join(target.storageRoot, 'config'),
+    getClient: async () => target.client
+  })
+  try {
+    const imported = await service.importFrom(archive)
+    const [document] = await new NotebookRunRepository(target.storageRoot).readSessionDocuments(
+      imported.projectId,
+      imported.sessionId
+    )
+
+    expect(document.runs[0]).toMatchObject({ kernelKind: 'python', script: "print('legacy')" })
+    expect(document.kernel).toMatchObject({
+      runtimeRoot: join(target.storageRoot, 'runtime'),
+      lastKnownStatus: 'idle'
+    })
+    expect(document.kernel.pythonPath).toBeUndefined()
+    expect(document.runs[0]?.status).toBe('completed')
+    expect(
+      await new SessionRepository(join(target.storageRoot, 'config')).loadSession(
+        imported.projectId,
+        imported.sessionId
+      )
+    ).toMatchObject({ packageOrigin: { sourceProjectId: 'project', sourceSessionId: 'session' } })
+  } finally {
+    await service.close()
+    await target.dispose()
+  }
+})
