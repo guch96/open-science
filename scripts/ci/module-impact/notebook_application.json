@@ -146,7 +146,9 @@
     "src/main/notebook-payload.integration.test.ts",
     "src/main/notebook/authorized-directories.integration.test.ts",
     "src/main/notebook/idle-reclamation.ts",
-    "src/main/notebook/idle-reclamation.test.ts"
+    "src/main/notebook/idle-reclamation.test.ts",
+    "src/main/notebook/runtime-execution-admission.test.ts",
+    "src/main/notebook/runtime-pressure-reclamation.test.ts"
   ],
   "interfacePaths": [
     "src/main/notebook/harness-mcp-turn.ts",
@@ -344,7 +346,9 @@
       "src/main/notebook/runtime-service.architecture.test.ts",
       "src/main/notebook-payload.integration.test.ts",
       "src/main/notebook/source-analysis-worker.test.ts",
-      "src/main/notebook/idle-reclamation.test.ts"
+      "src/main/notebook/idle-reclamation.test.ts",
+      "src/main/notebook/runtime-execution-admission.test.ts",
+      "src/main/notebook/runtime-pressure-reclamation.test.ts"
     ],
     "contract": [
       "src/preload/index.test.ts",
@@ -855,6 +859,9 @@
       "src/main/composition/session-packages.test.ts"
     ]
   },
-  "capabilityOverlays": ["notebook_network_sandbox", "windows_sensitive"],
+  "capabilityOverlays": [
+    "notebook_network_sandbox",
+    "windows_sensitive"
+  ],
   "fallbackCapability": "main_runtime"
 }
