@@ -173,10 +173,11 @@ describe('Auto operation completeness against real tool registrations', () => {
         // strings. Strict inputs, mounted-server checks and single-use authorization are unchanged.
         'literature/mcp-server.ts':
           '561a62c02556d3677874d524dd7c9433b3131a42eda21f526d8684888a673cd9',
-        // Reviewed: interpreter descriptions now explain idle reclamation and volatile variables.
-        // Tool schemas, handlers, operation classifiers and Auto dispositions are unchanged.
+        // Reviewed: refusal/recovery guidance requires explicit user Retry/Continue; idle and Shell
+        // documentation is shortened. Main-only deferExecution changes the transport type only.
+        // Tool schemas, method routing, callbacks, classifiers and Auto dispositions are unchanged.
         'notebook/mcp-server.ts':
-          '40c4edee0775cde34095c02aee02764a465792fb657ed62a40b64dcf666b1718',
+          '8139613ad55b96cb965a52dfb6b28fa9f7ddc3663183fcc6c4c6fa55cb2ed1bd',
         // Reviewed: invalid-plan errors carry repair guidance; the handler call, its result and the
         // Plan operation dispositions are unchanged.
         'session-plan/plan-mcp-server.ts':

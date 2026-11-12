@@ -93,6 +93,44 @@ it('shows a live Agent refusal without a Notebook pane and ends it on Escape', a
   expect(execute).not.toHaveBeenCalled()
 })
 
+it('keeps a failed explicit continuation visible and dismisses only after a successful click', async () => {
+  const continueExecution = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('Continuation unavailable'))
+    .mockResolvedValue(undefined)
+  const refusal: NotebookMemoryRejectedEvent = {
+    projectId: 'project',
+    sessionId: 'session',
+    workspaceCwd: '/workspace/project',
+    source: 'agent',
+    refusalId: 'refusal',
+    memory: {
+      status: 'pressured',
+      reason: 'low',
+      source: 'linux-procfs',
+      executionScope: 'linux:host',
+      checkedAt: 1
+    }
+  }
+  await act(async () =>
+    root.render(<NotebookMemoryNoticeBridge projectId="project" onContinue={continueExecution} />)
+  )
+  await act(async () => rejected(refusal))
+  expect(continueExecution).not.toHaveBeenCalled()
+
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Recheck and retry' })))
+  expect(continueExecution).toHaveBeenCalledExactlyOnceWith(refusal)
+  expect(screen.getByRole('dialog')).toBeTruthy()
+  expect(screen.getByText('Continuation unavailable')).toBeTruthy()
+  expect(execute).not.toHaveBeenCalled()
+
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Recheck and retry' })))
+  expect(continueExecution).toHaveBeenCalledTimes(2)
+  expect(continueExecution).toHaveBeenNthCalledWith(2, refusal)
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(execute).not.toHaveBeenCalled()
+})
+
 it('updates recovery without running and opens the existing Compute preview on Manage', async () => {
   const continueExecution = vi.fn()
   await act(async () =>

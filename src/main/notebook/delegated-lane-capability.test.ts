@@ -136,6 +136,10 @@ describe('delegated Notebook lane capability', () => {
         shutdown: async () => ({ reaped: true })
       })
     })
+    const executionIntent = service.createExecutionIntent({
+      projectId: 'project-1',
+      sessionId: 'session-1'
+    })
     const server = new NotebookLocalRpcServer(service, {
       delegatedWorkService: {
         delegate: vi.fn(),
@@ -146,6 +150,7 @@ describe('delegated Notebook lane capability', () => {
       }
     })
     const child = await server.issueDelegatedNotebookConnection({
+      executionIntent,
       projectId: 'project-1',
       sessionId: 'session-1',
       rootFrameId: 'root-frame',
@@ -267,11 +272,16 @@ describe('delegated Notebook lane capability', () => {
         shutdown: async () => ({ reaped: true })
       })
     })
+    const executionIntent = service.createExecutionIntent({
+      projectId: 'project-1',
+      sessionId: 'session-1'
+    })
     const server = new NotebookLocalRpcServer(service, {
       token: 'global-token',
       delegatedWorkService: { delegate: vi.fn(), submitOutput }
     })
     const child = await server.issueDelegatedNotebookConnection({
+      executionIntent,
       projectId: 'project-1',
       sessionId: 'session-1',
       rootFrameId: 'root-frame',
@@ -352,8 +362,13 @@ describe('delegated Notebook lane capability', () => {
         return executor
       }
     })
+    const executionIntent = service.createExecutionIntent({
+      projectId: 'project-1',
+      sessionId: 'session-1'
+    })
     const server = new NotebookLocalRpcServer(service)
     const childOne = await server.issueDelegatedNotebookConnection({
+      executionIntent,
       projectId: 'project-1',
       sessionId: 'session-1',
       rootFrameId: 'root-frame-session-1',
@@ -366,6 +381,7 @@ describe('delegated Notebook lane capability', () => {
       isAttemptWritable: () => true
     })
     const childTwo = await server.issueDelegatedNotebookConnection({
+      executionIntent,
       projectId: 'project-1',
       sessionId: 'session-1',
       rootFrameId: 'root-frame-session-1',
@@ -461,9 +477,14 @@ describe('delegated Notebook lane capability', () => {
         shutdown: async () => ({ reaped: true })
       })
     })
+    const executionIntent = service.createExecutionIntent({
+      projectId: 'project-1',
+      sessionId: 'session-1'
+    })
     const server = new NotebookLocalRpcServer(service)
     let firstWritable = true
     const first = await server.issueDelegatedNotebookConnection({
+      executionIntent,
       projectId: 'project-1',
       sessionId: 'session-1',
       rootFrameId: 'root-frame-session-1',
@@ -476,6 +497,7 @@ describe('delegated Notebook lane capability', () => {
       isAttemptWritable: () => firstWritable
     })
     const sibling = await server.issueDelegatedNotebookConnection({
+      executionIntent,
       projectId: 'project-1',
       sessionId: 'session-1',
       rootFrameId: 'root-frame-session-1',
@@ -506,6 +528,7 @@ describe('delegated Notebook lane capability', () => {
       expect(superseded.status).toBe(401)
 
       const restarted = await server.issueDelegatedNotebookConnection({
+        executionIntent,
         projectId: 'project-1',
         sessionId: 'session-1',
         rootFrameId: 'root-frame-session-1',
