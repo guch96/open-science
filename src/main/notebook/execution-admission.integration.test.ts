@@ -5,6 +5,26 @@ import { afterEach, expect, it } from 'vitest'
 import { NotebookKernelExecutor } from './kernel-executor'
 import { NotebookShellProcessAdapter } from './shell-process'
 import { NotebookExecutionAdmissionError } from './execution-admission'
+import type { NotebookProcessSandbox } from './process-sandbox'
+
+const sandbox = (hooks: { wrap?: () => void; begin?: () => void }): NotebookProcessSandbox => ({
+  wrap: async (invocation) => {
+    hooks.wrap?.()
+    return {
+      ...invocation,
+      annotateStderr: (stderr) => stderr,
+      beginExecution: () => {
+        hooks.begin?.()
+        return () => undefined
+      },
+      cleanup: async (_reason, outcome) => ({
+        processesTerminated: outcome.processesTerminated,
+        networkClosed: true,
+        temporaryResourcesRemoved: true
+      })
+    }
+  }
+})
 
 const executors: NotebookKernelExecutor[] = []
 const roots: string[] = []
@@ -18,9 +38,18 @@ afterEach(async () => {
 it('refuses a new interpreter at the real creation boundary without creating a live namespace', async () => {
   const root = await mkdtemp(join(tmpdir(), 'notebook-admission-'))
   roots.push(root)
-  const executor = new NotebookKernelExecutor()
+  let pressured = false
+  const executor = new NotebookKernelExecutor({
+    processSandbox: sandbox({
+      wrap: () => {
+        pressured = true
+      }
+    })
+  })
   executors.push(executor)
   const result = await executor.execute({
+    projectId: 'project',
+    sessionId: 'one',
     kind: 'repl',
     code: 'globalThis.saved = 1',
     cwd: root,
@@ -30,7 +59,7 @@ it('refuses a new interpreter at the real creation boundary without creating a l
     executionAdmission: {
       prepare: async () => undefined,
       assertCurrent: (boundary) => {
-        if (boundary === 'create')
+        if (boundary === 'create' && pressured)
           throw new NotebookExecutionAdmissionError(
             'NOTEBOOK_MEMORY_PRESSURE',
             'Execution was not started.'
@@ -38,32 +67,46 @@ it('refuses a new interpreter at the real creation boundary without creating a l
       }
     }
   })
-  expect(result).toMatchObject({ status: 'failed', kernelDispatched: false })
+  expect(result).toMatchObject({
+    status: 'failed',
+    kernelDispatched: false,
+    recovery: { execution: 'not-started' }
+  })
   expect(executor.idleProcesses()).toEqual([])
 })
 
 it('refuses dispatch on a reused interpreter and preserves its existing variables', async () => {
   const root = await mkdtemp(join(tmpdir(), 'notebook-admission-'))
   roots.push(root)
-  const executor = new NotebookKernelExecutor()
+  let pressured = false
+  let pressureOnBegin = false
+  const executor = new NotebookKernelExecutor({
+    processSandbox: sandbox({
+      begin: () => {
+        if (pressureOnBegin) pressured = true
+      }
+    })
+  })
   executors.push(executor)
   const request = {
+    projectId: 'project',
+    sessionId: 'one',
     kind: 'repl' as const,
     cwd: root,
     notebookSessionRoot: root,
     dataRoot: root,
     runtimeRoot: root
   }
-  expect((await executor.execute({ ...request, code: 'globalThis.saved = 41' })).status).toBe(
-    'completed'
-  )
+  const initial = await executor.execute({ ...request, code: 'globalThis.saved = 41' })
+  expect(initial.status, initial.stderr || initial.traceback).toBe('completed')
+  pressureOnBegin = true
   const result = await executor.execute({
     ...request,
     code: 'globalThis.saved = 0',
     executionAdmission: {
       prepare: async () => undefined,
       assertCurrent: (boundary) => {
-        if (boundary === 'dispatch')
+        if (boundary === 'dispatch' && pressured)
           throw new NotebookExecutionAdmissionError(
             'NOTEBOOK_MEMORY_PRESSURE',
             'Execution was not started.'
@@ -81,7 +124,16 @@ it.skipIf(process.platform === 'win32')(
   async () => {
     const root = await mkdtemp(join(tmpdir(), 'notebook-shell-admission-'))
     roots.push(root)
-    const shell = new NotebookShellProcessAdapter()
+    let pressured = false
+    let pressureOnBegin = false
+    const shell = new NotebookShellProcessAdapter(
+      process.platform,
+      sandbox({
+        begin: () => {
+          if (pressureOnBegin) pressured = true
+        }
+      })
+    )
     shells.push(shell)
     const request = {
       projectId: 'project',
@@ -91,13 +143,14 @@ it.skipIf(process.platform === 'win32')(
       runtimeRoot: root
     }
     expect(await shell.execute({ ...request, command: 'saved=41' })).toMatchObject({ exitCode: 0 })
+    pressureOnBegin = true
     const result = await shell.execute({
       ...request,
       command: 'saved=0',
       executionAdmission: {
         prepare: async () => undefined,
         assertCurrent: (boundary) => {
-          if (boundary === 'dispatch')
+          if (boundary === 'dispatch' && pressured)
             throw new NotebookExecutionAdmissionError(
               'NOTEBOOK_MEMORY_PRESSURE',
               'Execution was not started.'

@@ -845,6 +845,7 @@ export const createApplicationModules = async (
     listAppIconPreviews
   })
   await composeBackendLifecycle({
+    notebookService: notebookRuntime.notebookService,
     settingsBootstrap,
     managedFiles,
     sessionAuthority,

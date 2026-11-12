@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { SessionReproducibilityBatches } from './session-reproducibility'
+import { NotebookExecutionAdmissionError } from '../notebook/execution-admission'
 import type {
   ArtifactReproducibilityCheckRequest,
   ArtifactReproducibilityCheckState
@@ -39,6 +40,28 @@ const state = (
   comparisons: []
 })
 describe('Session reproducibility batches', () => {
+  it('stops pending targets after a memory refusal and preserves completed targets', async () => {
+    const run = vi.fn(async (request: ArtifactReproducibilityCheckRequest) => {
+      if (request.artifactId === 'two')
+        throw new NotebookExecutionAdmissionError(
+          'NOTEBOOK_MEMORY_PRESSURE',
+          'Execution was not started.'
+        )
+      return state(request, 'matched')
+    })
+    const batches = new SessionReproducibilityBatches({ preflight, run, cancel: vi.fn() })
+    const ready = (await batches.command({ ...scope, action: 'prepare', targets }, 1))!
+    await batches.command({ ...scope, action: 'start', batchId: ready.batchId }, 1)
+    await vi.waitFor(async () =>
+      expect((await batches.command({ ...scope, action: 'get' }, 1))?.status).toBe('cancelled')
+    )
+    expect(
+      (await batches.command({ ...scope, action: 'get' }, 1))?.targets.map(
+        (target) => target.status
+      )
+    ).toEqual(['matched', 'failed', 'cancelled'])
+    expect(run.mock.calls.map(([request]) => request.artifactId)).toEqual(['one', 'two'])
+  })
   it('fixes versions at preflight, skips blocked targets and continues after failure', async () => {
     const run = vi.fn(async (request: ArtifactReproducibilityCheckRequest) => {
       if (request.artifactId === 'two') throw new Error('execution failed')

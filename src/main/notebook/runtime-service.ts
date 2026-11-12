@@ -3100,7 +3100,8 @@ class NotebookRuntimeService {
         return (shutdownResult as PromiseFulfilledResult<{ reaped: boolean }>).value
       })
       .finally(async () => {
-        if (this.memoryPolicyPromise) (await this.memoryPolicyPromise)?.dispose?.()
+        const policy = await this.memoryPolicyPromise?.catch(() => undefined)
+        policy?.dispose?.()
       })
     this.disposalPromise = disposal
     return disposal
@@ -3168,6 +3169,7 @@ export type {
   NotebookExecutor,
   NotebookExecutorLifecycleCallbacks,
   NotebookHandoffContext,
+  NotebookMemoryRejectionContext,
   NotebookRuntimeServiceCallbacks,
   NotebookRuntimeServiceOptions,
   NotebookShellResult

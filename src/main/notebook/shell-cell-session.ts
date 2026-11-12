@@ -240,6 +240,7 @@ export class ShellCellSession {
       await request.executionAdmission?.prepare('dispatch')
       request.executionAdmission?.assertCurrent('dispatch')
     } catch (error) {
+      if (request.signal?.aborted) return cancelledResult()
       if (!(error instanceof NotebookExecutionAdmissionError)) throw error
       return {
         stdout: '',
@@ -420,7 +421,8 @@ export class ShellCellSession {
       return {
         stdout: '',
         stderr: error instanceof Error ? error.message : String(error),
-        exitCode: null
+        exitCode: null,
+        ...(request.signal?.aborted ? { cancelled: true } : {})
       }
     } finally {
       timer?.cancel()
