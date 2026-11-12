@@ -248,6 +248,7 @@ type McpRpcConnectionBinding = {
 type NotebookRuntimeServiceOptions = ProjectIdScope & {
   memoryPolicy?: NotebookMemoryPolicyPort
   isSessionBusy?: (projectId: string, sessionId: string) => boolean | Promise<boolean>
+  isSessionExporting?: (projectId: string, sessionId: string) => boolean
   admitSessionWork?: (projectId: string, sessionId: string) => () => void
   // Config root: source of the app-owned claude config dir (protected from the kernel). Never relocated.
   configRoot: string
@@ -457,10 +458,41 @@ const resolveDefaultExecutorOptions = (): NotebookKernelExecutorOptions => {
 // Coordinates notebook cells, shared interpreters, persisted run history, and UI notifications.
 class NotebookRuntimeService {
   private memoryPolicyPromise?: Promise<NotebookMemoryPolicyPort>
+  private memoryPolicyUnsubscribe?: () => void
+  private memoryPolicyActive = false
+  private memoryPolicyDisposed = false
   getMemoryPolicy(): Promise<NotebookMemoryPolicyPort> {
-    return (this.memoryPolicyPromise ??= this.options.memoryPolicy
-      ? Promise.resolve(this.options.memoryPolicy)
-      : createNotebookMemoryPolicy(this.options.configRoot, this.options.platform))
+    return (this.memoryPolicyPromise ??= (
+      this.options.memoryPolicy
+        ? Promise.resolve(this.options.memoryPolicy)
+        : createNotebookMemoryPolicy(this.options.configRoot, this.options.platform)
+    ).then((policy) => {
+      this.memoryPolicyUnsubscribe = policy.subscribe?.(() => this.idleReclamation?.refresh())
+      policy.setActive?.(this.memoryPolicyActive && !this.memoryPolicyDisposed)
+      return policy
+    }))
+  }
+
+  private updateMemoryPolicyActivity(active: boolean): void {
+    if (this.memoryPolicyActive === active || this.memoryPolicyDisposed) return
+    this.memoryPolicyActive = active
+    void this.getMemoryPolicy()
+      .then((policy) => policy.setActive?.(this.memoryPolicyActive && !this.memoryPolicyDisposed))
+      .catch((error) =>
+        this.runtimeLogger.error(
+          'Notebook memory policy could not observe resources',
+          errorLogFields(error)
+        )
+      )
+  }
+
+  private notifyMemoryPolicyRejected(
+    context: NotebookMemoryRejectionContext,
+    state: import('./memory-policy').MemoryPolicyObservation
+  ): void {
+    // A rejected call ends independently; the existing serial idle owner may run afterward.
+    if (state.status === 'pressured') this.idleReclamation.refresh()
+    this.options.callbacks?.onMemoryPolicyRejected?.(context, state)
   }
 
   createExecutionAdmission(
@@ -474,7 +506,7 @@ class NotebookRuntimeService {
       executionScope,
       ...(context
         ? {
-            onRejected: (state) => this.options.callbacks?.onMemoryPolicyRejected?.(context, state)
+            onRejected: (state) => this.notifyMemoryPolicyRejected(context, state)
           }
         : {})
     })
@@ -534,7 +566,7 @@ class NotebookRuntimeService {
       executionScope,
       assertHostCurrent,
       onRejected: (state) =>
-        this.options.callbacks?.onMemoryPolicyRejected?.(
+        this.notifyMemoryPolicyRejected(
           {
             projectId: resolveProjectId(request, this.options.projectId),
             sessionId: request.sessionId,
@@ -1243,20 +1275,35 @@ class NotebookRuntimeService {
       getGrantedLocalRoots: options.getGrantedLocalRoots
     })
     this.idleReclamation = new NotebookIdleReclamation({
-      resources: () => [
-        ...this.sessionLifecycle.idleInterpreters(),
-        ...(this.shellProcess.idleProcesses?.() ?? []).map((resource) => ({
-          ...resource,
-          release: (stillIdle: () => boolean) =>
-            this.sessionLifecycle.reclaimIdleInterpreter(resource, stillIdle)
-        }))
-      ],
+      resources: () => {
+        const resources = [
+          ...this.sessionLifecycle.idleInterpreters(),
+          ...(this.shellProcess.idleProcesses?.() ?? []).map((resource) => ({
+            ...resource,
+            release: (stillIdle: () => boolean) =>
+              this.sessionLifecycle.reclaimIdleInterpreter(resource, stillIdle)
+          }))
+        ]
+        this.updateMemoryPolicyActivity(resources.length > 0)
+        return resources
+      },
+      memoryPolicy: () => this.getMemoryPolicy(),
+      isSessionHeld: options.isSessionExporting,
       isSessionBusy: async (projectId, sessionId) =>
         this.sessionLifecycle.hasPendingWork(sessionId) ||
         (await options.isSessionBusy?.(projectId, sessionId)) === true ||
         this.sessionLifecycle.hasPendingWork(sessionId),
       onFailure: (error) =>
-        this.runtimeLogger.error('Notebook idle reclamation failed', errorLogFields(error))
+        this.runtimeLogger.error('Notebook idle reclamation failed', errorLogFields(error)),
+      onReclamation: (resource, reason, result) =>
+        this.runtimeLogger.info('Notebook idle reclamation', {
+          projectId: resource.projectId,
+          sessionId: resource.sessionId,
+          group: resource.group,
+          lastUsedAt: resource.lastUsedAt,
+          reason,
+          result
+        })
     })
   }
 
@@ -3054,6 +3101,7 @@ class NotebookRuntimeService {
     } finally {
       // shutdownAll is reusable when an update/migration is cancelled.
       releaseFence()
+      this.idleReclamation.refresh()
     }
   }
 
@@ -3062,6 +3110,8 @@ class NotebookRuntimeService {
   // migration gates retain the reusable shutdown contract so a refused/cancelled flow can resume work.
   dispose(): Promise<{ reaped: boolean }> {
     if (this.disposalPromise) return this.disposalPromise
+    this.memoryPolicyDisposed = true
+    this.memoryPolicyUnsubscribe?.()
 
     // Close the terminal admission boundary before any asynchronous teardown starts. Existing holders
     // are released and queued acquisitions reject, so no package/environment operation can begin after
@@ -3120,6 +3170,7 @@ class NotebookRuntimeService {
       })
       .finally(async () => {
         const policy = await this.memoryPolicyPromise?.catch(() => undefined)
+        this.memoryPolicyUnsubscribe?.()
         policy?.dispose?.()
       })
     this.disposalPromise = disposal
