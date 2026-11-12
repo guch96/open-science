@@ -51,7 +51,19 @@ const cancelledResult = (): NotebookShellResult => ({
 // One real interpreter per Notebook lane. Transport state lives only in memory; requests are
 // serialized and never replayed. The existing process adapter still owns native tree cleanup.
 export class ShellCellSession {
+  readonly startedAt = Date.now()
   lastUsedAt = Date.now()
+
+  get resourcePhase(): 'starting' | 'running' | 'idle' | 'cleanup-pending' {
+    if (
+      this.closed ||
+      this.processResult?.ownedTreeReaped === false ||
+      this.processResult?.errorCode === 'shell-cleanup-incomplete'
+    )
+      return 'cleanup-pending'
+    if (!this.child) return 'starting'
+    return this.cell ? 'running' : 'idle'
+  }
 
   get isLive(): boolean {
     return Boolean(this.child && !this.closed && !this.processResult)

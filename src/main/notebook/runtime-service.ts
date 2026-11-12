@@ -1,4 +1,5 @@
 import { withDataRootWrite } from '../storage/migration-state'
+import type { NotebookOwnedResource } from './owned-resources'
 import type { NotebookDependencyAnalyzer } from '@aipoch/notebook-analysis'
 import { randomUUID } from 'node:crypto'
 import { NotebookIdleReclamation } from './idle-reclamation'
@@ -3180,6 +3181,18 @@ class NotebookRuntimeService {
   // Lists sessions with a cell mid-execution, for the pre-migration active-session warning.
   getActiveNotebookSessions(): { projectId: string; sessionId: string }[] {
     return this.sessionLifecycle.activeSessions()
+  }
+
+  // Main-only original-owner handles; never serialized into Notebook or Session packages.
+  ownedResources(scope: { projectId?: string; sessionId?: string } = {}): NotebookOwnedResource[] {
+    return [
+      ...this.sessionLifecycle.resources(scope),
+      ...(this.shellProcess.resources?.() ?? []).filter(
+        (resource) =>
+          (scope.projectId === undefined || resource.projectId === scope.projectId) &&
+          (scope.sessionId === undefined || resource.sessionId === scope.sessionId)
+      )
+    ]
   }
 
   // Purely in-memory Project projection for renderer monitoring. Dormant Sessions have no kernel
