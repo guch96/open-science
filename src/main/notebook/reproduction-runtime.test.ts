@@ -435,6 +435,7 @@ describe('Notebook reproduction runtime', () => {
         requirements: [requirement],
         storageRoot,
         attemptRoot,
+        createExecutionAdmission: healthyNotebookExecutionAdmission,
         processSandbox,
         projectId: 'artifact-reproducibility',
         sessionId: 'reproduction-1',
@@ -938,6 +939,7 @@ describe('Notebook reproduction runtime', () => {
         requirements,
         storageRoot,
         attemptRoot,
+        createExecutionAdmission: healthyNotebookExecutionAdmission,
         processSandbox: { wrap: vi.fn() },
         projectId: 'artifact-reproducibility',
         sessionId: 'reproduction-1'

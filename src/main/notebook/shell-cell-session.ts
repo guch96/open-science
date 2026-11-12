@@ -284,6 +284,7 @@ export class ShellCellSession {
     let timer: ExecutionDeadline | undefined
     let connectionTimer: ReturnType<typeof setTimeout> | undefined
     let timedOut = false
+    let waitingForNetwork = false
     if (!this.child) this.lifetime = new AbortController()
     const abort = (): void => {
       this.lifetime.abort()
@@ -358,7 +359,10 @@ export class ShellCellSession {
         }
       }
       if (!this.child) return await result
-      endExecution = this.beginExecution?.(request, (waiting) => timer?.setPaused(waiting))
+      endExecution = this.beginExecution?.(request, (waiting) => {
+        waitingForNetwork = waiting
+        timer?.setPaused(waiting)
+      })
       if (this.closed || request.signal?.aborted) abort()
       if (!this.lifetime.signal.aborted) {
         await request.executionAdmission?.prepare('dispatch')
@@ -368,6 +372,7 @@ export class ShellCellSession {
           timedOut = true
           abort()
         })
+        timer.setPaused(waitingForNetwork)
         const input = powershell && !this.nativeControl ? this.controlSocket! : this.child.stdin
         const frame = this.frame(request.command, this.cell!.marker, powershell)
         request.signal?.throwIfAborted()
