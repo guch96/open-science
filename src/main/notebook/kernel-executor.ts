@@ -551,6 +551,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
     return Array.from(this.procs.values(), (proc) => ({
       identity: proc,
       processKey: proc.key,
+      executionDomain: 'host',
       release: async () => {
         if (this.procs.get(proc.key) !== proc || !proc.alive || proc.pending) return false
         await this.terminate(proc.kind, proc.env)

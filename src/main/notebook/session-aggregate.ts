@@ -197,6 +197,7 @@ export type NotebookSessionExecutor<
   idleProcesses?: () => Array<{
     identity: object
     processKey: string
+    executionDomain?: 'host'
     release: () => Promise<boolean>
   }>
 }
