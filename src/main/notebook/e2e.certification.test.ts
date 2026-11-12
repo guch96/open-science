@@ -157,7 +157,13 @@ const makeHarness = async (opts: { idleTimeoutMs?: number } = {}): Promise<Harne
   service.setMcpRpcConnectionResolver(({ sessionId, projectId }) =>
     rpcServer.issueControlConnection(sessionId, projectId, 'root-frame-' + sessionId)
   )
-  const conn = await rpcServer.issueSessionConnection(SESSION, PROJECT, `root-frame-${SESSION}`)
+  const conn = await rpcServer.issueSessionConnection(
+    SESSION,
+    PROJECT,
+    `root-frame-${SESSION}`,
+    true,
+    service.createExecutionIntent({ projectId: PROJECT, sessionId: SESSION })
+  )
 
   const env: NotebookMcpEnvironment = {
     endpoint: conn.endpoint,

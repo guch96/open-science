@@ -1812,7 +1812,9 @@ describe('repl_execute tool', () => {
     const connection = await rpc.issueSessionConnection(
       'session-1',
       'default-project',
-      'root-frame-session-1'
+      'root-frame-session-1',
+      true,
+      service.createExecutionIntent({ projectId: 'default-project', sessionId: 'session-1' })
     )
     const mcp = createNotebookMcpServer({
       ...connection,
@@ -1887,7 +1889,9 @@ describe('repl_execute tool', () => {
     const connection = await rpc.issueSessionConnection(
       'session-1',
       'default-project',
-      'root-frame-session-1'
+      'root-frame-session-1',
+      true,
+      service.createExecutionIntent({ projectId: 'default-project', sessionId: 'session-1' })
     )
     const mcp = createNotebookMcpServer({
       ...connection,
@@ -2003,7 +2007,9 @@ describe('repl_execute tool', () => {
     const connection = await rpcServer.issueSessionConnection(
       'session-1',
       'default-project',
-      'root-frame-session-1'
+      'root-frame-session-1',
+      true,
+      service.createExecutionIntent({ projectId: 'default-project', sessionId: 'session-1' })
     )
     const mcpServer = createNotebookMcpServer({
       endpoint: connection.endpoint,

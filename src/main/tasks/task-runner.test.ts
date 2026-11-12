@@ -5340,7 +5340,9 @@ describe('TaskRunner', () => {
     const connection = await rpc.issueSessionConnection(
       session.id,
       project.id,
-      `root-frame-${session.id}`
+      `root-frame-${session.id}`,
+      true,
+      notebook.createExecutionIntent({ projectId: project.id, sessionId: session.id })
     )
     const bind = (executionId: string): void =>
       rpc.setArtifactTurnBinding(session.id, {

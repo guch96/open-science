@@ -1654,7 +1654,15 @@ class AcpRuntime {
     }
     const origin = request.provenanceContext?.promptMessageId
     let intent = origin ? notebook.resolveExecutionIntent?.(scope, origin) : undefined
-    intent ??= this.sessionCapabilities.notebookExecutionIntentFor(request.sessionId)
+    intent ??= notebook.currentExecutionIntent
+      ? notebook.currentExecutionIntent(scope)
+      : this.sessionCapabilities.notebookExecutionIntentFor(request.sessionId)
+    if (!intent && origin && notebook.createExecutionIntent) {
+      // TaskRunner has accepted this exact first root under its Session reservation. Generic
+      // resume, application prompts and later roots cannot replace an existing refused context.
+      intent = notebook.createExecutionIntent(scope)
+      intent.prepareUserExecution()
+    }
     if (!intent)
       throw new Error(
         'Notebook Task execution context is unavailable. Execution was not started; repair the runtime before starting a new Task.'
