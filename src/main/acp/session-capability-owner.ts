@@ -1419,75 +1419,84 @@ export class AcpSessionCapabilityOwner {
     if (!old || !routingId || !notebook) throw new Error('Notebook capability is unavailable.')
     let connection: NotebookRpcConnection | undefined
     let commitExecution: (() => void) | undefined
-    const environment = await this.buildNotebookEnvironment(
-      routingId,
-      cwd,
-      projectId,
-      notebook.memoryTools ?? true,
-      this.shellRuntimeBindings.get(appSessionId) ?? defaultShellRuntimeBinding(),
-      (value) => {
-        connection = value
-        commitExecution = value.deferExecution?.()
-      },
-      (await this.options.wslSetupSessions?.isBound(appSessionId)) === true,
-      executionIntent
-    )
-    if (!environment || !connection) throw new Error('Notebook capability is unavailable.')
-    const ownedConnection = connection
-    let replacement: McpServer
-    if ('command' in old) {
-      replacement = {
-        ...createNotebookMcpServerConfig({
-          command: notebook.mcpCommand ?? process.execPath,
-          entryPath: notebook.mcpEntryPath,
-          memoryTools: notebook.memoryTools ?? true,
-          ...environment
-        }),
-        name: old.name
+    try {
+      const environment = await this.buildNotebookEnvironment(
+        routingId,
+        cwd,
+        projectId,
+        notebook.memoryTools ?? true,
+        this.shellRuntimeBindings.get(appSessionId) ?? defaultShellRuntimeBinding(),
+        (value) => {
+          connection = value
+          commitExecution = value.deferExecution?.()
+        },
+        (await this.options.wslSetupSessions?.isBound(appSessionId)) === true,
+        executionIntent
+      )
+      if (!environment || !connection) throw new Error('Notebook capability is unavailable.')
+      const ownedConnection = connection
+      let replacement: McpServer
+      if ('command' in old) {
+        replacement = {
+          ...createNotebookMcpServerConfig({
+            command: notebook.mcpCommand ?? process.execPath,
+            entryPath: notebook.mcpEntryPath,
+            memoryTools: notebook.memoryTools ?? true,
+            ...environment
+          }),
+          name: old.name
+        }
+      } else {
+        const host = this.options.mcpHttpHost
+        if (!host) throw new Error('Notebook HTTP host is unavailable.')
+        const { token } = await host.ensureStarted()
+        host.registerNotebook(routingId, environment)
+        replacement = {
+          type: 'http',
+          name: old.name,
+          url: host.urlFor('notebook', routingId),
+          headers: [{ name: 'authorization', value: `Bearer ${token}` }]
+        }
       }
-    } else {
-      const host = this.options.mcpHttpHost
-      if (!host) {
-        ownedConnection.release?.()
-        throw new Error('Notebook HTTP host is unavailable.')
+      const mcpServers = Object.freeze(
+        previous.map((server) => (server === old ? replacement : server))
+      )
+      let finalized = false
+      return {
+        mcpServers,
+        commit: () => {
+          if (finalized) throw new Error('Notebook capability refresh is already finalized.')
+          if (this.mcpServers.get(appSessionId) !== previous)
+            throw new Error('Notebook capability refresh was superseded.')
+          commitExecution?.()
+          const oldToken = this.notebookTokens.get(appSessionId)
+          const tokens = this.sessionCapabilityTokens.get(appSessionId) ?? []
+          this.sessionCapabilityTokens.set(appSessionId, [
+            ...tokens.filter((token) => token !== oldToken),
+            ownedConnection.token
+          ])
+          this.notebookTokens.set(appSessionId, ownedConnection.token)
+          this.notebookIntents.set(appSessionId, executionIntent)
+          this.mcpServers.set(appSessionId, mcpServers)
+          this.commitNotebookRelease(appSessionId, ownedConnection.release)
+          finalized = true
+        },
+        release: () => {
+          if (finalized) return
+          finalized = true
+          ownedConnection.release?.()
+        }
       }
-      const { token } = await host.ensureStarted()
-      host.registerNotebook(routingId, environment)
-      replacement = {
-        type: 'http',
-        name: old.name,
-        url: host.urlFor('notebook', routingId),
-        headers: [{ name: 'authorization', value: `Bearer ${token}` }]
+    } catch (error) {
+      try {
+        connection?.release?.()
+      } catch (cleanupError) {
+        safeLogError('failed notebook capability refresh cleanup failed', {
+          ...diagnosticErrorFields(cleanupError),
+          sessionId: appSessionId
+        })
       }
-    }
-    const mcpServers = Object.freeze(
-      previous.map((server) => (server === old ? replacement : server))
-    )
-    let finalized = false
-    return {
-      mcpServers,
-      commit: () => {
-        if (finalized) throw new Error('Notebook capability refresh is already finalized.')
-        if (this.mcpServers.get(appSessionId) !== previous)
-          throw new Error('Notebook capability refresh was superseded.')
-        commitExecution?.()
-        const oldToken = this.notebookTokens.get(appSessionId)
-        const tokens = this.sessionCapabilityTokens.get(appSessionId) ?? []
-        this.sessionCapabilityTokens.set(appSessionId, [
-          ...tokens.filter((token) => token !== oldToken),
-          ownedConnection.token
-        ])
-        this.notebookTokens.set(appSessionId, ownedConnection.token)
-        this.notebookIntents.set(appSessionId, executionIntent)
-        this.mcpServers.set(appSessionId, mcpServers)
-        this.commitNotebookRelease(appSessionId, ownedConnection.release)
-        finalized = true
-      },
-      release: () => {
-        if (finalized) return
-        finalized = true
-        ownedConnection.release?.()
-      }
+      throw error
     }
   }
 

@@ -86,6 +86,97 @@ describe('ACP session capability owner', () => {
     expect(owner.mcpServersFor('session')).toEqual(refresh.mcpServers)
     expect(owner.notebookExecutionIntentFor('session')).toBe(intent)
   })
+  it.each(['startup', 'registration', 'url'] as const)(
+    'releases a failed Notebook refresh after HTTP %s failure without changing other capabilities',
+    async (failurePoint) => {
+      const failure = new Error(`Notebook HTTP ${failurePoint} failed`)
+      let fail = false
+      const host = {
+        ensureStarted: vi.fn(async () => {
+          if (fail && failurePoint === 'startup') throw failure
+          return { endpoint: 'http://127.0.0.1:5', token: 'host' }
+        }),
+        registerNotebook: vi.fn(() => {
+          if (fail && failurePoint === 'registration') throw failure
+        }),
+        registerSkillImport: vi.fn(),
+        registerReceiptScope: vi.fn(),
+        urlFor: vi.fn((kind: string, id: string) => {
+          if (fail && failurePoint === 'url') throw failure
+          return `http://127.0.0.1:5/${kind}/${id}`
+        }),
+        unregister: vi.fn()
+      } as unknown as AgentMcpHttpHost
+      const releases = [vi.fn(), vi.fn(), vi.fn()]
+      const activate = vi.fn()
+      const getNotebookConnection = vi.fn(async () => {
+        const index = getNotebookConnection.mock.calls.length - 1
+        return {
+          endpoint: 'http://127.0.0.1:1',
+          token: `notebook-${index + 1}`,
+          release: releases[index],
+          deferExecution: () => activate
+        }
+      })
+      const skillRelease = vi.fn()
+      const getSkillConnection = vi.fn(async () => ({
+        endpoint: 'http://127.0.0.1:2',
+        token: 'skill',
+        release: skillRelease
+      }))
+      const owner = createOwner({
+        artifacts: undefined,
+        notebook: {
+          projectId: 'project',
+          mcpEntryPath: '/app/main.js',
+          getRpcConnection: getNotebookConnection
+        },
+        skillImport: { mcpEntryPath: '/app/main.js', getRpcConnection: getSkillConnection },
+        mcpHttpHost: host
+      })
+      const provision = await owner.provision({
+        stableAppSessionId: 'session',
+        sessionCwd: '/workspace',
+        projectId: 'project',
+        framework: harnessFramework,
+        nativeMcpEnabled: true,
+        bridgeMcpAliasesEnabled: false,
+        policy: CURRENT_PRIMARY_SESSION_CAPABILITY_POLICY
+      })
+      provision.commit('session')
+      const before = owner.mcpServersFor('session')
+      const request = {
+        appSessionId: 'session',
+        projectId: 'project',
+        cwd: '/workspace',
+        executionIntent: new NotebookExecutionIntent({ projectId: 'project', sessionId: 'session' })
+      }
+
+      fail = true
+      await expect(owner.prepareNotebookConnectionRefresh(request)).rejects.toBe(failure)
+      expect(releases[1]).toHaveBeenCalledOnce()
+      expect(releases[0]).not.toHaveBeenCalled()
+      expect(activate).not.toHaveBeenCalled()
+      expect(owner.mcpServersFor('session')).toBe(before)
+      expect(owner.notebookCredentialFor('session')).toBe('notebook-1')
+      expect(getSkillConnection).toHaveBeenCalledOnce()
+      expect(skillRelease).not.toHaveBeenCalled()
+      expect(host.unregister).not.toHaveBeenCalled()
+
+      fail = false
+      const refresh = await owner.prepareNotebookConnectionRefresh(request)
+      refresh.commit()
+      expect(owner.notebookCredentialFor('session')).toBe('notebook-3')
+      expect(releases[0]).toHaveBeenCalledOnce()
+      expect(releases[1]).toHaveBeenCalledOnce()
+      expect(releases[2]).not.toHaveBeenCalled()
+      expect(activate).toHaveBeenCalledOnce()
+      expect(getSkillConnection).toHaveBeenCalledOnce()
+      expect(skillRelease).not.toHaveBeenCalled()
+      for (const server of before.filter(({ name }) => !name.includes('notebook')))
+        expect(refresh.mcpServers.find(({ name }) => name === server.name)).toBe(server)
+    }
+  )
   it('releases provisional and committed HTTP Skill loaders without revoking a successor', async () => {
     const releases: ReturnType<typeof vi.fn>[] = []
     const host = {
