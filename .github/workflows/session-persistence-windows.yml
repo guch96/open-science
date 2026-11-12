@@ -1,0 +1,103 @@
+name: Session Persistence Windows
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/session-persistence-windows.yml
+      - src/main/session-persistence/**
+      - src/main/application-command-wiring.ts
+      - src/main/application-command-wiring.test.ts
+      - src/shared/session-persistence.ts
+      - src/shared/session-persistence/**
+      - package.json
+      - package-lock.json
+      - vitest.config.ts
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: session-persistence-windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  persistence:
+    name: Windows session persistence and symlink
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Record Windows and revision evidence
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP 'session-persistence-windows'
+          New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
+          $platform = node -p process.platform
+          if ($platform -ne 'win32') { throw 'This validation requires real Windows.' }
+          [ordered]@{
+            checkedOutSha = (git rev-parse HEAD)
+            prHeadSha = $env:PR_HEAD_SHA
+            windows = [Environment]::OSVersion.VersionString
+            node = (node --version)
+            npm = (npm --version)
+            platform = $platform
+          } | ConvertTo-Json | Set-Content (Join-Path $evidenceRoot 'environment.json')
+
+      - name: Install locked dependencies
+        run: node scripts/ci/npm-ci.mjs --prefer-offline --no-audit --fund=false
+
+      - name: Run the original symlink catalog case
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP 'session-persistence-windows/symlink.json'
+          npx vitest run src/main/session-persistence/repository.test.ts --maxWorkers=1 --reporter=verbose --reporter=json "--outputFile=$reportPath" -t 'keeps identity absence cleanup incomplete for symlink catalogs$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          $cases = @($report.testResults | ForEach-Object { $_.assertionResults } | Where-Object {
+            $_.fullName -match 'keeps identity absence cleanup incomplete for symlink catalogs$'
+          })
+          if ($cases.Count -ne 1 -or $cases[0].status -ne 'passed' -or $report.numPassedTests -ne 1) {
+            throw 'The original symlink case must execute and pass; a skipped or missing case is not acceptance.'
+          }
+
+      - name: Run complete persistence validation files
+        run: |
+          $persistenceTests = @(
+            'src/main/session-persistence/startup-hydration.integration.test.ts',
+            'src/main/session-persistence/recovery-commit.integration.test.ts',
+            'src/main/session-persistence/coordinator.test.ts',
+            'src/main/session-persistence/coordinator-contract.test.ts',
+            'src/main/session-persistence/coordinator.architecture.test.ts',
+            'src/main/session-persistence/operation-scheduler.test.ts',
+            'src/main/session-persistence/repository.test.ts',
+            'src/main/session-persistence/projection.test.ts',
+            'src/main/session-persistence/runtime-session-owner.test.ts',
+            'src/main/session-persistence/terminal-commit-scheduler.test.ts',
+            'src/main/session-persistence/terminal-commit-recovery.test.ts',
+            'src/main/session-persistence/deletion-integration.test.ts',
+            'src/main/application-command-wiring.test.ts'
+          )
+          $reportPath = Join-Path $env:RUNNER_TEMP 'session-persistence-windows/persistence.json'
+          npx vitest run @persistenceTests --maxWorkers=2 --reporter=verbose --reporter=json "--outputFile=$reportPath"
+          exit $LASTEXITCODE
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-session-persistence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-persistence-windows/
+          retention-days: 7
+          if-no-files-found: error
