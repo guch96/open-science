@@ -584,4 +584,55 @@ describe('Compute Notebook resource controls', () => {
     await act(async () => finish(view))
     expect(getProjectResources).toHaveBeenCalledTimes(3)
   })
+
+  it('identifies original environments and lanes in cleanup results after their resources are replaced', async () => {
+    const completed = release({
+      status: 'released',
+      resources: [
+        {
+          id: 'python-original',
+          group: 'kernel',
+          kind: 'python',
+          environment: 'original analysis',
+          laneKey: 'original-main',
+          status: 'released'
+        },
+        {
+          id: 'python-delegate',
+          group: 'kernel',
+          kind: 'python',
+          environment: 'original statistics',
+          laneKey: 'original-delegate',
+          status: 'released'
+        }
+      ]
+    })
+    view = { groups: [], pendingDecisions: [], releases: [completed] }
+    await render()
+    await act(async () => button('View cleanup progress').click())
+    const progress = document.querySelector('[role="dialog"]')!
+    expect(progress.textContent).toContain('Python · original analysis')
+    expect(progress.textContent).toContain('Python · original statistics')
+    expect(progress.textContent).toContain('Lane: original-main')
+    expect(progress.textContent).toContain('Lane: original-delegate')
+    view = {
+      ...view,
+      groups: [
+        {
+          ...group('replacement'),
+          resources: [
+            {
+              ...group().resources[0],
+              environment: 'replacement environment',
+              laneKey: 'replacement-lane'
+            }
+          ]
+        }
+      ]
+    }
+    await act(async () => changed())
+    expect(progress.textContent).toContain('original analysis')
+    expect(progress.textContent).not.toContain('replacement environment')
+    expect(sendMessage).not.toHaveBeenCalled()
+  })
 })

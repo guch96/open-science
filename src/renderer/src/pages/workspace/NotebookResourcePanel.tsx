@@ -529,13 +529,17 @@ const NotebookResourcePanel = ({
                 {progress?.resources.map((resource) => (
                   <li key={resource.id} className="space-y-1 rounded-md bg-bg-10 p-3">
                     <p className="font-medium">
-                      {resourceLabel(resource, t)} ·{' '}
+                      {resourceLabel(resource, t)}
+                      {resource.environment ? ` · ${resource.environment}` : ''} ·{' '}
                       {resource.status === 'released'
                         ? t('Released')
                         : resource.status === 'pending'
                           ? t('Releasing')
                           : t('Cleanup incomplete')}
                     </p>
+                    {resource.laneKey ? (
+                      <p>{t('Lane: {{lane}}', { lane: resource.laneKey })}</p>
+                    ) : null}
                     {resource.processesTerminated !== undefined ? (
                       <p>
                         {t('Processes terminated: {{result}}', {
