@@ -142,6 +142,7 @@ const ProjectComputeInbox = ({ isActive = true }: { isActive?: boolean }): React
   const sessions = useSessionStore((state) => state.sessions)
   const refreshNotebook = useRef<() => void>(() => undefined)
   const pollNotebook = useRef<() => void>(() => undefined)
+  const notebookVisible = useRef(isActive)
   const [notebookSnapshot, setNotebookSnapshot] = useState<{
     projectId: string
     activity: NotebookProjectActivity
@@ -161,7 +162,12 @@ const ProjectComputeInbox = ({ isActive = true }: { isActive?: boolean }): React
       : EMPTY_NOTEBOOK_RESOURCES
 
   useEffect(() => {
-    if (!projectId || !isActive) return
+    notebookVisible.current = isActive
+    if (isActive) refreshNotebook.current()
+  }, [isActive])
+
+  useEffect(() => {
+    if (!projectId) return
     const refresh = createActivityRefresh(
       async () => {
         const [activity, resources] = await Promise.all([
@@ -171,7 +177,7 @@ const ProjectComputeInbox = ({ isActive = true }: { isActive?: boolean }): React
         return { activity, resources, observedAt: Date.now() }
       },
       (snapshot) => setNotebookSnapshot({ projectId, ...snapshot }),
-      () => document.visibilityState !== 'hidden'
+      () => notebookVisible.current && document.visibilityState !== 'hidden'
     )
     refreshNotebook.current = refresh.refresh
     pollNotebook.current = refresh.poll
@@ -190,7 +196,7 @@ const ProjectComputeInbox = ({ isActive = true }: { isActive?: boolean }): React
       refresh.dispose()
       stop()
     }
-  }, [projectId, isActive])
+  }, [projectId])
 
   const hasNotebookResources =
     notebookResources.groups.length > 0 ||

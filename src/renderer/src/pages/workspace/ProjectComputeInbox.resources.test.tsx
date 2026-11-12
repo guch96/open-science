@@ -551,4 +551,22 @@ describe('Compute Notebook resource controls', () => {
     await act(async () => changed())
     expect(button('Retry cleanup', progress).disabled).toBe(false)
   })
+
+  it('keeps a single read in flight when a retained Compute tab is hidden and reopened before it settles', async () => {
+    await render()
+    let finish!: (value: NotebookProjectResources) => void
+    getProjectResources.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    act(() => changed())
+    expect(getProjectResources).toHaveBeenCalledTimes(2)
+    await act(async () => root?.render(<ProjectComputeInbox isActive={false} />))
+    await act(async () => root?.render(<ProjectComputeInbox isActive />))
+    expect(getProjectResources).toHaveBeenCalledTimes(2)
+    await act(async () => finish(view))
+    expect(getProjectResources).toHaveBeenCalledTimes(3)
+  })
 })
