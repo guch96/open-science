@@ -139,7 +139,17 @@ async function setup(
     }
   }
   rpc.setArtifactTurnBinding('session', binding)
-  const connection = await rpc.issueSessionConnection('session', 'project', 'root-frame-session')
+  const executionIntent = service.createExecutionIntent({
+    projectId: 'project',
+    sessionId: 'session'
+  })
+  const connection = await rpc.issueSessionConnection(
+    'session',
+    'project',
+    'root-frame-session',
+    true,
+    executionIntent
+  )
   cleanup.push(async () => connection.release?.())
   const environment = {
     ...connection,

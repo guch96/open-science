@@ -33548,12 +33548,19 @@ it('connects the optional built-in harness through the host runtime and releases
   }
 })
 
-it.each(['new', 'resume'] as const)(
+it.each(['new', 'resume', 'task'] as const)(
   'keeps Notebook %s bootstrap read-only until a trusted user prompt creates execution authority',
   async (entry) => {
     const root = await mkdtemp(join(tmpdir(), 'acp-notebook-bootstrap-'))
     const child = new FakeAgentProcess()
     const scope = { projectId: 'project', sessionId: 'restored-notebook-provider' }
+    let pressured = false
+    const observeMemory = (): import('../notebook/memory-policy').MemoryPolicyObservation => ({
+      status: pressured ? 'pressured' : 'healthy',
+      reason: { code: pressured ? 'low-memory' : 'healthy' },
+      source: 'test-policy',
+      executionScope: 'test:host'
+    })
     const execute = vi.fn(async () => ({
       status: 'completed' as const,
       stdout: 'trusted-result',
@@ -33567,7 +33574,7 @@ it.each(['new', 'resume'] as const)(
       configRoot: root,
       dataRoot: root,
       projectId: scope.projectId,
-      memoryPolicy: healthyNotebookMemoryPolicy(),
+      memoryPolicy: { getState: async () => observeMemory(), currentState: observeMemory },
       executorFactory: () => ({ execute, shutdown: async () => ({ reaped: true }) })
     })
     const rpc = new NotebookLocalRpcServer(service, { transport: 'tcp' })
@@ -33620,6 +33627,9 @@ it.each(['new', 'resume'] as const)(
         mcpEntryPath: '/app/main.js',
         createExecutionIntent: (value) => service.createExecutionIntent(value),
         currentExecutionIntent: (value) => service.currentExecutionIntent(value),
+        rememberExecutionIntent: (value, origin, intent) =>
+          service.rememberExecutionIntent(value, origin, intent),
+        resolveExecutionIntent: (value, origin) => service.resolveExecutionIntent(value, origin),
         registerSessionAlias: (alias, sessionId) => rpc.registerSessionAlias(alias, sessionId),
         releaseSessionCapabilities: (sessionId, tokens) =>
           rpc.releaseSessionCapabilitiesIfOwned(sessionId, tokens),
@@ -33643,12 +33653,68 @@ it.each(['new', 'resume'] as const)(
       expect(execute).not.toHaveBeenCalled()
       expect(service.currentExecutionIntent(scope)).toBeUndefined()
 
-      await runtime.sendPrompt(
-        withNotebookUserOperation(
-          { sessionId: scope.sessionId, text: 'Execute the current Notebook.' },
-          { projectId: scope.projectId, assertCurrent: () => undefined }
+      if (entry === 'task') {
+        const task = createAcpTaskAgentPort(
+          {
+            captureNotebookTaskIntent: (request) => runtime.captureNotebookTaskIntent(request),
+            getSnapshot: () => runtime.getSnapshot(),
+            resumeSession: (request) => runtime.resumeSession(request),
+            setPermissionProfile: (request) => runtime.setPermissionProfile(request),
+            setMemoryEnabled: (sessionId, enabled) => runtime.setMemoryEnabled(sessionId, enabled),
+            sendPrompt: (request) => runtime.sendPrompt(request),
+            sendPromptObserved: (request) => runtime.sendPrompt(request),
+            cancelPrompt: (request) => runtime.cancelPrompt(request)
+          },
+          { create: vi.fn() }
         )
-      )
+        const acceptedTask = {
+          sessionId: scope.sessionId,
+          promptMessageId: 'accepted-task-root',
+          provenanceContext: {
+            rootFrameId: `root-frame-${scope.sessionId}`,
+            agentFrameId: `root-frame-${scope.sessionId}`,
+            messageBranchId: 'task-branch',
+            runtimeSegmentId: 'task-segment',
+            promptMessageId: 'accepted-task-root'
+          },
+          text: 'Execute the current Notebook.'
+        }
+        await task.prompt(acceptedTask)
+        expect(agent.prompts).toHaveLength(1)
+        expect(promptResult).toContain('"status":"completed"')
+        expect(execute).toHaveBeenCalledOnce()
+        pressured = true
+        await task.prompt(acceptedTask)
+        expect(promptResult).toContain('NOTEBOOK_MEMORY_PRESSURE')
+        pressured = false
+        const stopped = service.currentExecutionIntent(scope)!
+        await task.prompt({ ...acceptedTask, text: 'Retry using a changed tool.' })
+        expect(promptResult).toContain('NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION')
+        expect(execute).toHaveBeenCalledOnce()
+        await runtime.sendPrompt(
+          withNotebookUserOperation(
+            { sessionId: scope.sessionId, text: 'Explicitly continue a new Notebook execution.' },
+            {
+              projectId: scope.projectId,
+              refusalId: stopped.refusalId,
+              assertCurrent: () => undefined
+            }
+          )
+        )
+        expect(promptResult).toContain('"status":"completed"')
+        expect(execute).toHaveBeenCalledTimes(2)
+        await task.prompt(acceptedTask)
+        expect(service.currentExecutionIntent(scope)).toBe(stopped)
+        expect(promptResult).toContain('NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION')
+        expect(execute).toHaveBeenCalledTimes(2)
+        return
+      } else
+        await runtime.sendPrompt(
+          withNotebookUserOperation(
+            { sessionId: scope.sessionId, text: 'Execute the current Notebook.' },
+            { projectId: scope.projectId, assertCurrent: () => undefined }
+          )
+        )
       expect(agent.prompts).toHaveLength(1)
       expect(promptResult).toContain('"status":"completed"')
       expect(execute).toHaveBeenCalledOnce()

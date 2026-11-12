@@ -127,6 +127,25 @@ it('ends a rejected call without waiting for pressure cleanup or retrying after 
     executorFactory: () => ({ execute, shutdown: async () => ({ reaped: true }) }),
     shellProcess: {
       execute: vi.fn(),
+      resources: () =>
+        live
+          ? [
+              {
+                identity,
+                projectId: 'project',
+                sessionId: 'idle',
+                group: 'shell',
+                phase: 'idle',
+                startedAt: time,
+                release: async () => {
+                  cleanupStarted = true
+                  await cleanup.promise
+                  live = false
+                  return { reaped: true }
+                }
+              }
+            ]
+          : [],
       idleProcesses: () =>
         live
           ? [

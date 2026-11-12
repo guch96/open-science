@@ -1,5 +1,12 @@
 import { ipcMainHandle } from '../ipc-handler-registry'
 import { createLogger, diagnosticErrorFields } from '@aipoch/diagnostics/node'
+import { callerContextForEvent, canSatisfyHumanApproval } from '../caller-context'
+import { callerLeaseForEvent } from '../caller-lifecycle'
+import type {
+  NotebookProjectResourcesRequest,
+  NotebookResourceReleaseRequest,
+  ReleaseNotebookSessionResourcesRequest
+} from '../../shared/notebook-resources'
 
 import type {
   AppendNotebookCodeCellRequest,
@@ -23,6 +30,49 @@ const log = createLogger('notebook:ipc')
 
 // Registers renderer-callable notebook commands on the main-process IPC bus.
 const registerNotebookIpcHandlers = (handlers: NotebookCommandWorkflows): void => {
+  const human = (event: Electron.IpcMainInvokeEvent): (() => void) => {
+    const caller = callerContextForEvent(event)
+    const lease = callerLeaseForEvent(event)
+    return () => {
+      if (
+        !canSatisfyHumanApproval(caller) ||
+        lease.signal.aborted ||
+        !lease.isCurrent() ||
+        event.sender.isDestroyed()
+      )
+        throw new Error('Only a current human caller can manage Notebook resources.')
+    }
+  }
+  ipcMainHandle(
+    'notebook:project-resources',
+    async (event, request: NotebookProjectResourcesRequest) => {
+      const assertCurrent = human(event)
+      assertCurrent()
+      const result = await handlers.projectResources(request)
+      assertCurrent()
+      return result
+    }
+  )
+  ipcMainHandle(
+    'notebook:release-session-resources',
+    (event, request: ReleaseNotebookSessionResourcesRequest) =>
+      handlers.releaseSessionResources(request, human(event))
+  )
+  ipcMainHandle(
+    'notebook:resource-release',
+    async (event, request: NotebookResourceReleaseRequest) => {
+      const assertCurrent = human(event)
+      assertCurrent()
+      const result = await handlers.resourceRelease(request)
+      assertCurrent()
+      return result
+    }
+  )
+  ipcMainHandle(
+    'notebook:retry-resource-release',
+    (event, request: NotebookResourceReleaseRequest) =>
+      handlers.retryResourceRelease(request, human(event))
+  )
   ipcMainHandle('notebook:run-index', (_event, request: NotebookSessionRequest) =>
     handlers.runIndex(request)
   )

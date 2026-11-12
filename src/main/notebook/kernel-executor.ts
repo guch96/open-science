@@ -1,5 +1,6 @@
 import { createLogger } from '@aipoch/diagnostics/node'
 import { NotebookExecutionAdmissionError } from './execution-admission'
+import { createNotebookMemorySampler } from './resource-memory'
 import type { NotebookOwnedResource, NotebookResourceCleanupResult } from './owned-resources'
 import type { analyzeNotebookSourceFileAccess } from '@aipoch/notebook-analysis'
 import { observeResourceProcess, recordResourceEvent } from '../resource-diagnostics/recorder'
@@ -308,6 +309,7 @@ type ProcState = {
   // Identity belongs to the spawn, never to a later request reusing this process.
   kernelEpochId?: string
   child: ChildProcessWithoutNullStreams
+  sampleMemory: ReturnType<typeof createNotebookMemorySampler>
   readline: Interface
   pending?: PendingRequest
   beginSandboxExecution: NonNullable<
@@ -584,6 +586,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
       processKey: proc.key,
       environment: proc.env,
       kernelEpochId: proc.kernelEpochId,
+      sampleMemory: proc.sampleMemory,
       release: () => this.releaseProc(proc)
     }))
     return [
@@ -1128,6 +1131,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
       key,
       kernelEpochId: request.kernelEpochId,
       child,
+      sampleMemory: spawned.sampleMemory,
       readline,
       beginSandboxExecution: spawned.beginSandboxExecution,
       waitForNetworkApprovals: spawned.waitForNetworkApprovals,
@@ -1265,6 +1269,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
   ): Promise<{
     startedAt: number
     child: ChildProcessWithoutNullStreams
+    sampleMemory: ReturnType<typeof createNotebookMemorySampler>
     cwd: string
     beginSandboxExecution: NonNullable<
       import('./process-sandbox').NotebookSandboxedSpawn['beginExecution']
@@ -1741,6 +1746,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
     child.once('error', () => spawnAdmission?.notStarted())
     if (this.platform !== 'win32' && this.canTrackPosixProcesses)
       this.registerOwnedProcessGroup(child, processTreeOwnership.token)
+    const sampleMemory = createNotebookMemorySampler(child, this.platform)
     const cleanupFailedSpawn = async (): Promise<NotebookResourceCleanupResult> => {
       const outcome = await (async () => {
         const result = await teardownProcess()
@@ -1818,6 +1824,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
     return {
       startedAt,
       child,
+      sampleMemory,
       cwd: spawnCwd ?? process.cwd(),
       beginSandboxExecution: sandboxed?.beginExecution ?? (() => () => undefined),
       waitForNetworkApprovals: sandboxed?.waitForNetworkApprovals,

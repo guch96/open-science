@@ -154,6 +154,10 @@ describe('notebook IPC handlers', () => {
     registerNotebookIpcHandlers(createNotebookCommandWorkflows(service))
 
     expect([...ipcHandlers.keys()]).toEqual([
+      'notebook:project-resources',
+      'notebook:release-session-resources',
+      'notebook:resource-release',
+      'notebook:retry-resource-release',
       'notebook:run-index',
       'notebook:state',
       'notebook:memory-policy-state',

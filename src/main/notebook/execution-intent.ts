@@ -178,6 +178,15 @@ export class NotebookExecutionIntentOwner {
     return this.currentIntents.get(JSON.stringify([scope.projectId, scope.sessionId]))
   }
 
+  blockedContinuations(projectId: string): readonly NotebookExecutionContinuation[] {
+    return [...this.currentIntents.entries()].flatMap(([key, intent]) => {
+      const [ownerProjectId, sessionId] = JSON.parse(key) as [string, string]
+      return ownerProjectId === projectId && intent.refusalId
+        ? [{ projectId, sessionId, refusalId: intent.refusalId }]
+        : []
+    })
+  }
+
   register(scope: NotebookExecutionIntentScope, intent: NotebookExecutionIntent): void {
     const refs = this.live(scope)
     if (![...refs].some((ref) => ref.deref() === intent)) refs.add(new WeakRef(intent))
