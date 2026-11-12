@@ -1,4 +1,5 @@
 import { compilePowerShellCommand } from './powershell-native-capture'
+import { releaseNotebookResources, type NotebookOwnedResource } from './owned-resources'
 import { NotebookExecutionAdmissionError } from './execution-admission'
 import { ExecutionDeadline } from './execution-deadline'
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -72,6 +73,7 @@ const SHELL_NETWORK_TRANSPORT_UNSUPPORTED_PREFIX = 'WSL2_NETWORK_TRANSPORT_UNSUP
 
 // Runtime-private port: platform invocation, encoding, env projection, and teardown stay in its adapter.
 type NotebookShellProcess = {
+  resources?: () => NotebookOwnedResource[]
   idleProcesses?: () => Array<IdleInterpreter & { laneKey?: string }>
   execute(request: NotebookShellProcessRequest): Promise<NotebookShellResult>
   prepareEnvironment?(
@@ -1131,6 +1133,26 @@ const runShellCommand = (
 // Each lane owns a live interpreter; runShellCommand remains the one-shot spawn/cleanup owner.
 class NotebookShellProcessAdapter implements NotebookShellProcess {
   private readonly sessions = new Map<string, ShellCellSession>()
+  resources(): NotebookOwnedResource[] {
+    return Array.from(this.sessions, ([key, session]) => ({
+      identity: session,
+      group: 'shell',
+      kind: session.identity.runtimeBinding?.kind,
+      phase: session.resourcePhase,
+      startedAt: session.startedAt,
+      projectId: session.identity.projectId,
+      sessionId: session.identity.sessionId,
+      laneKey: session.identity.laneKey,
+      ...(session.identity.runtimeBinding?.kind === 'wsl2-bash'
+        ? {}
+        : { executionDomain: 'host' as const }),
+      release: async () => {
+        const result = await session.shutdown()
+        if (result.reaped && this.sessions.get(key) === session) this.sessions.delete(key)
+        return result
+      }
+    }))
+  }
   idleProcesses(): Array<IdleInterpreter & { laneKey?: string }> {
     return [...this.sessions]
       .filter(([, session]) => session.isLive)
@@ -1310,20 +1332,14 @@ class NotebookShellProcessAdapter implements NotebookShellProcess {
   async shutdown(
     scope: { projectId?: string; sessionId?: string; laneKey?: string } = {}
   ): Promise<{ reaped: boolean }> {
-    const selected = [...this.sessions].filter(
-      ([, session]) =>
-        (scope.projectId === undefined || session.identity.projectId === scope.projectId) &&
-        (scope.sessionId === undefined || session.identity.sessionId === scope.sessionId) &&
-        (scope.laneKey === undefined || session.identity.laneKey === scope.laneKey)
+    const selected = this.resources().filter(
+      (resource) =>
+        (scope.projectId === undefined || resource.projectId === scope.projectId) &&
+        (scope.sessionId === undefined || resource.sessionId === scope.sessionId) &&
+        (scope.laneKey === undefined || resource.laneKey === scope.laneKey)
     )
-    const results = await Promise.all(
-      selected.map(async ([key, session]) => {
-        const result = await session.shutdown()
-        if (result.reaped && this.sessions.get(key) === session) this.sessions.delete(key)
-        return result
-      })
-    )
-    return { reaped: results.every((result) => result.reaped) }
+    const results = await releaseNotebookResources(selected)
+    return { reaped: results.every(({ result }) => result.reaped) }
   }
 
   private ownershipClaim(request: NotebookShellProcessRequest): {

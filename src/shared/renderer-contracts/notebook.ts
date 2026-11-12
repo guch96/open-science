@@ -1,3 +1,9 @@
+import type {
+  NotebookMemoryRejectedEvent,
+  NotebookMemoryPolicyChangedEvent,
+  NotebookMemoryPolicyState,
+  NotebookMemoryPolicyStateRequest
+} from '../notebook-memory'
 import type { ArtifactPreviewResult, ReadArtifactPreviewRequest } from '../artifacts'
 import type { ReplayRunIndex } from '../replay'
 
@@ -64,6 +70,15 @@ export const contracts = {
   'notebook.getBackgroundRun': callable<
     (request: NotebookBackgroundRunLookupRequest) => Promise<NotebookBackgroundRunResult>
   >()('notebook', ['notebook:background-run']),
+  'notebook.getMemoryPolicyState': callable<
+    (request: NotebookMemoryPolicyStateRequest) => Promise<NotebookMemoryPolicyState>
+  >()('notebook', ['notebook:memory-policy-state']),
+  'notebook.onMemoryRejected': callable<
+    (listener: AcpListener<NotebookMemoryRejectedEvent>) => RemoveListener
+  >()('notebook', ['notebook:memory-rejected', EVENT]),
+  'notebook.onMemoryPolicyChanged': callable<
+    (listener: AcpListener<NotebookMemoryPolicyChangedEvent>) => RemoveListener
+  >()('notebook', ['notebook:memory-policy-changed', EVENT]),
   'notebook.getProjectActivity': callable<
     (request: NotebookProjectActivityRequest) => Promise<NotebookProjectActivity>
   >()('notebook', ['notebook:project-activity']),

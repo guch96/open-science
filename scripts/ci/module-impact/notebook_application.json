@@ -148,7 +148,10 @@
     "src/main/notebook/idle-reclamation.ts",
     "src/main/notebook/idle-reclamation.test.ts",
     "src/main/notebook/execution-intent.ts",
-    "src/main/notebook/local-rpc-execution-intent.integration.test.ts"
+    "src/main/notebook/local-rpc-execution-intent.integration.test.ts",
+    "src/main/notebook/runtime-execution-admission.test.ts",
+    "src/main/notebook/runtime-pressure-reclamation.test.ts",
+    "src/main/notebook/owned-resources.test.ts"
   ],
   "interfacePaths": [
     "src/main/notebook/harness-mcp-turn.ts",
@@ -347,7 +350,10 @@
       "src/main/notebook/runtime-service.architecture.test.ts",
       "src/main/notebook-payload.integration.test.ts",
       "src/main/notebook/source-analysis-worker.test.ts",
-      "src/main/notebook/idle-reclamation.test.ts"
+      "src/main/notebook/idle-reclamation.test.ts",
+      "src/main/notebook/runtime-execution-admission.test.ts",
+      "src/main/notebook/runtime-pressure-reclamation.test.ts",
+      "src/main/notebook/owned-resources.test.ts"
     ],
     "contract": [
       "src/preload/index.test.ts",
@@ -856,7 +862,8 @@
       "src/main/node-entry.test.ts",
       "src/main/desktop-runtime-session-size.integration.test.ts",
       "src/main/web-service/session-payload.integration.test.ts",
-      "src/main/composition/session-packages.test.ts"
+      "src/main/composition/session-packages.test.ts",
+      "src/renderer/src/pages/workspace/NotebookMemoryNoticeBridge.interaction.test.tsx"
     ]
   },
   "capabilityOverlays": ["notebook_network_sandbox", "windows_sensitive"],

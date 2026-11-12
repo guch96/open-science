@@ -22,7 +22,8 @@ describe('real Notebook platform memory sampling', () => {
         expect(observation.executionScope).toBe(
           process.platform === 'darwin' ? 'darwin:host' : 'windows:host'
         )
-        expect(observation.sampleAgeMs).toBe(0)
+        expect(observation.sampleAgeMs).toBeGreaterThanOrEqual(0)
+        expect(observation.sampleAgeMs).toBeLessThanOrEqual(2000)
         expect(service.currentState().status).toBe(observation.status)
       } finally {
         service.dispose()

@@ -27,6 +27,7 @@ const createRuntime = (
 ): NotebookCommandRuntime => ({
   runIndex: unavailable('runIndex'),
   state: unavailable('state'),
+  getMemoryPolicyState: unavailable('getMemoryPolicyState'),
   getProjectActivity: vi.fn(() => ({ kernels: [], backgroundRuns: [] })),
   inspectNamespace: unavailable('inspectNamespace'),
   getSessionReference: unavailable('getSessionReference'),
@@ -78,6 +79,23 @@ describe('Notebook command workflows', () => {
       backgroundRuns: []
     })
     expect(getProjectActivity).toHaveBeenCalledWith({ projectId: 'project-1' })
+  })
+
+  it('reads live memory facts without data-root mutation admission', async () => {
+    const memory = {
+      status: 'unavailable' as const,
+      reason: 'memory-component-unavailable',
+      source: 'memory-policy',
+      executionScope: 'darwin:host',
+      checkedAt: 1
+    }
+    const getMemoryPolicyState = vi.fn(async () => memory)
+    const workflows = createNotebookCommandWorkflows(createRuntime({ getMemoryPolicyState }))
+    beginMigration()
+    await expect(workflows.memoryPolicyState({ executionScope: 'darwin:host' })).resolves.toEqual(
+      memory
+    )
+    expect(getMemoryPolicyState).toHaveBeenCalledWith({ executionScope: 'darwin:host' })
   })
 
   it('waits for missing-root acceptance before state inspection can create a session', async () => {

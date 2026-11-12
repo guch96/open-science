@@ -136,6 +136,7 @@ describe('notebook IPC handlers', () => {
     const service = {
       runIndex: vi.fn().mockResolvedValue([{ runId: 'recorded-run' }]),
       state: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getMemoryPolicyState: vi.fn().mockResolvedValue({ status: 'healthy' }),
       getProjectActivity: vi.fn().mockReturnValue({ kernels: [], backgroundRuns: [] }),
       inspectNamespace: vi.fn().mockResolvedValue({ status: 'unavailable' }),
       getSessionReference: vi.fn().mockResolvedValue(null),
@@ -155,6 +156,7 @@ describe('notebook IPC handlers', () => {
     expect([...ipcHandlers.keys()]).toEqual([
       'notebook:run-index',
       'notebook:state',
+      'notebook:memory-policy-state',
       'notebook:project-activity',
       'notebook:inspect-namespace',
       'notebook:reference',
@@ -202,6 +204,12 @@ describe('notebook IPC handlers', () => {
     ])
     expect(service.runIndex).toHaveBeenCalledWith(session)
     await ipcHandlers.get('notebook:state')?.(undefined, session)
+    await expect(
+      ipcHandlers.get('notebook:memory-policy-state')?.(undefined, {
+        executionScope: 'darwin:host'
+      })
+    ).resolves.toEqual({ status: 'healthy' })
+    expect(service.getMemoryPolicyState).toHaveBeenCalledWith({ executionScope: 'darwin:host' })
     await ipcHandlers.get('notebook:project-activity')?.(undefined, project)
     await ipcHandlers.get('notebook:inspect-namespace')?.(undefined, namespace)
     await ipcHandlers.get('notebook:reference')?.(undefined, session)

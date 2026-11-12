@@ -12,6 +12,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { resolveNotebookMicromamba as resolveMicromamba } from './environment-resources'
 import type { NotebookSessionExecutionResult } from './session-aggregate'
+import type { NotebookOwnedResource } from './owned-resources'
 
 import {
   buildManagedRuntimeProcessEnvironment,
@@ -459,6 +460,7 @@ const createNotebookReproductionRuntime = async (
   }
 
   return {
+    resources: () => executor.resources?.() ?? [],
     execute: async ({
       step,
       source,
@@ -619,6 +621,7 @@ export type HostReproductionInput = Omit<ExecuteArtifactReproducibilityInput, 'e
   configRoot?: string
   createExecutionAdmission?: (signal?: AbortSignal) => NotebookExecutionAdmission
   onAdmissionRejected?: (error: NotebookExecutionAdmissionError) => void
+  onRuntimeCreated?: (runtime: NotebookReproductionRuntime) => void
 }
 export type HostReproductionDependencies = Omit<
   ExecuteArtifactReproducibilityDependencies,
@@ -637,14 +640,15 @@ export const executeArtifactReproducibility = (
     configRoot,
     createExecutionAdmission,
     onAdmissionRejected,
+    onRuntimeCreated,
     ...attempt
   } = input
   return executeReproduction(
     { ...attempt, evidence: reproductionEvidence(storageRoot) },
     {
       createAttemptRoot: dependencies.createAttemptRoot,
-      createRuntime: (runtime) =>
-        (dependencies.createRuntime ?? createNotebookReproductionRuntime)({
+      createRuntime: async (runtime) => {
+        const created = await (dependencies.createRuntime ?? createNotebookReproductionRuntime)({
           ...runtime,
           storageRoot,
           processSandbox,
@@ -654,12 +658,16 @@ export const executeArtifactReproducibility = (
           projectId: 'artifact-reproducibility',
           sessionId: 'reproduction-' + input.execution.reproducibilityRecipe!.recipeId.slice(0, 16)
         })
+        onRuntimeCreated?.(created)
+        return created
+      }
     }
   )
 }
 
 // Host callers may inspect kernel outputs; replay needs only the base execution result.
 type NotebookReproductionRuntime = Omit<ReproductionRuntime, 'execute'> & {
+  resources?: () => NotebookOwnedResource[]
   execute(
     input: Parameters<ReproductionRuntime['execute']>[0]
   ): Promise<NotebookSessionExecutionResult>

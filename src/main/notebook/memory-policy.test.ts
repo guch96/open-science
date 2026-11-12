@@ -42,6 +42,67 @@ describe('MemoryPolicyService', () => {
     expect(observe).toHaveBeenCalledTimes(1)
   })
 
+  it('counts sampling time against execution freshness while preserving the reclamation budget', async () => {
+    let now = 1000
+    let wall = 10_000
+    const deferred = Promise.withResolvers<MemoryPolicySample>()
+    const service = new MemoryPolicyService({
+      adapter: adapter(async () => deferred.promise),
+      now: () => now,
+      wallNow: () => wall
+    })
+    const listener = vi.fn()
+    service.subscribe(listener)
+    const execution = service.getState()
+    const reclamation = service.getState({ maxAgeMs: 10_000 })
+
+    now += 3000
+    wall += 3000
+    deferred.resolve(sample())
+
+    await expect(execution).resolves.toMatchObject({
+      status: 'unavailable',
+      reason: { code: 'sample-expired' },
+      sampledAt: 1000,
+      sampleAgeMs: 3000
+    })
+    expect(service.currentState().status).toBe('unavailable')
+    expect(listener).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: 'unavailable', sampleAgeMs: 3000 })
+    )
+    await expect(reclamation).resolves.toMatchObject({ status: 'healthy', sampleAgeMs: 3000 })
+    service.dispose()
+  })
+
+  it.each([
+    ['suspend', 60_000],
+    ['wall-clock rollback', -1]
+  ])('refuses a sample collected across %s', async (_reason, wallElapsed) => {
+    let now = 1000
+    let wall = 10_000
+    const deferred = Promise.withResolvers<MemoryPolicySample>()
+    const service = new MemoryPolicyService({
+      adapter: adapter(async () => deferred.promise),
+      now: () => now,
+      wallNow: () => wall
+    })
+    const listener = vi.fn()
+    service.subscribe(listener)
+    const waiting = service.getState()
+
+    now += 100
+    wall += wallElapsed
+    deferred.resolve(sample())
+
+    await expect(waiting).resolves.toMatchObject({
+      status: 'unavailable',
+      reason: { code: 'sample-expired' }
+    })
+    expect(service.currentState({ maxAgeMs: 10_000 }).status).toBe('unavailable')
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'unavailable' }))
+    service.dispose()
+  })
+
   it('coalesces concurrent sampling but keeps domains independent', async () => {
     const deferred = Promise.withResolvers<MemoryPolicySample>()
     const observe = vi.fn(async (_signal: AbortSignal, scope?: string) => {
@@ -99,11 +160,37 @@ describe('MemoryPolicyService', () => {
     await expect(shared).resolves.toMatchObject({ status: 'healthy' })
   })
 
+  it('preserves policy truth and later observers when a notification subscriber throws', async () => {
+    let current = sample()
+    const service = new MemoryPolicyService({
+      adapter: adapter(async () => current),
+      now: () => 1000
+    })
+    service.subscribe(() => {
+      throw new Error('Notification transport closed')
+    })
+    const listener = vi.fn()
+    service.subscribe(listener)
+
+    await expect(service.getState()).resolves.toMatchObject({ status: 'healthy' })
+    expect(service.currentState().status).toBe('healthy')
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'healthy' }))
+
+    current = sample({ facts: { availableBytes: 10, totalBytes: 100, overcommitMode: 0 } })
+    await expect(service.getState({ force: true })).resolves.toMatchObject({
+      status: 'pressured',
+      reason: { code: 'linux-memory-low' }
+    })
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'pressured' }))
+    service.dispose()
+  })
+
   it('preserves pressure hysteresis through healthy-looking samples', async () => {
     let current = sample({ facts: { availableBytes: 10, totalBytes: 100, overcommitMode: 0 } })
     const service = new MemoryPolicyService({
       adapter: adapter(async () => current),
       now: () => 1000,
+      wallNow: () => 1000,
       maxAgeMs: 0
     })
 

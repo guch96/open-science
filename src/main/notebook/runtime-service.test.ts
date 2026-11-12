@@ -2882,9 +2882,10 @@ describe('notebook runtime service', () => {
     expect(availableSessions).toEqual(['session-1'])
   })
 
-  it('keeps a runtime session usable when executor shutdown fails', async () => {
+  it('keeps failed executor cleanup fenced until the original owner is retried', async () => {
     const root = await createStorageRoot()
     const shutdownError = new Error('kernel teardown failed')
+    const shutdown = vi.fn(async () => ({ reaped: true })).mockRejectedValueOnce(shutdownError)
     const service = new NotebookRuntimeService({
       memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
@@ -2900,7 +2901,7 @@ describe('notebook runtime service', () => {
           cwdAfter: request.cwd,
           outputs: []
         }),
-        shutdown: async () => Promise.reject(shutdownError)
+        shutdown
       })
     })
 
@@ -2921,7 +2922,19 @@ describe('notebook runtime service', () => {
         code: 'after-failed-shutdown',
         language: 'python'
       })
-    ).resolves.toMatchObject({ status: 'completed', script: 'after-failed-shutdown' })
+    ).resolves.toMatchObject({ status: 'failed', script: 'after-failed-shutdown' })
+    await expect(
+      service.shutdown({ sessionId: 'session-1', workspaceCwd: root })
+    ).resolves.toMatchObject({ status: 'shutdown' })
+    expect(shutdown).toHaveBeenCalledTimes(2)
+    await expect(
+      service.execute({
+        sessionId: 'session-1',
+        workspaceCwd: root,
+        code: 'after-verified-cleanup',
+        language: 'python'
+      })
+    ).resolves.toMatchObject({ status: 'completed' })
   })
 
   it.each(['lane', 'session', 'project'] as const)(
