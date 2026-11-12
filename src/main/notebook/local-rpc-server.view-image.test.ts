@@ -41,13 +41,18 @@ const deferred = (): { promise: Promise<void>; resolve(): void } => {
 
 const call = (
   connection: NotebookRpcConnection,
+  invocationNonce: string,
   method: string,
   params = {},
   signal?: AbortSignal
 ): Promise<Response> =>
   fetch(connection.endpoint, {
     method: 'POST',
-    headers: { authorization: `Bearer ${connection.token}`, 'content-type': 'application/json' },
+    headers: {
+      authorization: `Bearer ${connection.token}`,
+      'content-type': 'application/json',
+      'x-open-science-control-invocation': invocationNonce
+    },
     body: JSON.stringify({ method, params }),
     signal
   })
@@ -110,16 +115,18 @@ describe('host.viewImage caller and request ownership', () => {
         { role: 'delegate', attemptId: scope.attemptId },
         cwd
       )
-      control.beginControlInvocation({
+      let invocation = control.beginControlInvocation({
         turnId: 'turn-1',
         controlInvocationGeneration: 1,
         toolInvocationId: 'run-1'
       })
-      await expect(call(control, 'capabilitiesCall').then((r) => r.json())).resolves.toMatchObject({
+      await expect(
+        call(control, invocation.nonce, 'capabilitiesCall').then((r) => r.json())
+      ).resolves.toMatchObject({
         result: { viewImage: true }
       })
       await expect(
-        call(control, 'viewImageCall', { source: { path: 'plot.png' } })
+        call(control, invocation.nonce, 'viewImageCall', { source: { path: 'plot.png' } })
       ).resolves.toMatchObject({ status: 200 })
       const viewImages = await control.completeControlInvocation('run-1')
       expect(viewImages).toEqual(
@@ -150,35 +157,37 @@ describe('host.viewImage caller and request ownership', () => {
         ).resolves.toBeUndefined()
       }
       await expect(
-        call(control, 'viewImageCall', {
+        call(control, invocation.nonce, 'viewImageCall', {
           source: { path: 'plot.png' },
           attemptId: 'forged-attempt'
         })
       ).resolves.toMatchObject({ status: 400 })
 
       // A settled Attempt loses access even before explicit capability revocation.
-      control.beginControlInvocation({
+      invocation = control.beginControlInvocation({
         turnId: 'turn-2',
         controlInvocationGeneration: 2,
         toolInvocationId: 'run-2'
       })
       await expect(
-        call(control, 'viewImageCall', { source: { path: 'plot.png' } })
+        call(control, invocation.nonce, 'viewImageCall', { source: { path: 'plot.png' } })
       ).resolves.toMatchObject({ status: 200 })
       writable = false
       await expect(control.completeControlInvocation('run-2')).resolves.toEqual([])
-      await expect(call(control, 'capabilitiesCall').then((r) => r.json())).resolves.toMatchObject({
+      await expect(
+        call(control, invocation.nonce, 'capabilitiesCall').then((r) => r.json())
+      ).resolves.toMatchObject({
         result: { viewImage: false }
       })
 
       writable = true
-      control.beginControlInvocation({
+      invocation = control.beginControlInvocation({
         turnId: 'turn-3',
         controlInvocationGeneration: 3,
         toolInvocationId: 'run-3'
       })
       await expect(
-        call(control, 'viewImageCall', { source: { path: 'plot.png' } })
+        call(control, invocation.nonce, 'viewImageCall', { source: { path: 'plot.png' } })
       ).resolves.toMatchObject({ status: 200 })
       const previousBackend = await server.captureDelegatedViewImageBackend({
         ...scope,
@@ -286,19 +295,21 @@ describe('host.viewImage caller and request ownership', () => {
       })
       await expect(control.completeControlInvocation('run-without-images')).resolves.toEqual([])
       expect(isAttemptWritable).not.toHaveBeenCalled()
-      control.beginControlInvocation({
+      const invocation = control.beginControlInvocation({
         turnId: 'turn-1',
         controlInvocationGeneration: 1,
         toolInvocationId: 'run-1'
       })
-      await expect(call(control, 'capabilitiesCall').then((r) => r.json())).resolves.toMatchObject({
+      await expect(
+        call(control, invocation.nonce, 'capabilitiesCall').then((r) => r.json())
+      ).resolves.toMatchObject({
         result: { viewImage: true }
       })
       expect(isAttemptWritable).toHaveBeenCalledOnce()
       isAttemptWritable.mockClear()
       for (let index = 0; index < 4; index += 1) {
         await expect(
-          call(control, 'viewImageCall', { source: { path: 'plot.png' } })
+          call(control, invocation.nonce, 'viewImageCall', { source: { path: 'plot.png' } })
         ).resolves.toMatchObject({ status: 200 })
       }
       expect(isAttemptWritable).toHaveBeenCalledTimes(4)
@@ -372,20 +383,20 @@ describe('host.viewImage caller and request ownership', () => {
         { role: 'delegate', attemptId: scope.attemptId },
         cwd
       )
-      control.beginControlInvocation({
+      const invocation = control.beginControlInvocation({
         turnId: 'turn-1',
         controlInvocationGeneration: 1,
         toolInvocationId: 'run-1'
       })
       if (phase !== 'checking-availability') {
         await expect(
-          call(control, 'viewImageCall', { source: { path: 'plot.png' } })
+          call(control, invocation.nonce, 'viewImageCall', { source: { path: 'plot.png' } })
         ).resolves.toMatchObject({ status: 200 })
       }
       completing = true
       const completion =
         phase === 'checking-availability'
-          ? call(control, 'capabilitiesCall').then((response) => response.json())
+          ? call(control, invocation.nonce, 'capabilitiesCall').then((response) => response.json())
           : control.completeControlInvocation('run-1')
       await relaying.promise
       writable = false
@@ -399,7 +410,7 @@ describe('host.viewImage caller and request ownership', () => {
       }
       expect(prepareVisionEvidence).toHaveBeenCalledTimes(phase === 'inspecting-images' ? 1 : 0)
       await expect(
-        call(control, 'viewImageCall', { source: { path: 'plot.png' } })
+        call(control, invocation.nonce, 'viewImageCall', { source: { path: 'plot.png' } })
       ).resolves.toMatchObject({ status: 500 })
       await child.revoke()
       control.release()
@@ -437,17 +448,18 @@ describe('host.viewImage caller and request ownership', () => {
         { role: 'main' },
         cwd
       )
-      control.beginControlInvocation({
+      const invocation = control.beginControlInvocation({
         turnId: 'turn-1',
         controlInvocationGeneration: 1,
         toolInvocationId: 'run-1'
       })
       await expect(
-        call(control, 'viewImageCall', { source: { path: 'plot.png' } })
+        call(control, invocation.nonce, 'viewImageCall', { source: { path: 'plot.png' } })
       ).resolves.toMatchObject({ status: 200 })
       const disconnect = new AbortController()
       const second = call(
         control,
+        invocation.nonce,
         'viewImageCall',
         { source: { path: 'plot.png' } },
         disconnect.signal
