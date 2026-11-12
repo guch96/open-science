@@ -1607,13 +1607,11 @@ const WorkspacePage = ({
                 t('Notebook continuation is unavailable. Update the application before retrying.')
               )
             }
-            const result = await runtime.sendMessage({
+            const result = await conversation.actions.submit.notebookContinuation({
               projectId: event.projectId,
               sessionId: event.sessionId,
               cwd: event.workspaceCwd,
-              requireExistingSession: true,
-              preserveSelection: true,
-              notebookContinuation: { refusalId: event.refusalId },
+              refusalId: event.refusalId,
               text: t(
                 'Recheck memory and reconsider the blocked Notebook work. Keep completed results and ask before repeating completed steps.'
               )
