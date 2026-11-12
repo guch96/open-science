@@ -97,12 +97,63 @@ it.each(['repl', 'python', 'r', 'shell'] as const)(
       ...(surface === 'shell' ? { exitCode: 1 } : { status: 'failed' })
     })
     expect(execute).not.toHaveBeenCalled()
-    expect((await runtime.state(request)).runs[0]).toMatchObject({
+    const state = await runtime.state(request)
+    expect(state.runs[0]).toMatchObject({
       status: 'failed',
       kernelDispatched: false,
       executionStarted: false,
       recovery: { execution: 'not-started' }
     })
+    expect(state.environments.some((environment) => environment.status === 'running')).toBe(false)
+  }
+)
+
+it.each(['python', 'repl', 'shell'] as const)(
+  'keeps background %s admission independent of the transport after its receipt',
+  async (surface) => {
+    root = await mkdtemp(join(tmpdir(), 'runtime-background-admission-'))
+    let approve!: (approved: boolean) => void
+    const approval = new Promise<boolean>((resolve) => {
+      approve = resolve
+    })
+    const execute = vi.fn(async (request: NotebookExecutionRequest) => ({
+      status: 'completed' as const,
+      stdout: '',
+      stderr: '',
+      traceback: '',
+      cwdAfter: request.cwd,
+      outputs: []
+    }))
+    const shell = vi.fn(async () => ({ stdout: '', stderr: '', exitCode: 0 }))
+    runtime = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: 'project',
+      memoryPolicy: healthyNotebookMemoryPolicy(),
+      executorFactory: () => ({ execute, shutdown: async () => ({ reaped: true }) }),
+      shellProcess: { execute: shell }
+    })
+    runtime.setExecutionApproval(async () => approval)
+    const transport = new AbortController()
+    const request = { sessionId: 'one', workspaceCwd: root, background: true }
+    const receipt =
+      surface === 'repl'
+        ? await runtime.executeControlBackground({ ...request, code: '1' }, transport.signal)
+        : surface === 'shell'
+          ? await runtime.executeShellBackground(
+              { ...request, command: 'echo 1' },
+              transport.signal
+            )
+          : await runtime.executeBackground(
+              { ...request, language: 'python', code: '1' },
+              transport.signal
+            )
+    transport.abort(new Error('Transport disconnected after receipt'))
+    approve(true)
+    await runtime.waitForBackgroundRun(receipt.runId)
+    const state = await runtime.getBackgroundRun({ ...request, runId: receipt.runId })
+    expect(state.run.status).toBe('completed')
+    expect(surface === 'shell' ? shell : execute).toHaveBeenCalledOnce()
   }
 )
 

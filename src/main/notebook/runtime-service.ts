@@ -1741,40 +1741,49 @@ class NotebookRuntimeService {
     }
     if (signal?.aborted) throw signal.reason
     assertNotebookCodeWithinLimit(request.code)
-    request = await this.admitExecutionRequest(request, signal)
-    const begin = await this.beginCodeCell(request)
+    const controller = new AbortController()
+    const cancelBeforeReceipt = (): void => controller.abort(signal?.reason)
+    signal?.addEventListener('abort', cancelBeforeReceipt, { once: true })
     try {
-      await this.appendCodeCell({
-        ...request,
-        writeId: begin.writeId,
-        cellId: begin.cellId,
-        delta: request.code
-      })
-      await this.finishCodeCell({ ...request, writeId: begin.writeId, cellId: begin.cellId })
-      signal?.throwIfAborted()
-      return await this.startBackgroundDataRun(
-        { ...request, cellId: begin.cellId },
-        signal,
-        request.helperModules
-      )
-    } catch (error) {
-      await this.sessionLifecycle
-        .runProjectOperation(request, async () => {
-          const session = await this.sessionLifecycle.ensure(request)
-          if (session.discardUnusedCell(begin.cellId)) this.sessionLifecycle.notifyChanged(session)
+      request = await this.admitExecutionRequest(request, controller.signal)
+      const begin = await this.beginCodeCell(request)
+      try {
+        await this.appendCodeCell({
+          ...request,
+          writeId: begin.writeId,
+          cellId: begin.cellId,
+          delta: request.code
         })
-        .catch(() => undefined)
-      throw error
+        await this.finishCodeCell({ ...request, writeId: begin.writeId, cellId: begin.cellId })
+        signal?.throwIfAborted()
+        return await this.startBackgroundDataRun(
+          { ...request, cellId: begin.cellId },
+          controller,
+          signal,
+          request.helperModules
+        )
+      } catch (error) {
+        await this.sessionLifecycle
+          .runProjectOperation(request, async () => {
+            const session = await this.sessionLifecycle.ensure(request)
+            if (session.discardUnusedCell(begin.cellId))
+              this.sessionLifecycle.notifyChanged(session)
+          })
+          .catch(() => undefined)
+        throw error
+      }
+    } finally {
+      signal?.removeEventListener('abort', cancelBeforeReceipt)
     }
   }
 
   private async startBackgroundDataRun(
     request: RunNotebookCellRequest,
+    controller: AbortController,
     transportSignal?: AbortSignal,
     helperModules?: readonly string[]
   ): Promise<NotebookBackgroundRunReceipt> {
     const createdCellId = request.cellId
-    const controller = new AbortController()
     const cancelBeforeReceipt = (): void => controller.abort(transportSignal?.reason)
     transportSignal?.addEventListener('abort', cancelBeforeReceipt, { once: true })
     let resolveReceipt!: (receipt: NotebookBackgroundRunReceipt) => void
@@ -2113,10 +2122,15 @@ class NotebookRuntimeService {
     }
     if (transportSignal?.aborted) throw transportSignal.reason
     assertNotebookCodeWithinLimit(request.code)
-    request = await this.admitExecutionRequest(request, transportSignal)
     const controller = new AbortController()
     const cancelBeforeReceipt = (): void => controller.abort(transportSignal?.reason)
     transportSignal?.addEventListener('abort', cancelBeforeReceipt, { once: true })
+    try {
+      request = await this.admitExecutionRequest(request, controller.signal)
+    } catch (error) {
+      transportSignal?.removeEventListener('abort', cancelBeforeReceipt)
+      throw error
+    }
     let resolveReceipt!: (receipt: NotebookBackgroundRunReceipt) => void
     let rejectReceipt!: (error: unknown) => void
     const receiptPromise = new Promise<NotebookBackgroundRunReceipt>((resolve, reject) => {
@@ -2226,18 +2240,23 @@ class NotebookRuntimeService {
         'Background execution is disabled.'
       )
     }
-    request = await this.admitExecutionRequest(
-      request,
-      transportSignal,
-      this.shellMemoryScope(request)
-    )
-    const backgroundRequest = { ...request, background: true }
-    this.assertManagedShellCommand(backgroundRequest)
+    this.assertManagedShellCommand(request)
     transportSignal?.throwIfAborted()
-    assertNotebookCodeWithinLimit(backgroundRequest.command)
+    assertNotebookCodeWithinLimit(request.command)
     const controller = new AbortController()
     const cancelBeforeReceipt = (): void => controller.abort(transportSignal?.reason)
     transportSignal?.addEventListener('abort', cancelBeforeReceipt, { once: true })
+    try {
+      request = await this.admitExecutionRequest(
+        request,
+        controller.signal,
+        this.shellMemoryScope(request)
+      )
+    } catch (error) {
+      transportSignal?.removeEventListener('abort', cancelBeforeReceipt)
+      throw error
+    }
+    const backgroundRequest = { ...request, background: true }
     let resolveReceipt!: (receipt: NotebookBackgroundRunReceipt) => void
     let rejectReceipt!: (error: unknown) => void
     const receiptPromise = new Promise<NotebookBackgroundRunReceipt>((resolve, reject) => {
