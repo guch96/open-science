@@ -1,4 +1,5 @@
 import { compilePowerShellCommand } from './powershell-native-capture'
+import { NotebookExecutionAdmissionError } from './execution-admission'
 import { NOTEBOOK_NETWORK_APPROVAL_RETRY_MESSAGE } from './process-sandbox'
 import { ExecutionDeadline } from './execution-deadline'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -235,6 +236,20 @@ export class ShellCellSession {
   private async run(request: NotebookShellProcessRequest): Promise<NotebookShellResult> {
     if (!(await this.verifyCleanup())) return this.processResult!
     if (this.closed || request.signal?.aborted) return cancelledResult()
+    try {
+      await request.executionAdmission?.prepare('dispatch')
+      request.executionAdmission?.assertCurrent('dispatch')
+    } catch (error) {
+      if (!(error instanceof NotebookExecutionAdmissionError)) throw error
+      return {
+        stdout: '',
+        stderr: error.message,
+        exitCode: 1,
+        kernelDispatched: false,
+        executionStarted: false,
+        recovery: error.recovery
+      }
+    }
     const context = JSON.stringify([
       request.cwd,
       request.handoffDir,
@@ -345,13 +360,18 @@ export class ShellCellSession {
       endExecution = this.beginExecution?.(request, (waiting) => timer?.setPaused(waiting))
       if (this.closed || request.signal?.aborted) abort()
       if (!this.lifetime.signal.aborted) {
+        await request.executionAdmission?.prepare('dispatch')
+        request.signal?.throwIfAborted()
         const timeoutMs = request.timeoutMs ?? NOTEBOOK_SHELL_DEFAULT_TIMEOUT_MS
         timer = new ExecutionDeadline(timeoutMs, () => {
           timedOut = true
           abort()
         })
         const input = powershell && !this.nativeControl ? this.controlSocket! : this.child.stdin
-        input.write(this.frame(request.command, this.cell!.marker, powershell))
+        const frame = this.frame(request.command, this.cell!.marker, powershell)
+        request.signal?.throwIfAborted()
+        request.executionAdmission?.assertCurrent('dispatch')
+        input.write(frame)
       }
       const completed = await result
       timer?.cancel()
@@ -378,6 +398,17 @@ export class ShellCellSession {
           }
         : { ...completed, cwdBefore: request.cwd }
     } catch (error) {
+      // A trusted refusal happens before stdin.write. Preserve the persistent namespace.
+      if (error instanceof NotebookExecutionAdmissionError) {
+        return {
+          stdout: '',
+          stderr: error.message,
+          exitCode: 1,
+          kernelDispatched: false,
+          executionStarted: false,
+          recovery: error.recovery
+        }
+      }
       this.lifetime.abort()
       await this.completion
       this.closeControl()
