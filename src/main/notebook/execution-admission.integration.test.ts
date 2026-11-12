@@ -4,8 +4,12 @@ import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { NotebookKernelExecutor } from './kernel-executor'
 import { NotebookShellProcessAdapter } from './shell-process'
-import { NotebookExecutionAdmissionError } from './execution-admission'
+import {
+  createNotebookExecutionAdmission,
+  NotebookExecutionAdmissionError
+} from './execution-admission'
 import type { NotebookProcessSandbox } from './process-sandbox'
+import { MemoryPolicyService, type MemoryPolicySample } from './memory-policy'
 
 const sandbox = (hooks: { wrap?: () => void; begin?: () => void }): NotebookProcessSandbox => ({
   wrap: async (invocation) => {
@@ -117,6 +121,66 @@ it('refuses dispatch on a reused interpreter and preserves its existing variable
   expect(result).toMatchObject({ status: 'failed', kernelDispatched: false })
   const retained = await executor.execute({ ...request, code: 'console.log(globalThis.saved)' })
   expect(retained.stdout.trim()).toBe('41')
+})
+
+it('refuses a delayed healthy sample before dispatch on a reused interpreter', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'notebook-sample-admission-'))
+  roots.push(root)
+  const executor = new NotebookKernelExecutor({ processSandbox: sandbox({}) })
+  executors.push(executor)
+  const request = {
+    projectId: 'project',
+    sessionId: 'one',
+    kind: 'repl' as const,
+    cwd: root,
+    notebookSessionRoot: root,
+    dataRoot: root,
+    runtimeRoot: root
+  }
+  expect((await executor.execute({ ...request, code: 'globalThis.saved = 41' })).status).toBe(
+    'completed'
+  )
+  let now = 1000
+  let wall = 10_000
+  const started = Promise.withResolvers<void>()
+  const deferred = Promise.withResolvers<MemoryPolicySample>()
+  const policy = new MemoryPolicyService({
+    adapter: {
+      platform: 'linux',
+      sample: async () => {
+        started.resolve()
+        return deferred.promise
+      }
+    },
+    now: () => now,
+    wallNow: () => wall
+  })
+  try {
+    const waiting = executor.execute({
+      ...request,
+      code: 'globalThis.saved = 0',
+      executionAdmission: createNotebookExecutionAdmission({ policy: async () => policy })
+    })
+    await started.promise
+    now += 3000
+    wall += 3000
+    deferred.resolve({
+      platform: 'linux',
+      source: 'test',
+      executionScope: 'linux:host',
+      facts: { availableBytes: 800, totalBytes: 1000, overcommitMode: 0 }
+    })
+
+    await expect(waiting).resolves.toMatchObject({
+      status: 'failed',
+      kernelDispatched: false,
+      recovery: { execution: 'not-started' }
+    })
+    const retained = await executor.execute({ ...request, code: 'console.log(globalThis.saved)' })
+    expect(retained.stdout.trim()).toBe('41')
+  } finally {
+    policy.dispose()
+  }
 })
 
 it.skipIf(process.platform === 'win32')(
