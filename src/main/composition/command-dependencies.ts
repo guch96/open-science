@@ -30,7 +30,11 @@ import { TaskNotificationService } from '../notifications/task-notifications'
 import { broadcastToRenderers } from '../renderer-broadcast'
 import { linkPdfContextWithCapability } from '../session-persistence/pdf-context-link-workflow'
 import { SETTINGS_INSTALL_LOG_CHANNEL } from '../settings/ipc'
-import { withDataRootWrite } from '../storage/migration-state'
+import {
+  withDataRootWrite,
+  isMigrationInProgress,
+  isMigrationPending
+} from '../storage/migration-state'
 import type { composeAgentWorkflows } from './agent-completion'
 import type { composeAgentRuntime } from './agent-runtime'
 import type { composeArtifactSurfaces } from './artifact-surfaces'
@@ -181,6 +185,16 @@ export function composeCommandDependencies({
     },
     notebook: {
       workflows: notebookRuntime.notebookCommands,
+      assertReleaseAvailable: () => {
+        if (
+          sessionPackages.packageHandoffHeld.current ||
+          isMigrationInProgress() ||
+          isMigrationPending()
+        )
+          throw new Error(
+            'Notebook resources cannot be released during an update or data move. Refresh after it finishes.'
+          )
+      },
       readInputPreview: (request) => sessionAuthority.notebookInputRegistry.readPreview(request)
     },
     notebookEnvironment: notebookEnvironmentLifecycle,

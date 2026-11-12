@@ -60,6 +60,7 @@ const log = createLogger('artifacts:reproducibility')
 const REPRODUCIBILITY_LOG_LIMIT_CHARACTERS = 128 * 1024
 
 type ArtifactReproducibilityAttemptOwnerDependencies = {
+  onResourcesChanged?: () => void
   prepareExecutionIntent?: (
     request: ArtifactReproducibilityCheckRequest | SessionReproducibilityCommand
   ) => NotebookExecutionIntent
@@ -196,6 +197,7 @@ class ArtifactReproducibilityAttemptOwner {
   constructor(private readonly dependencies: ArtifactReproducibilityAttemptOwnerDependencies) {
     const store = new SessionReproducibilityStore(dependencies.storageRoot)
     this.batches = new SessionReproducibilityBatches({
+      onResourcesChanged: dependencies.onResourcesChanged,
       store: {
         load: (scope) =>
           dependencies.withStorageLease
@@ -359,6 +361,7 @@ class ArtifactReproducibilityAttemptOwner {
     }
     this.attemptsById.set(attemptId, attempt)
     this.attemptIdsByRequest.set(key, attemptId)
+    this.dependencies.onResourcesChanged?.()
     attempt.settled = this.run(attempt).finally(() => {
       // Keep uncertain workers visible to subsequent deletion and shutdown gates.
       if (attempt.cleanupError) return
@@ -501,6 +504,7 @@ class ArtifactReproducibilityAttemptOwner {
     this.attemptsById.delete(id)
     const key = requestKey(attempt.state.request)
     if (this.attemptIdsByRequest.get(key) === id) this.attemptIdsByRequest.delete(key)
+    this.dependencies.onResourcesChanged?.()
   }
 
   private releaseAttempt(attempt: Attempt): Promise<NotebookResourceCleanupResult> {
@@ -549,12 +553,26 @@ class ArtifactReproducibilityAttemptOwner {
     sessionId: string,
     operation: () => Promise<Result>
   ): Promise<Result> {
-    const key = JSON.stringify([projectId, sessionId])
-    this.stoppingSessions.set(key, (this.stoppingSessions.get(key) ?? 0) + 1)
+    const release = this.holdSessionStarts(projectId, sessionId)
     try {
       await this.cancelSession(projectId, sessionId)
       return await operation()
     } finally {
+      release()
+    }
+  }
+
+  holdSessionStarts(projectId: string, sessionId: string, exclusive = false): () => void {
+    const key = JSON.stringify([projectId, sessionId])
+    if (exclusive && (this.disposed || this.stoppingAll || this.stoppingSessions.has(key)))
+      throw new Error(
+        'Reproduction cleanup is already in progress. Refresh before releasing resources.'
+      )
+    this.stoppingSessions.set(key, (this.stoppingSessions.get(key) ?? 0) + 1)
+    let held = true
+    return () => {
+      if (!held) return
+      held = false
       const remaining = this.stoppingSessions.get(key)! - 1
       if (remaining) this.stoppingSessions.set(key, remaining)
       else this.stoppingSessions.delete(key)
@@ -816,10 +834,12 @@ class ArtifactReproducibilityAttemptOwner {
           },
           onRuntimeCreated: (runtime) => {
             attempt.runtime = runtime
+            this.dependencies.onResourcesChanged?.()
           },
           onCleanupRetained: (cleanup, installer) => {
             attempt.retainedCleanup = cleanup
             attempt.installer = installer
+            this.dependencies.onResourcesChanged?.()
           },
           signal: attempt.controller.signal,
           comparisonPolicy: attempt.state.request.comparisonPolicy,

@@ -4,6 +4,13 @@ import type {
 } from '../../shared/notebook-memory'
 import type { ReplayRunIndex } from '../../shared/replay'
 import type {
+  NotebookProjectResources,
+  NotebookProjectResourcesRequest,
+  NotebookResourceRelease,
+  NotebookResourceReleaseRequest,
+  ReleaseNotebookSessionResourcesRequest
+} from '../../shared/notebook-resources'
+import type {
   AppendNotebookCodeCellRequest,
   BeginNotebookCodeCellRequest,
   ExecuteNotebookCodeRequest,
@@ -54,6 +61,16 @@ type FinishNotebookCodeCellResult = {
 type NotebookShutdownResult = { sessionId: string; status: 'shutdown' }
 
 type NotebookCommandRuntime = {
+  getProjectResources(request: NotebookProjectResourcesRequest): Promise<NotebookProjectResources>
+  releaseSessionResources(
+    request: ReleaseNotebookSessionResourcesRequest,
+    assertCurrent: () => void
+  ): Promise<NotebookResourceRelease>
+  getResourceRelease(request: NotebookResourceReleaseRequest): NotebookResourceRelease
+  retryResourceRelease(
+    request: NotebookResourceReleaseRequest,
+    assertCurrent: () => void
+  ): Promise<NotebookResourceRelease>
   runIndex(request: NotebookSessionRequest): Promise<ReplayRunIndex[]>
   state(request: NotebookSessionStateRequest): Promise<NotebookSessionState>
   getMemoryPolicyState(
@@ -81,6 +98,17 @@ type NotebookCommandRuntime = {
 }
 
 type NotebookCommandWorkflows = {
+  configureResourceReleaseGuard(assertAvailable: () => void): void
+  projectResources(request: NotebookProjectResourcesRequest): Promise<NotebookProjectResources>
+  releaseSessionResources(
+    request: ReleaseNotebookSessionResourcesRequest,
+    assertCurrent: () => void
+  ): Promise<NotebookResourceRelease>
+  resourceRelease(request: NotebookResourceReleaseRequest): Promise<NotebookResourceRelease>
+  retryResourceRelease(
+    request: NotebookResourceReleaseRequest,
+    assertCurrent: () => void
+  ): Promise<NotebookResourceRelease>
   runIndex(request: NotebookSessionRequest): Promise<ReplayRunIndex[]>
   state(request: NotebookSessionStateRequest): Promise<NotebookSessionState>
   memoryPolicyState(request: NotebookMemoryPolicyStateRequest): Promise<NotebookMemoryPolicyState>
@@ -128,33 +156,139 @@ const withoutTrustedTurnContext = <
   return publicRequest as Request
 }
 
+type NotebookResourceAvailability = {
+  withSessionAvailable<Result>(
+    projectId: string,
+    sessionId: string,
+    operation: () => Promise<Result>
+  ): Promise<Result>
+  isSessionResourceReadable(projectId: string, sessionId: string): Promise<boolean>
+  assertSessionResourceReleaseAvailable(projectId: string, sessionId: string): void
+}
+
 const createNotebookCommandWorkflows = (
-  runtime: NotebookCommandRuntime
-): NotebookCommandWorkflows => ({
-  // These projections can initialize a previously unseen Notebook session and persist run.json,
-  // so they share the same data-root admission as explicit mutation commands.
-  runIndex: (request) => runtime.runIndex(request),
-  state: (request) => withDataRootWrite(() => runtime.state(request)),
-  memoryPolicyState: (request) => runtime.getMemoryPolicyState(request),
-  projectActivity: async (request) => runtime.getProjectActivity(request),
-  inspectNamespace: (request) =>
-    withDataRootWrite(() => runtime.inspectNamespace(withoutTrustedTurnContext(request))),
-  reference: (request) => runtime.getSessionReference(request),
-  beginCodeCell: (request) => withDataRootWrite(() => runtime.beginCodeCell(request)),
-  appendCodeCell: (request) => withDataRootWrite(() => runtime.appendCodeCell(request)),
-  abortCodeCell: (request) => withDataRootWrite(() => runtime.abortCodeCell(request)),
-  finishCodeCell: (request) => withDataRootWrite(() => runtime.finishCodeCell(request)),
-  runCell: (request) =>
-    withDataRootWrite(() => runtime.runCell(withoutTrustedTurnContext(request))),
-  execute: (request) =>
-    withDataRootWrite(() => runtime.execute(withoutTrustedTurnContext(request))),
-  exportIpynb: (request) => runtime.exportIpynb(request),
-  exportIpynbAll: (request) => runtime.exportIpynbAll(request),
-  restart: (request) => withDataRootWrite(() => runtime.restart(request)),
-  shutdown: (request) => withDataRootWrite(() => runtime.shutdown(request)),
-  getBackgroundRun: (request) => runtime.getBackgroundRun(request),
-  cancelBackgroundRun: (request) => withDataRootWrite(() => runtime.cancelBackgroundRun(request))
-})
+  runtime: NotebookCommandRuntime,
+  resourceAvailability?: NotebookResourceAvailability
+): NotebookCommandWorkflows => {
+  let assertReleaseAvailable = (): void => {
+    throw new Error(
+      'Notebook resource release is unavailable before application admission is installed.'
+    )
+  }
+  const available = (): NotebookResourceAvailability => {
+    if (!resourceAvailability) throw new Error('Notebook Session authority is unavailable.')
+    return resourceAvailability
+  }
+  const readableRelease = async (
+    release: NotebookResourceRelease
+  ): Promise<NotebookResourceRelease> => {
+    const continuations = await Promise.all(
+      release.continuations.map(async (continuation) =>
+        (await available().isSessionResourceReadable(
+          continuation.projectId,
+          continuation.sessionId
+        ))
+          ? continuation
+          : undefined
+      )
+    )
+    return { ...release, continuations: continuations.filter((entry) => entry !== undefined) }
+  }
+  const mutate = async <
+    Request extends ReleaseNotebookSessionResourcesRequest | NotebookResourceReleaseRequest
+  >(
+    request: Request,
+    assertCurrent: () => void,
+    operation: (assertCurrent: () => void) => Promise<NotebookResourceRelease>
+  ): Promise<NotebookResourceRelease> => {
+    const authority = available()
+    assertCurrent()
+    assertReleaseAvailable()
+    const result = await authority.withSessionAvailable(
+      request.projectId,
+      request.sessionId,
+      async () => ({
+        operation: operation(() => {
+          assertCurrent()
+          assertReleaseAvailable()
+          authority.assertSessionResourceReleaseAvailable(request.projectId, request.sessionId)
+        })
+      })
+    )
+    const release = await readableRelease(await result.operation)
+    assertCurrent()
+    return release
+  }
+  return {
+    configureResourceReleaseGuard: (guard) => {
+      assertReleaseAvailable = guard
+    },
+    projectResources: async (request) => {
+      const view = await runtime.getProjectResources(request)
+      const scopes = new Map(
+        [
+          ...view.groups,
+          ...view.pendingDecisions,
+          ...view.releases,
+          ...view.releases.flatMap((release) => release.continuations)
+        ].map((scope) => [JSON.stringify([scope.projectId, scope.sessionId]), scope])
+      )
+      const allowed = new Set(
+        (
+          await Promise.all(
+            [...scopes.entries()].map(async ([key, scope]) =>
+              (await available().isSessionResourceReadable(scope.projectId, scope.sessionId))
+                ? key
+                : undefined
+            )
+          )
+        ).filter((key) => key !== undefined)
+      )
+      const readable = (scope: { projectId: string; sessionId: string }): boolean =>
+        allowed.has(JSON.stringify([scope.projectId, scope.sessionId]))
+      return {
+        groups: view.groups.filter(readable),
+        pendingDecisions: view.pendingDecisions.filter(readable),
+        releases: view.releases.filter(readable).map((release) => ({
+          ...release,
+          continuations: release.continuations.filter(readable)
+        }))
+      }
+    },
+    releaseSessionResources: (request, assertCurrent) =>
+      mutate(request, assertCurrent, (assert) => runtime.releaseSessionResources(request, assert)),
+    resourceRelease: async (request) => {
+      if (!(await available().isSessionResourceReadable(request.projectId, request.sessionId)))
+        throw new Error('Notebook release operation is unavailable for this Session.')
+      return readableRelease(runtime.getResourceRelease(request))
+    },
+    retryResourceRelease: (request, assertCurrent) =>
+      mutate(request, assertCurrent, (assert) => runtime.retryResourceRelease(request, assert)),
+    // These projections can initialize a previously unseen Notebook session and persist run.json,
+    // so they share the same data-root admission as explicit mutation commands.
+    runIndex: (request) => runtime.runIndex(request),
+    state: (request) => withDataRootWrite(() => runtime.state(request)),
+    memoryPolicyState: (request) => runtime.getMemoryPolicyState(request),
+    projectActivity: async (request) => runtime.getProjectActivity(request),
+    inspectNamespace: (request) =>
+      withDataRootWrite(() => runtime.inspectNamespace(withoutTrustedTurnContext(request))),
+    reference: (request) => runtime.getSessionReference(request),
+    beginCodeCell: (request) => withDataRootWrite(() => runtime.beginCodeCell(request)),
+    appendCodeCell: (request) => withDataRootWrite(() => runtime.appendCodeCell(request)),
+    abortCodeCell: (request) => withDataRootWrite(() => runtime.abortCodeCell(request)),
+    finishCodeCell: (request) => withDataRootWrite(() => runtime.finishCodeCell(request)),
+    runCell: (request) =>
+      withDataRootWrite(() => runtime.runCell(withoutTrustedTurnContext(request))),
+    execute: (request) =>
+      withDataRootWrite(() => runtime.execute(withoutTrustedTurnContext(request))),
+    exportIpynb: (request) => runtime.exportIpynb(request),
+    exportIpynbAll: (request) => runtime.exportIpynbAll(request),
+    restart: (request) => withDataRootWrite(() => runtime.restart(request)),
+    shutdown: (request) => withDataRootWrite(() => runtime.shutdown(request)),
+    getBackgroundRun: (request) => runtime.getBackgroundRun(request),
+    cancelBackgroundRun: (request) => withDataRootWrite(() => runtime.cancelBackgroundRun(request))
+  }
+}
 
 export { createNotebookCommandWorkflows }
-export type { NotebookCommandRuntime, NotebookCommandWorkflows }
+export type { NotebookCommandRuntime, NotebookCommandWorkflows, NotebookResourceAvailability }

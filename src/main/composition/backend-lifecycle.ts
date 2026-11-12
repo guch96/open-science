@@ -50,7 +50,7 @@ export async function composeBackendLifecycle({
   handoff: Awaited<ReturnType<typeof composeHandoff>>
   notebookService: Pick<
     NotebookRuntimeService,
-    'createExecutionAdmission' | 'createExecutionIntent'
+    'createExecutionAdmission' | 'createExecutionIntent' | 'refreshResourceActivity'
   >
   modules: ApplicationModuleBuilder
 }): Promise<void> {
@@ -70,6 +70,7 @@ export async function composeBackendLifecycle({
   sessionAuthority.artifactReproducibilityAttemptOwnerRef.current = await modules.add(
     {
       storageRoot: resolveDataRoot(),
+      onResourcesChanged: () => notebookService.refreshResourceActivity(),
       processSandbox: settingsBootstrap.notebookNetworkSandbox,
       prepareExecutionIntent: (
         request:
