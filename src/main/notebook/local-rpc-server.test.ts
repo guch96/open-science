@@ -47,6 +47,7 @@ import {
 } from '../storage/migration-state'
 import { createNotebookArtifactSourceScopeProvider } from './artifact-source-scope'
 import { NotebookLocalRpcServer } from './local-rpc-server'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
 import {
   NotebookControlCompletionCapturedError,
   NotebookRuntimeService,
@@ -126,6 +127,7 @@ describe('notebook local RPC server', () => {
   it('retries failed delegated lane cleanup without restoring its revoked capability', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'project',
@@ -175,6 +177,7 @@ describe('notebook local RPC server', () => {
     const missingDataRoot = join(parentRoot, 'missing-data-root')
     initializeDataRootWriteAvailability(true)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: parentRoot,
       dataRoot: missingDataRoot,
       projectId: 'default-project',
@@ -231,6 +234,7 @@ describe('notebook local RPC server', () => {
   )('scopes a slow $method body to its $turn turn', async ({ method, turn }) => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -332,6 +336,7 @@ describe('notebook local RPC server', () => {
     const finished = createDeferred()
     const heartbeat = join(root, 'cancellation-heartbeat.txt')
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -500,6 +505,7 @@ describe('notebook local RPC server', () => {
       { cause: original }
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -607,6 +613,7 @@ describe('notebook local RPC server', () => {
     const failStop = createDeferred()
     const stopError = new NotebookExecutionStopError()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -714,6 +721,7 @@ describe('notebook local RPC server', () => {
       const root = await createStorageRoot()
       const execute = vi.fn()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -2185,6 +2193,7 @@ describe('notebook local RPC server', () => {
   it('does not let a root Frame capability write through another active Frame lane', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2240,6 +2249,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const call = vi.fn(async (input: unknown) => input)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2300,6 +2310,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     let callSignal: AbortSignal | undefined
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2356,6 +2367,7 @@ describe('notebook local RPC server', () => {
       const callStarted = createDeferred<AbortSignal>()
       const pendingCall = createDeferred<unknown>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -2408,6 +2420,7 @@ describe('notebook local RPC server', () => {
     const callStarted = createDeferred<AbortSignal>()
     const pendingCall = createDeferred<unknown>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2568,6 +2581,7 @@ describe('notebook local RPC server', () => {
     const callStarted = createDeferred<AbortSignal>()
     const pendingCall = createDeferred<unknown>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2628,6 +2642,7 @@ describe('notebook local RPC server', () => {
     const callStarted = createDeferred<AbortSignal>()
     const pendingCall = createDeferred<unknown>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2700,6 +2715,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const call = vi.fn(async () => undefined)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2760,6 +2776,7 @@ describe('notebook local RPC server', () => {
     const callStarted = createDeferred<AbortSignal>()
     const pendingCall = createDeferred<unknown>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2822,6 +2839,7 @@ describe('notebook local RPC server', () => {
     const callStarted = createDeferred<void>()
     const pendingCall = createDeferred<unknown>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2882,6 +2900,7 @@ describe('notebook local RPC server', () => {
       const callStarted = createDeferred<void>()
       const pendingCall = createDeferred<unknown>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -2951,6 +2970,7 @@ describe('notebook local RPC server', () => {
     async (transport) => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -3002,6 +3022,7 @@ describe('notebook local RPC server', () => {
   it('preserves structured Plan error codes across the session-bound RPC transport', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3047,6 +3068,7 @@ describe('notebook local RPC server', () => {
   it('propagates a local socket through every issued capability connection', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3096,6 +3118,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const executions: NotebookExecutionRequest[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3196,6 +3219,7 @@ describe('notebook local RPC server', () => {
     await writeFile(interpreter, '', 'utf8')
     writeReadyMarker(runtimeRoot, DEFAULT_ENV_VERSION, 'ready')
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3259,6 +3283,7 @@ describe('notebook local RPC server', () => {
   it('maps pre-start notebook session aliases to the final ACP session id', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3316,6 +3341,7 @@ describe('notebook local RPC server', () => {
     const connectorCall = vi.fn(async () => ({ ok: true }))
     const onSessionReleased = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3370,6 +3396,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const connectorCall = vi.fn(async () => ({ ok: true }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3425,6 +3452,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const agentsRead = vi.fn(async () => ({ ok: true }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3481,6 +3509,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const agentsRead = vi.fn(async () => ({ ok: true }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3535,6 +3564,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const agentsRead = vi.fn(async () => ({ ok: true }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3588,6 +3618,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const agentsRead = vi.fn(async () => ({ status: 'approved' }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3734,6 +3765,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const connectorCall = vi.fn(async () => ({ ok: true }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3781,6 +3813,7 @@ describe('notebook local RPC server', () => {
   it('binds complete Artifact saves to immutable capability scope and drains accepted work', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'project-1',
@@ -3867,6 +3900,7 @@ describe('notebook local RPC server', () => {
   it('rejects mismatched, expired, missing-scope and old split Artifact protocols before dispatch', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'project-1',
@@ -3965,6 +3999,7 @@ describe('notebook local RPC server', () => {
       } as never
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4416,6 +4451,7 @@ describe('notebook local RPC server', () => {
     let inputRunLeaseId: string | undefined
     const close = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4810,6 +4846,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const server = new NotebookLocalRpcServer(
       new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4854,6 +4891,7 @@ describe('notebook local RPC server', () => {
     const root = await createStorageRoot()
     const calls: unknown[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4916,6 +4954,7 @@ describe('notebook local RPC server', () => {
   it('dispatches manageEnvironments to the runtime service', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4969,6 +5008,7 @@ describe('notebook local RPC server', () => {
   it('list_compute op returns the enabled hosts for the given session', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -5056,6 +5096,7 @@ describe('notebook local RPC server', () => {
   it('set_concurrency_limit op calls setSessionConcurrencyLimit with session_id and limit', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -5117,6 +5158,7 @@ describe('notebook local RPC server', () => {
   it('concurrency_status op calls getSessionConcurrencyStatus and returns the status dict', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -5281,6 +5323,7 @@ describe('real ACP / RPC / Runtime approval wiring', () => {
       })
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'project',
@@ -5870,6 +5913,7 @@ describe('real ACP / RPC / Runtime approval wiring', () => {
 it('rejects research generation through a conversation Artifact capability', async () => {
   const root = await createStorageRoot()
   const runtime = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: root,
     dataRoot: root,
     projectId: 'project-1',

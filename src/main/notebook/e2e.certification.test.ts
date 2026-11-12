@@ -8,6 +8,7 @@ import { callNotebookRpc, type NotebookMcpEnvironment } from './mcp-server'
 import { NotebookLocalRpcServer } from './local-rpc-server'
 import { NotebookRunRepository, getRuntimeRoot } from './repository'
 import { DEFAULT_R_ENV, envPrefix } from '@aipoch/environment'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
 import { NotebookRuntimeService, resolveLoopScriptPaths } from './runtime-service'
 import type { NotebookOutput, NotebookRunSummary } from '../../shared/notebook'
 import type { DiscoveredInterpreter } from '@aipoch/environment/contracts'
@@ -102,6 +103,7 @@ const makeHarness = async (opts: { idleTimeoutMs?: number } = {}): Promise<Harne
   }
 
   const service: NotebookRuntimeService = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: storageRoot,
     dataRoot: storageRoot,
     projectId: PROJECT,

@@ -107,6 +107,7 @@ import {
   WindowsRuntimeComponentStore,
   type WindowsRuntimeComponentDependencies
 } from './windows-runtime-components'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
 import { NotebookRuntimeService } from './runtime-service'
 import { NotebookKernelExecutor } from './kernel-executor'
 import { runShellCommand } from './shell-process'
@@ -373,6 +374,7 @@ describe('NotebookNetworkSandboxOwner', () => {
         requestDecision: vi.fn()
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'project',
