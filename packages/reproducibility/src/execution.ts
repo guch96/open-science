@@ -29,7 +29,12 @@ import type {
   NotebookReproductionStep
 } from './ports'
 import { limitUtf8 } from './text'
-import { CHILD_UNCONFIRMED, isChildUnconfirmedError } from '@aipoch/environment'
+import {
+  CHILD_UNCONFIRMED,
+  environmentChildCleanup,
+  isChildUnconfirmedError,
+  type EnvironmentChildCleanup
+} from '@aipoch/environment'
 import { redactRuntimeDiagnosticText } from '@aipoch/diagnostics/node'
 import { notebookHelperEvidenceKey } from './helper-identity'
 import { createReproductionRecipes } from './recipe'
@@ -91,6 +96,11 @@ type ExecuteArtifactReproducibilityInput = {
   evidence: ReproductionEvidence
   signal?: AbortSignal
   onEvent?: (event: ArtifactReproducibilityExecutionEvent) => void
+  // Transient ownership handoff; never serialized into a recipe, receipt or attempt marker.
+  onCleanupRetained?: (
+    cleanup: () => Promise<{ reaped: boolean }>,
+    child?: EnvironmentChildCleanup
+  ) => void
   retainOutput?: (bytes: Buffer) => Promise<boolean>
   comparisonPolicy?: OutputComparisonPolicy
 }
@@ -573,8 +583,45 @@ export const createReproductionExecutor = (options: {
       : { reaped: true }
     const retainedMarker = await readFile(markerPath, 'utf8').catch(() => undefined)
     if (!shutdown.reaped || retainedMarker !== marker || isChildUnconfirmedError(executionError)) {
+      const childCleanup = environmentChildCleanup(executionError)
+      let retrying: Promise<{ reaped: boolean }> | undefined
+      input.onCleanupRetained?.(() => {
+        if (retrying) return retrying
+        const retry = (async (): Promise<{ reaped: boolean }> => {
+          // A kernel cannot establish a failed installer's tree identity or exit. Retry both original
+          // owners, and retain the attempt when the old error has no genuine installer capability.
+          const stopped = await Promise.allSettled([
+            Promise.resolve().then(() => (runtime ? runtime.shutdown() : { reaped: true })),
+            Promise.resolve().then(() =>
+              childCleanup
+                ? childCleanup.release()
+                : {
+                    reaped: !isChildUnconfirmedError(executionError)
+                  }
+            )
+          ])
+          if (
+            stopped.some((result) => result.status === 'rejected' || !result.value.reaped) ||
+            (await readFile(markerPath, 'utf8').catch(() => undefined)) !== marker
+          )
+            return { reaped: false }
+          await rm(attemptRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+          return { reaped: true }
+        })()
+        retrying = retry
+        void retry.then(
+          (result) => {
+            if (!result.reaped && retrying === retry) retrying = undefined
+          },
+          () => {
+            if (retrying === retry) retrying = undefined
+          }
+        )
+        return retry
+      }, childCleanup)
       throw new Error(
-        `${CHILD_UNCONFIRMED}: Reproducibility kernel teardown could not be confirmed; attempt retained.`
+        `${CHILD_UNCONFIRMED}: Reproducibility kernel teardown could not be confirmed; attempt retained.`,
+        executionError === undefined ? undefined : { cause: executionError }
       )
     }
     try {

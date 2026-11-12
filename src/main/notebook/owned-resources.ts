@@ -11,7 +11,7 @@ export type NotebookResourceCleanupResult = ProcessTreeKillResult & {
 
 export type NotebookOwnedResource = {
   identity: object
-  group: 'kernel' | 'shell' | 'operation' | 'reproduction' | 'batch'
+  group: 'kernel' | 'shell' | 'operation' | 'reproduction' | 'installer' | 'batch'
   kind?: string
   phase: 'starting' | 'running' | 'idle' | 'ready' | 'cleanup-pending'
   startedAt: number
