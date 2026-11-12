@@ -1,8 +1,8 @@
 import { computeQueueBlockedLabel } from '@/lib/compute/queue-blocked-label'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { isComputeJobCancelled, isComputeJobTrackingStopped } from '@aipoch/compute'
-import { ArrowUpRight, ChevronDown, Cpu, RadioTower } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, RadioTower } from 'lucide-react'
 
 import {
   externalComputeMode,
@@ -10,20 +10,23 @@ import {
   type JobSummary
 } from '../../../../shared/compute'
 import { ComputeJobOutputs } from '@/components/ComputeJobOutputs'
-import type {
-  NotebookProjectActivity,
-  NotebookProjectBackgroundRunActivity,
-  NotebookProjectKernelActivity
-} from '../../../../shared/notebook'
+import type { NotebookProjectActivity } from '../../../../shared/notebook'
+import type { NotebookProjectResources } from '../../../../shared/notebook-resources'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useRelativeTimeFormat } from '@/hooks/useDateTimeFormat'
 import { useNavigationStore } from '@/stores/navigation-store'
 import { useSessionStore } from '@/stores/session-store'
 import { backgroundActivityStatusLabel } from './background-activity-presentation'
+import { NotebookResourcePanel } from './NotebookResourcePanel'
 
 const RECENT_COMPUTE_WINDOW_MS = 48 * 60 * 60 * 1_000
 const EMPTY_NOTEBOOK_ACTIVITY: NotebookProjectActivity = { kernels: [], backgroundRuns: [] }
+const EMPTY_NOTEBOOK_RESOURCES: NotebookProjectResources = {
+  groups: [],
+  pendingDecisions: [],
+  releases: []
+}
 const EMPTY_JOBS: JobSummary[] = []
 const ACTIVE_COMPUTE_JOB_STATUSES = new Set<JobSummary['status']>([
   'queued',
@@ -35,8 +38,9 @@ const ACTIVE_COMPUTE_JOB_STATUSES = new Set<JobSummary['status']>([
 // cannot fan out queries or let an already-invalidated response replace the last good data.
 const createActivityRefresh = <T,>(
   read: () => Promise<T>,
-  publish: (value: T) => void
-): { refresh: () => void; dispose: () => void } => {
+  publish: (value: T) => void,
+  canRead: () => boolean = () => true
+): { refresh: () => void; poll: () => void; dispose: () => void } => {
   let active = true
   let loading = false
   let pending = false
@@ -47,7 +51,7 @@ const createActivityRefresh = <T,>(
     timer = undefined
   }
   const load = async (): Promise<void> => {
-    if (!active) return
+    if (!active || !canRead()) return
     if (loading) {
       pending = true
       return
@@ -57,11 +61,11 @@ const createActivityRefresh = <T,>(
       pending = false
       try {
         const value = await read()
-        if (active && !pending) publish(value)
+        if (active && canRead() && !pending) publish(value)
         retries = 0
       } catch {
         // Keep the last good snapshot. A missed terminal update may have no later event.
-        if (active && !pending && retries < 3) {
+        if (active && canRead() && !pending && retries < 3) {
           timer = setTimeout(
             () => {
               timer = undefined
@@ -71,7 +75,7 @@ const createActivityRefresh = <T,>(
           )
         }
       }
-    } while (active && pending)
+    } while (active && canRead() && pending)
     loading = false
   }
   return {
@@ -81,40 +85,14 @@ const createActivityRefresh = <T,>(
       retries = 0
       void load()
     },
+    poll: (): void => {
+      if (!loading && !timer) void load()
+    },
     dispose: (): void => {
       active = false
       clearRetry()
     }
   }
-}
-
-const kernelLabel = (
-  kernel: NotebookProjectKernelActivity,
-  t: ReturnType<typeof useTranslation>['t']
-): string => {
-  if (kernel.kind === 'repl') return t('JavaScript REPL')
-  const language = kernel.kind === 'r' ? 'R' : 'Python'
-  return kernel.environment ? `${language} · ${kernel.environment}` : language
-}
-
-const kernelStatusLabel = (
-  status: NotebookProjectKernelActivity['status'],
-  t: ReturnType<typeof useTranslation>['t']
-): string => {
-  if (status === 'idle') return t('Idle')
-  if (status === 'starting') return t('Starting')
-  if (status === 'restarting') return t('Restarting')
-  return t('Running')
-}
-
-const kernelStatusClassName = (status: NotebookProjectKernelActivity['status']): string => {
-  if (status === 'running') {
-    return 'inline-flex rounded-full bg-status-success-surface px-2 py-0.5 text-[10px] font-semibold text-status-success-foreground dark:bg-status-success-dark-surface dark:text-status-success-dark-foreground'
-  }
-  if (status === 'idle') {
-    return 'inline-flex rounded-full bg-bg-100 px-2 py-0.5 text-[10px] font-semibold text-text-100'
-  }
-  return 'inline-flex rounded-full bg-status-warning-surface px-2 py-0.5 text-[10px] font-semibold text-status-warning-foreground dark:bg-status-warning-dark-surface dark:text-status-warning-dark-foreground'
 }
 
 const jobStatusLabel = (job: JobSummary, t: ReturnType<typeof useTranslation>['t']): string => {
@@ -156,16 +134,19 @@ function jobTargetLabel(job: JobSummary, t: ReturnType<typeof useTranslation>['t
   return name === backend ? name : `${backend} · ${name}`
 }
 
-const ProjectComputeInbox = (): React.JSX.Element => {
+const ProjectComputeInbox = ({ isActive = true }: { isActive?: boolean }): React.JSX.Element => {
   const { t } = useTranslation()
   const formatRelativeTime = useRelativeTimeFormat()
   const projectId = useNavigationStore((state) => state.activeProjectId)
   const openSession = useNavigationStore((state) => state.openSession)
   const sessions = useSessionStore((state) => state.sessions)
-  const currentSessionId = useSessionStore((state) => state.selectedSessionId)
+  const refreshNotebook = useRef<() => void>(() => undefined)
+  const pollNotebook = useRef<() => void>(() => undefined)
   const [notebookSnapshot, setNotebookSnapshot] = useState<{
     projectId: string
     activity: NotebookProjectActivity
+    resources: NotebookProjectResources
+    observedAt: number
   }>()
   const [jobsSnapshot, setJobsSnapshot] = useState<{ projectId: string; jobs: JobSummary[] }>()
   const [recentSince, setRecentSince] = useState(() => Date.now() - RECENT_COMPUTE_WINDOW_MS)
@@ -174,22 +155,67 @@ const ProjectComputeInbox = (): React.JSX.Element => {
       ? notebookSnapshot.activity
       : EMPTY_NOTEBOOK_ACTIVITY
   const jobs = projectId && jobsSnapshot?.projectId === projectId ? jobsSnapshot.jobs : EMPTY_JOBS
+  const notebookResources =
+    projectId && notebookSnapshot?.projectId === projectId
+      ? notebookSnapshot.resources
+      : EMPTY_NOTEBOOK_RESOURCES
 
   useEffect(() => {
-    if (!projectId) return
+    if (!projectId || !isActive) return
     const refresh = createActivityRefresh(
-      () => window.api.notebook.getProjectActivity({ projectId }),
-      (activity) => setNotebookSnapshot({ projectId, activity })
+      async () => {
+        const [activity, resources] = await Promise.all([
+          window.api.notebook.getProjectActivity({ projectId }),
+          window.api.notebook.getProjectResources({ projectId })
+        ])
+        return { activity, resources, observedAt: Date.now() }
+      },
+      (snapshot) => setNotebookSnapshot({ projectId, ...snapshot }),
+      () => document.visibilityState !== 'hidden'
     )
+    refreshNotebook.current = refresh.refresh
+    pollNotebook.current = refresh.poll
     const stop = window.api.notebook.onChanged((event) => {
       if (event.projectId === projectId) refresh.refresh()
     })
+    const resume = (): void => {
+      if (document.visibilityState !== 'hidden') refresh.refresh()
+    }
+    document.addEventListener('visibilitychange', resume)
     refresh.refresh()
     return () => {
+      refreshNotebook.current = () => undefined
+      pollNotebook.current = () => undefined
+      document.removeEventListener('visibilitychange', resume)
       refresh.dispose()
       stop()
     }
-  }, [projectId])
+  }, [projectId, isActive])
+
+  const hasNotebookResources =
+    notebookResources.groups.length > 0 ||
+    notebookResources.pendingDecisions.length > 0 ||
+    notebookResources.releases.some(
+      (release) => release.status !== 'released' || release.continuations.length > 0
+    )
+  useEffect(() => {
+    if (!projectId || !isActive || !hasNotebookResources) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const schedule = (): void => {
+      clearTimeout(timer)
+      if (document.visibilityState === 'hidden') return
+      timer = setTimeout(() => {
+        pollNotebook.current()
+        schedule()
+      }, 5_000)
+    }
+    document.addEventListener('visibilitychange', schedule)
+    schedule()
+    return () => {
+      clearTimeout(timer)
+      document.removeEventListener('visibilitychange', schedule)
+    }
+  }, [projectId, isActive, hasNotebookResources])
 
   useEffect(() => {
     if (!projectId) return
@@ -228,41 +254,6 @@ const ProjectComputeInbox = (): React.JSX.Element => {
     () => new Map(sessions.map((session) => [session.id, session] as const)),
     [sessions]
   )
-  const kernels = useMemo(() => {
-    const latestBySession = new Map<string, NotebookProjectKernelActivity>()
-    for (const kernel of notebookActivity.kernels) {
-      const previous = latestBySession.get(kernel.sessionId)
-      if (!previous || kernel.lastActivityAt > previous.lastActivityAt) {
-        latestBySession.set(kernel.sessionId, kernel)
-      }
-    }
-    return [...latestBySession.values()].sort((left, right) => {
-      const leftCurrent = left.sessionId === currentSessionId
-      const rightCurrent = right.sessionId === currentSessionId
-      if (leftCurrent !== rightCurrent) return leftCurrent ? -1 : 1
-      return (
-        left.sessionId.localeCompare(right.sessionId) ||
-        left.processKey.localeCompare(right.processKey)
-      )
-    })
-  }, [currentSessionId, notebookActivity.kernels])
-  const latestBackgroundRunBySessionAndKernel = useMemo(() => {
-    const bySession = new Map<string, Map<string, NotebookProjectBackgroundRunActivity>>()
-    for (const run of notebookActivity.backgroundRuns) {
-      if (!run.processKey) continue
-      let byKernel = bySession.get(run.sessionId)
-      if (!byKernel) {
-        byKernel = new Map()
-        bySession.set(run.sessionId, byKernel)
-      }
-      const previous = byKernel.get(run.processKey)
-      if (!previous || run.acceptedAt > previous.acceptedAt) {
-        byKernel.set(run.processKey, run)
-      }
-    }
-    return bySession
-  }, [notebookActivity.backgroundRuns])
-
   const goToSession = (sessionId: string): void => {
     if (projectId && sessionById.has(sessionId)) openSession(projectId, sessionId, 'user')
   }
@@ -278,142 +269,25 @@ const ProjectComputeInbox = (): React.JSX.Element => {
         </h1>
         <p className="mt-1 text-xs text-text-100">
           {t(
-            'Active kernels, active Compute Jobs, and Compute Jobs completed in the last 48 hours.'
+            'Local Notebook resources, active Compute Jobs, and Compute Jobs completed in the last 48 hours.'
           )}
         </p>
       </header>
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-5 px-6 py-4">
-          <section aria-labelledby="active-kernels-title">
-            {kernels.length === 0 ? (
-              <div className="overflow-hidden rounded-lg border border-border-200 bg-bg-000">
-                <h2
-                  id="active-kernels-title"
-                  className="border-b border-border-200 px-3.5 py-3 text-sm font-semibold"
-                >
-                  {t('Active kernels')} · {kernels.length}
-                </h2>
-                <div className="px-3 py-6 text-center text-xs text-text-100">
-                  {t('No active kernels')}
-                </div>
-              </div>
-            ) : (
-              <div className="overflow-hidden rounded-lg border border-border-200 bg-bg-000">
-                <h2
-                  id="active-kernels-title"
-                  className="border-b border-border-200 px-3.5 py-3 text-sm font-semibold"
-                >
-                  {t('Active kernels')} · {kernels.length}
-                </h2>
-                <div
-                  role="row"
-                  className="hidden grid-cols-[minmax(180px,1.15fr)_minmax(220px,1.4fr)_100px_28px] gap-4 border-b border-border-200 bg-bg-10 px-3.5 py-2 text-[10px] font-semibold tracking-wide text-text-100 uppercase @3xl/compute:grid"
-                >
-                  <span role="columnheader">{t('Session')}</span>
-                  <span role="columnheader">{t('Kernel')}</span>
-                  <span role="columnheader">{t('Status')}</span>
-                  <span aria-hidden="true" />
-                </div>
-                {kernels.map((kernel) => {
-                  const workload = latestBackgroundRunBySessionAndKernel
-                    .get(kernel.sessionId)
-                    ?.get(kernel.processKey)
-                  const session = sessionById.get(kernel.sessionId)
-                  return (
-                    <div
-                      key={`${kernel.sessionId}:${kernel.processKey}`}
-                      className="relative border-t border-border-200 px-3.5 py-3 text-xs first:border-t-0"
-                    >
-                      <div className="flex min-w-0 items-center gap-2 pr-8 @3xl/compute:hidden">
-                        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-bg-100 text-text-100">
-                          <Cpu className="size-3.5" aria-hidden="true" />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <span className="truncate font-medium">
-                              {session?.title ?? t('Deleted Session')}
-                            </span>
-                            <span className={kernelStatusClassName(kernel.status)}>
-                              {kernelStatusLabel(kernel.status, t)}
-                            </span>
-                          </div>
-                          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-text-100">
-                            <span className="shrink-0">{kernelLabel(kernel, t)}</span>
-                            {workload ? (
-                              <>
-                                <span className="shrink-0 rounded border border-border-300 bg-bg-100 px-1.5 py-0.5 text-[10px] font-semibold text-text-200">
-                                  {t('Background')}
-                                </span>
-                                <span className="truncate" title={workload.title}>
-                                  {workload.title}
-                                </span>
-                              </>
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                      <dl className="hidden grid-cols-[minmax(180px,1.15fr)_minmax(220px,1.4fr)_100px_28px] items-center gap-4 @3xl/compute:grid">
-                        <div>
-                          <dt className="sr-only">{t('Session')}</dt>
-                          <dd className="flex min-w-0 items-center gap-2 font-medium">
-                            <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-bg-100 text-text-100">
-                              <Cpu className="size-3.5" aria-hidden="true" />
-                            </span>
-                            <span className="truncate">
-                              {session?.title ?? t('Deleted Session')}
-                            </span>
-                          </dd>
-                        </div>
-                        <div>
-                          <dt className="sr-only">{t('Kernel')}</dt>
-                          <dd className="min-w-0">
-                            <div className="flex min-w-0 flex-wrap items-center gap-1.5 font-medium">
-                              <span className="truncate">{kernelLabel(kernel, t)}</span>
-                              {workload ? (
-                                <span className="shrink-0 rounded border border-border-300 bg-bg-100 px-1.5 py-0.5 text-[10px] font-semibold text-text-200">
-                                  {t('Background')}
-                                </span>
-                              ) : null}
-                            </div>
-                            {workload ? (
-                              <div
-                                className="mt-1 min-w-0 truncate text-[11px] font-normal text-text-100"
-                                title={workload.title}
-                              >
-                                {workload.title}
-                              </div>
-                            ) : null}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt className="sr-only">{t('Status')}</dt>
-                          <dd>
-                            <span className={kernelStatusClassName(kernel.status)}>
-                              {kernelStatusLabel(kernel.status, t)}
-                            </span>
-                          </dd>
-                        </div>
-                        <div aria-hidden="true" />
-                      </dl>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        className="absolute top-3 right-3 text-text-100 hover:text-text-000 @3xl/compute:top-1/2 @3xl/compute:-translate-y-1/2"
-                        disabled={!session}
-                        aria-label={t('Go to Session')}
-                        title={t('Go to Session')}
-                        onClick={() => goToSession(kernel.sessionId)}
-                      >
-                        <ArrowUpRight aria-hidden="true" />
-                      </Button>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </section>
+          {projectId ? (
+            <NotebookResourcePanel
+              key={projectId}
+              isActive={isActive}
+              projectId={projectId}
+              snapshot={notebookResources}
+              observedAt={notebookSnapshot?.observedAt ?? 0}
+              backgroundRuns={notebookActivity.backgroundRuns}
+              refresh={() => refreshNotebook.current()}
+              goToSession={goToSession}
+            />
+          ) : null}
 
           <section aria-labelledby="compute-jobs-title">
             {jobs.length === 0 ? (
