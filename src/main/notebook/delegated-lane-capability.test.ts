@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fetchLocalRpc } from '../local-rpc-transport'
 import { NotebookLocalRpcServer } from './local-rpc-server'
 import { NotebookRunRepository } from './repository'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
 import { NotebookRuntimeService } from './runtime-service'
 
 let storageRoot: string | undefined
@@ -117,6 +118,7 @@ describe('delegated Notebook lane capability', () => {
       return []
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: storageRoot,
       dataRoot: storageRoot,
       projectId: 'project-1',
@@ -247,6 +249,7 @@ describe('delegated Notebook lane capability', () => {
     storageRoot = await mkdtemp(join(tmpdir(), 'delegated-output-capability-'))
     const submitOutput = vi.fn(async () => ({ accepted: true as const }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: storageRoot,
       dataRoot: storageRoot,
       projectId: 'project-1',
@@ -324,6 +327,7 @@ describe('delegated Notebook lane capability', () => {
     storageRoot = await mkdtemp(join(tmpdir(), 'delegated-notebook-'))
     const invocationCounts = new WeakMap<object, number>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: storageRoot,
       dataRoot: storageRoot,
       projectId: 'project-1',
@@ -439,6 +443,7 @@ describe('delegated Notebook lane capability', () => {
   it('fences stopped and superseded Attempts without revoking a sibling lane', async () => {
     storageRoot = await mkdtemp(join(tmpdir(), 'delegated-notebook-fence-'))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: storageRoot,
       dataRoot: storageRoot,
       projectId: 'project-1',

@@ -123,6 +123,7 @@ import { ConversationSkillImporter, SkillImportApprovalBroker } from '../skills/
 import type { PermissionGrantRegistry } from '../permission-grants/registry'
 import { createProjectDbClient, migrateApplicationDatabase } from '../projects/prisma-client'
 import { NotebookLocalRpcServer } from '../notebook/local-rpc-server'
+import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
 import { NotebookRunRepository } from '../notebook/repository'
 import {
@@ -11494,6 +11495,7 @@ describe('ACP runtime session management', () => {
     const root = await createTemporaryRoot()
     const connectorCall = vi.fn(async () => ({ ok: true }))
     const notebookService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -26358,6 +26360,7 @@ describe('ACP runtime session management', () => {
     const releaseRpcWrite = createDeferred()
     const closeStarted = createDeferred()
     const notebookService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: storageRoot,
       dataRoot: storageRoot,
       projectId: 'project-1',
@@ -27480,6 +27483,7 @@ describe('ACP runtime session management', () => {
       const canStop = createDeferred()
       const heartbeat = join(root, 'heartbeat.txt')
       const notebookService = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'project-1',

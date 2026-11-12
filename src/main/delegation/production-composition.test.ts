@@ -30,6 +30,7 @@ import { createArtifactHandlers } from '../artifacts/ipc'
 import { createProjectDbClient, migrateApplicationDatabase } from '../projects/prisma-client'
 import { createFrameNotebookLane } from '../notebook/lane-identity'
 import { NotebookRunRepository } from '../notebook/repository'
+import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
 import {
   SessionPersistenceCoordinator,
@@ -305,6 +306,7 @@ const createFrameworkCompositionHarness = async (
   const immutableInputPath = join(dataRoot, 'framework-input.txt')
   await writeFile(immutableInputPath, 'framework evidence\n', 'utf8')
   const service = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: dataRoot,
     dataRoot,
     projectId: 'project-1',

@@ -71,6 +71,7 @@ import {
 import { NotebookLocalRpcServer } from './local-rpc-server'
 import { HostViewImageError } from './host-view-image-service'
 import { NotebookRunRepository } from './repository'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
 import {
   NotebookRuntimeService,
   type NotebookExecutionRequest,
@@ -1779,6 +1780,7 @@ describe('repl_execute tool', () => {
     const root = await mkdtemp(join(tmpdir(), 'image-failure-mcp-'))
     const stderr = 'existing diagnostic\n'.repeat(500)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1863,6 +1865,7 @@ describe('repl_execute tool', () => {
       }
     }
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1957,6 +1960,7 @@ describe('repl_execute tool', () => {
       return execution
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',

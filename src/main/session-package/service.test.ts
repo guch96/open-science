@@ -28,6 +28,7 @@ import { sha256 } from '../artifacts/provenance-canonical'
 import { createPngBytes } from '../artifacts/artifact-test-fixtures'
 import { SessionRepository } from '../session-persistence/repository'
 import { SessionProjectionAfterCommitError } from '../session-persistence/save-session'
+import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
 import {
   startWorkingFileObservation,
@@ -3431,6 +3432,7 @@ it.each(['root', 'frame'] as const)(
       throw new Error('An imported Session must never create an executor')
     })
     const notebook = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       projectId: imported.projectId,
       configRoot: target.storageRoot,
       dataRoot: target.storageRoot,
@@ -3551,6 +3553,7 @@ it.each(['root', 'frame'] as const)(
       })
     ).resolves.toBeDefined()
     const continuedNotebook = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       projectId: forked.projectId,
       configRoot: target.storageRoot,
       dataRoot: target.storageRoot,

@@ -39,6 +39,7 @@ import { randomUUID } from 'node:crypto'
 import { NotebookExecutionStopError } from '../../shared/notebook-execution-error'
 import { fetchLocalRpc } from '../local-rpc-transport'
 import { NotebookLocalRpcServer } from '../notebook/local-rpc-server'
+import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
 import { NotebookRunRepository } from '../notebook/repository'
 import { loadSessionMutationAuthority, SessionRepository } from '../session-persistence/repository'
@@ -5321,6 +5322,7 @@ describe('TaskRunner', () => {
     })
     const failure = new NotebookExecutionStopError()
     const notebook = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: project.id,
