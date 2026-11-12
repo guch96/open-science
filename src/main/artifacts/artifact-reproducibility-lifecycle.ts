@@ -26,6 +26,10 @@ import type {
   ListArtifactReproducibilityReceiptsRequest
 } from '../../shared/artifact-reproducibility'
 import type { NotebookProcessSandbox } from '../notebook/process-sandbox'
+import type {
+  NotebookExecutionAdmission,
+  NotebookExecutionAdmissionError
+} from '../notebook/execution-admission'
 import { isChildUnconfirmedError } from '@aipoch/environment'
 import { createLogger, errorLogFields } from '@aipoch/diagnostics/node'
 import { startDiagnosticOperation } from '@aipoch/diagnostics/node'
@@ -45,6 +49,10 @@ const log = createLogger('artifacts:reproducibility')
 const REPRODUCIBILITY_LOG_LIMIT_CHARACTERS = 128 * 1024
 
 type ArtifactReproducibilityAttemptOwnerDependencies = {
+  createExecutionAdmission?: (
+    request: ArtifactReproducibilityCheckRequest,
+    signal?: AbortSignal
+  ) => NotebookExecutionAdmission
   storageRoot: string
   processSandbox: NotebookProcessSandbox
   loadExecution: (
@@ -75,6 +83,7 @@ type ArtifactReproducibilityAttemptOwnerDependencies = {
 }
 
 type Attempt = {
+  memoryAdmissionError?: NotebookExecutionAdmissionError
   ownerId: number
   controller: AbortController
   recording: boolean
@@ -235,6 +244,7 @@ class ArtifactReproducibilityAttemptOwner {
         this.batchPublishers.get(ownerId)?.(state)
         const attempt = this.attemptsById.get(state.attemptId)!
         await attempt.settled
+        if (attempt.memoryAdmissionError) throw attempt.memoryAdmissionError
         return snapshot(attempt.state)
       },
       cancel: (attemptId, ownerId) => this.cancel({ attemptId }, ownerId)
@@ -679,6 +689,12 @@ class ArtifactReproducibilityAttemptOwner {
           frontierId: attempt.state.request.frontierId,
           storageRoot: this.dependencies.storageRoot,
           processSandbox: this.dependencies.processSandbox,
+          createExecutionAdmission: this.dependencies.createExecutionAdmission
+            ? (signal) => this.dependencies.createExecutionAdmission!(attempt.state.request, signal)
+            : undefined,
+          onAdmissionRejected: (error) => {
+            attempt.memoryAdmissionError = error
+          },
           signal: attempt.controller.signal,
           comparisonPolicy: attempt.state.request.comparisonPolicy,
           retainOutput: this.dependencies.retainOutput
@@ -789,6 +805,9 @@ class ArtifactReproducibilityAttemptOwner {
       })
       this.update(attempt, {
         status: 'failed',
+        ...(attempt.memoryAdmissionError
+          ? { errorMessage: attempt.memoryAdmissionError.message }
+          : {}),
         ...(attempt.recording ? { phase: undefined } : {}),
         activeEnvironment: undefined
       })

@@ -1479,6 +1479,8 @@ class NotebookExecutionOwner {
               outputs: []
             }
           }
+          if (error instanceof NotebookExecutionAdmissionError)
+            return errorToExecutionResult(error, session.cwd)
           executedOnLiveKernel = false
           return errorToExecutionResult(error, session.cwd)
         }),

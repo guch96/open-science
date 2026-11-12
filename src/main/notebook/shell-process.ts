@@ -759,6 +759,7 @@ const runShellCommand = (
         stdout: '',
         stderr: error instanceof Error ? error.message : String(error),
         exitCode: error instanceof NotebookExecutionAdmissionError ? 1 : null,
+        ...(options.signal?.aborted ? { cancelled: true } : {}),
         ...(error instanceof NotebookExecutionAdmissionError
           ? { kernelDispatched: false, executionStarted: false, recovery: error.recovery }
           : {})

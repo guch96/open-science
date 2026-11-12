@@ -456,6 +456,8 @@ const errorToExecutionResult = (
   kernelDispatched = false,
   helperModulesInitialized: readonly string[] = []
 ): NotebookExecutionResult => {
+  if (!kernelDispatched && request.signal?.aborted && error === request.signal.reason)
+    error = new NotebookExecutionCancelledError()
   if (error instanceof NotebookRuntimeAccessCancelledError) {
     return {
       status: 'cancelled',
@@ -1502,8 +1504,8 @@ class NotebookKernelExecutor implements NotebookExecutor {
     let child: ChildProcessWithoutNullStreams
     let spawnAdmission: Readonly<{ started: () => void; notStarted: () => void }> | undefined
     try {
-      await request.executionAdmission?.prepare('create')
-      request.signal?.throwIfAborted()
+      if (request.executionAdmission) await request.executionAdmission.prepare('create')
+      if (request.signal?.aborted) throw new NotebookExecutionCancelledError()
       request.executionAdmission?.assertCurrent('create')
       // No await may separate this check from spawn: settings mutations must not interleave
       // between validating the prepared launch and creating its process.
@@ -1887,7 +1889,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
 
       try {
         const assertDispatch = (): void => {
-          request.signal?.throwIfAborted()
+          if (request.signal?.aborted) throw new NotebookExecutionCancelledError()
           request.executionAdmission?.assertCurrent('dispatch')
           if (request.executionAdmission && (!proc.alive || this.procs.get(proc.key) !== proc))
             throw (
