@@ -137,6 +137,7 @@ import {
 
 const log = createLogger('notebook:local-rpc')
 const MAX_COMPLETED_COMPUTE_SUBMISSIONS_PER_SESSION = 100
+const MAX_CONTROL_INVOCATION_HISTORY = 256
 
 type NotebookLocalRpcServerOptions = {
   token?: string
@@ -1863,6 +1864,12 @@ class NotebookLocalRpcServer {
         binding.controlInvocations ??= new Map()
         const authority = { identity, intent, credential, active: true }
         binding.controlInvocations.set(nonce, authority)
+        // Retain a bounded window for late callbacks from a persistent REPL. Expiring an entry
+        // closes future admission; requests that already captured it keep their own authority.
+        if (binding.controlInvocations.size > MAX_CONTROL_INVOCATION_HISTORY) {
+          const oldest = binding.controlInvocations.keys().next().value
+          if (oldest) binding.controlInvocations.delete(oldest)
+        }
         binding.activeControlInvocation = context
         ownedControlInvocationIds.add(context.toolInvocationId)
         return Object.assign(
@@ -2264,6 +2271,9 @@ class NotebookLocalRpcServer {
         typeof controlNonce === 'string'
           ? initialSessionBinding?.controlInvocations?.get(controlNonce)
           : undefined
+      if (initialSessionBinding?.isControl && controlNonce !== undefined && !controlAuthority) {
+        throw new RpcHttpError(403, 'The trusted control invocation has expired or is invalid.')
+      }
       const initialControlInvocation = controlAuthority?.identity
       const initialSessionId = initialSessionBinding
         ? (this.sessionAliases.get(initialSessionBinding.sessionId) ??

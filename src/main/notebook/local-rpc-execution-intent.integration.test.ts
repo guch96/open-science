@@ -179,6 +179,27 @@ it('pins late control callbacks to their original invocation instead of lending 
     expect((await call()).status).toBe(403)
     expect((await call(undefined, 'list')).status).toBe(200)
     expect(dispatch).toHaveBeenCalledTimes(3)
+
+    old()
+    fresh()
+    let latest = fresh
+    for (let index = 0; index < 1024; index++) {
+      latest = control.beginControlInvocation(
+        {
+          turnId: `later-${index}`,
+          toolInvocationId: `later-${index}`,
+          controlInvocationGeneration: index + 3
+        },
+        freshIntent
+      )
+      latest()
+    }
+    // Retired callbacks cannot retain every old intent for the lifetime of a persistent REPL.
+    // Expiry rejects an explicitly supplied stale nonce instead of using a newer invocation.
+    expect((await call(old.nonce, 'list')).status).toBe(403)
+    expect((await call(latest.nonce, 'list')).body).toMatchObject({
+      result: { turnId: 'later-1023', toolInvocationId: 'later-1023' }
+    })
   } finally {
     old()
     fresh()
