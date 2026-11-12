@@ -30,10 +30,17 @@ import type {
   NotebookExecutionAdmission,
   NotebookExecutionAdmissionError
 } from '../notebook/execution-admission'
-import { isChildUnconfirmedError } from '@aipoch/environment'
+import { isChildUnconfirmedError, type EnvironmentChildCleanup } from '@aipoch/environment'
 import { createLogger, errorLogFields } from '@aipoch/diagnostics/node'
 import { startDiagnosticOperation } from '@aipoch/diagnostics/node'
-import { executeArtifactReproducibility } from '../notebook/reproduction-runtime'
+import {
+  executeArtifactReproducibility,
+  type NotebookReproductionRuntime
+} from '../notebook/reproduction-runtime'
+import type {
+  NotebookOwnedResource,
+  NotebookResourceCleanupResult
+} from '../notebook/owned-resources'
 import {
   ReproducibilityCleanupError,
   type ArtifactReproducibilityExecutionEvent,
@@ -88,6 +95,10 @@ type Attempt = {
   controller: AbortController
   recording: boolean
   cleanupError?: unknown
+  runtime?: NotebookReproductionRuntime
+  installer?: EnvironmentChildCleanup
+  retainedCleanup?: () => Promise<{ reaped: boolean }>
+  releasing?: Promise<NotebookResourceCleanupResult>
   startedAt: string
   state: ArtifactReproducibilityCheckState
   settled: Promise<void>
@@ -339,8 +350,7 @@ class ArtifactReproducibilityAttemptOwner {
     attempt.settled = this.run(attempt).finally(() => {
       // Keep uncertain workers visible to subsequent deletion and shutdown gates.
       if (attempt.cleanupError) return
-      if (this.attemptsById.get(attemptId) === attempt) this.attemptsById.delete(attemptId)
-      if (this.attemptIdsByRequest.get(key) === attemptId) this.attemptIdsByRequest.delete(key)
+      this.forgetAttempt(attempt)
     })
     return snapshot(attempt.state)
   }
@@ -418,6 +428,89 @@ class ArtifactReproducibilityAttemptOwner {
     ]
   }
 
+  resources(scope: { projectId?: string; sessionId?: string } = {}): NotebookOwnedResource[] {
+    return [
+      ...Array.from(this.attemptsById.values()).flatMap((attempt): NotebookOwnedResource[] => {
+        const projectId = attempt.state.request.projectId
+        const sessionId = attempt.state.request.appSessionId
+        const installer = attempt.installer
+        if (
+          (scope.projectId !== undefined && scope.projectId !== projectId) ||
+          (scope.sessionId !== undefined && scope.sessionId !== sessionId)
+        )
+          return []
+        return [
+          {
+            identity: attempt,
+            group: 'reproduction',
+            kind: 'attempt',
+            phase: attempt.cleanupError
+              ? 'cleanup-pending'
+              : attempt.runtime
+                ? 'running'
+                : 'starting',
+            startedAt: Date.parse(attempt.startedAt),
+            projectId,
+            sessionId,
+            release: () => this.releaseAttempt(attempt)
+          },
+          ...(installer
+            ? [
+                {
+                  identity: installer.identity,
+                  group: 'installer' as const,
+                  kind: 'environment-restore',
+                  phase: 'cleanup-pending' as const,
+                  startedAt: installer.startedAt,
+                  projectId,
+                  sessionId,
+                  release: () => installer.release()
+                }
+              ]
+            : []),
+          ...(attempt.runtime?.resources?.() ?? []).map((resource) => ({
+            ...resource,
+            projectId,
+            sessionId,
+            release: () => {
+              if (!attempt.recording) attempt.controller.abort(new Error('Reproduction cancelled.'))
+              return resource.release()
+            }
+          }))
+        ]
+      }),
+      ...this.batches.resources(scope)
+    ]
+  }
+
+  private forgetAttempt(attempt: Attempt): void {
+    const id = attempt.state.attemptId
+    if (this.attemptsById.get(id) !== attempt) return
+    this.attemptsById.delete(id)
+    const key = requestKey(attempt.state.request)
+    if (this.attemptIdsByRequest.get(key) === id) this.attemptIdsByRequest.delete(key)
+  }
+
+  private releaseAttempt(attempt: Attempt): Promise<NotebookResourceCleanupResult> {
+    if (attempt.releasing) return attempt.releasing
+    const release = (async (): Promise<NotebookResourceCleanupResult> => {
+      if (!attempt.recording) attempt.controller.abort(new Error('Reproduction cancelled.'))
+      await attempt.settled
+      if (attempt.cleanupError) {
+        const result = await attempt.retainedCleanup?.()
+        if (!result?.reaped) return { reaped: false, error: attempt.cleanupError }
+        attempt.cleanupError = undefined
+      }
+      this.forgetAttempt(attempt)
+      return { reaped: true }
+    })().catch((error: unknown) => ({ reaped: false, error }))
+    attempt.releasing = release
+    void release.then((result) => {
+      if (!result.reaped && attempt.releasing === release) attempt.releasing = undefined
+    })
+    return release
+  }
+
   async cancelSession(projectId: string, sessionId: string): Promise<void> {
     const batches = this.batches.stopWhere(
       (scope) => scope.projectId === projectId && scope.appSessionId === sessionId
@@ -428,7 +521,7 @@ class ArtifactReproducibilityAttemptOwner {
           state.request.projectId === projectId && state.request.appSessionId === sessionId
       )
     )
-    await Promise.all([batches, attempts])
+    await this.waitForCleanup([batches, attempts])
   }
 
   async cancelProject(projectId: string): Promise<void> {
@@ -436,7 +529,7 @@ class ArtifactReproducibilityAttemptOwner {
     const attempts = this.drain(
       [...this.attemptsById.values()].filter(({ state }) => state.request.projectId === projectId)
     )
-    await Promise.all([batches, attempts])
+    await this.waitForCleanup([batches, attempts])
   }
 
   async withSessionStopped<Result>(
@@ -459,7 +552,7 @@ class ArtifactReproducibilityAttemptOwner {
   async shutdownAll(): Promise<void> {
     this.stoppingAll++
     try {
-      await Promise.all([
+      await this.waitForCleanup([
         this.batches.stopWhere(() => true),
         this.drain([...this.attemptsById.values()])
       ])
@@ -469,12 +562,21 @@ class ArtifactReproducibilityAttemptOwner {
   }
 
   private async drain(attempts: Attempt[]): Promise<void> {
-    for (const attempt of attempts) {
-      if (!attempt.recording) attempt.controller.abort(new Error('Reproduction cancelled.'))
-    }
-    await Promise.all(attempts.map((attempt) => attempt.settled))
-    const unsafe = attempts.find((attempt) => attempt.cleanupError)
-    if (unsafe) throw unsafe.cleanupError
+    const outcomes = await Promise.all(attempts.map((attempt) => this.releaseAttempt(attempt)))
+    const failures = outcomes.filter((result) => !result.reaped).map((result) => result.error)
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1)
+      throw new AggregateError(failures, 'Reproduction cleanup could not be confirmed.')
+  }
+
+  private async waitForCleanup(operations: Promise<void>[]): Promise<void> {
+    const results = await Promise.allSettled(operations)
+    const errors = results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    )
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1)
+      throw new AggregateError(errors, 'Reproduction cleanup did not complete.')
   }
 
   private update(
@@ -694,6 +796,13 @@ class ArtifactReproducibilityAttemptOwner {
             : undefined,
           onAdmissionRejected: (error) => {
             attempt.memoryAdmissionError = error
+          },
+          onRuntimeCreated: (runtime) => {
+            attempt.runtime = runtime
+          },
+          onCleanupRetained: (cleanup, installer) => {
+            attempt.retainedCleanup = cleanup
+            attempt.installer = installer
           },
           signal: attempt.controller.signal,
           comparisonPolicy: attempt.state.request.comparisonPolicy,

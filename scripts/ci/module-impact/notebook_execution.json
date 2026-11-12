@@ -151,7 +151,9 @@
     "src/main/notebook/memory-policy.native.integration.test.ts",
     "src/main/notebook/memory-policy.test-support.ts",
     "src/main/notebook/memory-policy.test.ts",
-    "src/main/notebook/memory-policy.ts"
+    "src/main/notebook/memory-policy.ts",
+    "src/main/notebook/owned-resources.integration.test.ts",
+    "src/main/notebook/owned-resources.ts"
   ],
   "interfacePaths": [
     "src/main/notebook/environment-application-commands.ts",
@@ -248,7 +250,8 @@
     "src/main/notebook/memory-policy-linux.ts",
     "src/main/notebook/memory-policy-platform.ts",
     "src/main/notebook/memory-policy.test-support.ts",
-    "src/main/notebook/memory-policy.ts"
+    "src/main/notebook/memory-policy.ts",
+    "src/main/notebook/owned-resources.ts"
   ],
   "consumerModules": [],
   "testFiles": {
@@ -307,7 +310,8 @@
       "src/main/notebook/memory-policy-linux.test.ts",
       "src/main/notebook/memory-policy-platform.test.ts",
       "src/main/notebook/memory-policy.native.integration.test.ts",
-      "src/main/notebook/memory-policy.test.ts"
+      "src/main/notebook/memory-policy.test.ts",
+      "src/main/notebook/owned-resources.integration.test.ts"
     ],
     "contract": [
       "src/preload/index.test.ts",

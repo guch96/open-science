@@ -63,8 +63,11 @@ export {
   captureMicromamba,
   createExecutableVerifier,
   createMicromambaExecutor,
+  environmentChildCleanup,
   isChildUnconfirmedError,
-  killAndConfirmExit
+  killAndConfirmExit,
+  retainEnvironmentChildCleanup,
+  type EnvironmentChildCleanup
 } from './provisioner-runtime'
 export {
   captureNotebookEnvironmentLock,

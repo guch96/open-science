@@ -3,6 +3,7 @@ import type {
   NotebookMemoryPolicyStateRequest
 } from '../../shared/notebook-memory'
 import { withDataRootWrite } from '../storage/migration-state'
+import type { NotebookOwnedResource } from './owned-resources'
 import type { NotebookDependencyAnalyzer } from '@aipoch/notebook-analysis'
 import { randomUUID } from 'node:crypto'
 import { NotebookIdleReclamation } from './idle-reclamation'
@@ -606,30 +607,29 @@ class NotebookRuntimeService {
         }
       }
     }
-    const admission = createNotebookExecutionAdmission({
-      policy: () => this.getMemoryPolicy(),
-      signal,
-      executionScope,
-      assertHostCurrent,
-      onRejected: (state) =>
-        this.notifyMemoryPolicyRejected(
-          {
-            projectId: resolveProjectId(request, this.options.projectId),
-            sessionId: request.sessionId,
-            workspaceCwd: request.workspaceCwd,
-            source: request.source,
-            inputKind: request.inputKind,
-            terminalTarget
-          },
-          state
-        )
-    })
-    const trusted = withNotebookExecutionAdmission(request, admission)
-    await this.sessionLifecycle.runProjectOperation(request, async () => {
+    return this.sessionLifecycle.runProjectOperation(request, async (deletionSignal) => {
+      const admission = createNotebookExecutionAdmission({
+        policy: () => this.getMemoryPolicy(),
+        signal: signal ? AbortSignal.any([signal, deletionSignal]) : deletionSignal,
+        executionScope,
+        assertHostCurrent,
+        onRejected: (state) =>
+          this.notifyMemoryPolicyRejected(
+            {
+              projectId: resolveProjectId(request, this.options.projectId),
+              sessionId: request.sessionId,
+              workspaceCwd: request.workspaceCwd,
+              source: request.source,
+              inputKind: request.inputKind,
+              terminalTarget
+            },
+            state
+          )
+      })
       await admission.prepare('submit')
       admission.assertCurrent('submit')
+      return withNotebookExecutionAdmission(request, admission)
     })
-    return trusted
   }
   private executionApproval: NotebookExecutionApproval | undefined
   private runtimeBindingApproval: NotebookRuntimeBindingApproval | undefined
@@ -3227,6 +3227,18 @@ class NotebookRuntimeService {
   // Lists sessions with a cell mid-execution, for the pre-migration active-session warning.
   getActiveNotebookSessions(): { projectId: string; sessionId: string }[] {
     return this.sessionLifecycle.activeSessions()
+  }
+
+  // Main-only original-owner handles; never serialized into Notebook or Session packages.
+  ownedResources(scope: { projectId?: string; sessionId?: string } = {}): NotebookOwnedResource[] {
+    return [
+      ...this.sessionLifecycle.resources(scope),
+      ...(this.shellProcess.resources?.() ?? []).filter(
+        (resource) =>
+          (scope.projectId === undefined || resource.projectId === scope.projectId) &&
+          (scope.sessionId === undefined || resource.sessionId === scope.sessionId)
+      )
+    ]
   }
 
   // Purely in-memory Project projection for renderer monitoring. Dormant Sessions have no kernel

@@ -1,5 +1,6 @@
 import { createLogger } from '@aipoch/diagnostics/node'
 import { NotebookExecutionAdmissionError } from './execution-admission'
+import type { NotebookOwnedResource, NotebookResourceCleanupResult } from './owned-resources'
 import type { analyzeNotebookSourceFileAccess } from '@aipoch/notebook-analysis'
 import { observeResourceProcess, recordResourceEvent } from '../resource-diagnostics/recorder'
 import { resourceActivity } from '../resource-diagnostics/activity'
@@ -295,6 +296,8 @@ type PendingRequest = {
 
 // One persistent loop process for a (kind, env), reused across cells until it exits or is killed.
 type ProcState = {
+  startedAt: number
+  cleanupResult?: NotebookResourceCleanupResult
   kind: KernelProcessKind
   // Resolved env name backing this proc (DEFAULT_PY_ENV / DEFAULT_R_ENV or a named env); '' for the
   // env-agnostic repl. Reported to the idle/terminated callbacks so the caller keys per-env status.
@@ -336,6 +339,19 @@ type ProcState = {
   // Canonical host descriptors already installed into the Python loop's immutable audit hooks.
   // New roots cross the protocol once; Python never exposes a mutable policy collection or updater.
   protectedDirs: Set<string>
+}
+
+type KernelStartOperation = {
+  key: ProcessKey
+  kind: KernelProcessKind
+  env: string
+  startedAt: number
+  kernelEpochId?: string
+  controller: AbortController
+  completion: Promise<ProcState>
+  proc?: ProcState
+  cleanup?: () => Promise<NotebookResourceCleanupResult>
+  cleanupResult?: NotebookResourceCleanupResult
 }
 
 // Marks timeouts distinctly so persisted run status can reflect timeout instead of failure.
@@ -547,6 +563,73 @@ const helperInitializationError = (
 // NotebookExecutionResult (mapLoopOutputs). The python/r data loops and the repl control loop coexist
 // as independent processes; the requested kind never triggers a restart of another.
 class NotebookKernelExecutor implements NotebookExecutor {
+  resources(): NotebookOwnedResource[] {
+    const owners = new Set([
+      ...this.procs.values(),
+      ...Array.from(this.pendingTeardowns.values(), ({ owner }) => owner)
+    ])
+    const processes: NotebookOwnedResource[] = Array.from(owners, (proc) => ({
+      identity: proc,
+      group: 'kernel',
+      kind: proc.kind,
+      phase:
+        this.pendingTeardowns.get(proc.key)?.owner === proc
+          ? 'cleanup-pending'
+          : proc.pending
+            ? 'running'
+            : 'idle',
+      startedAt: proc.startedAt,
+      laneKey: this.laneKey,
+      executionDomain: 'host',
+      processKey: proc.key,
+      environment: proc.env,
+      kernelEpochId: proc.kernelEpochId,
+      release: () => this.releaseProc(proc)
+    }))
+    return [
+      ...processes,
+      ...Array.from(this.starting, (operation): NotebookOwnedResource => ({
+        identity: operation,
+        group: 'kernel',
+        kind: operation.kind,
+        phase: operation.cleanupResult?.reaped === false ? 'cleanup-pending' : 'starting',
+        startedAt: operation.startedAt,
+        laneKey: this.laneKey,
+        executionDomain: 'host',
+        processKey: operation.key,
+        environment: operation.env,
+        kernelEpochId: operation.kernelEpochId,
+        release: () => this.releaseStart(operation)
+      }))
+    ]
+  }
+
+  private async releaseStart(
+    operation: KernelStartOperation
+  ): Promise<NotebookResourceCleanupResult> {
+    operation.controller.abort()
+    await operation.completion.catch(() => undefined)
+    const result = operation.proc
+      ? await this.releaseProc(operation.proc)
+      : ((await operation.cleanup?.()) ?? { reaped: true })
+    operation.cleanupResult = result
+    if (result.reaped) this.starting.delete(operation)
+    return result
+  }
+
+  private async releaseProc(proc: ProcState): Promise<NotebookResourceCleanupResult> {
+    if (proc.cleanupResult?.reaped) return proc.cleanupResult
+    this.dropProc(proc)
+    this.rejectPending(proc, new NotebookExecutionCancelledError())
+    proc.readline.close()
+    const pending = this.pendingTeardowns.get(proc.key)
+    if (pending?.owner === proc) {
+      const result = await pending.completion
+      return result.reaped ? result : pending.retry()
+    }
+    return this.killChildTracked(proc)
+  }
+
   idleProcesses(): ReturnType<NonNullable<NotebookExecutor['idleProcesses']>> {
     return Array.from(this.procs.values(), (proc) => ({
       identity: proc,
@@ -561,6 +644,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
   }
 
   private readonly procs = new Map<ProcessKey, ProcState>()
+  private readonly starting = new Set<KernelStartOperation>()
   // In-flight process-tree teardowns, keyed by the process key of the proc being reaped. A dropped
   // proc's tree is killed asynchronously; ensureProc awaits any pending teardown for a key before
   // spawning its replacement, so two live process trees for the SAME (kind, env) never briefly coexist.
@@ -834,6 +918,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
   // true only when every kernel tree was cleanly reaped, so shutdownAll can gate the update-install
   // uninstall on all interpreter file handles being released.
   async shutdown(): Promise<ProcessTreeKillResult> {
+    const starts = Array.from(this.starting, (operation) => this.releaseStart(operation))
     const procs = Array.from(this.procs.values())
     this.procs.clear()
 
@@ -849,9 +934,10 @@ class NotebookKernelExecutor implements NotebookExecutor {
     const pending = Array.from(this.pendingTeardowns.keys(), (key) =>
       this.reconcilePendingTeardown(key)
     )
-    const [results, pendingResults] = await Promise.all([
+    const [results, pendingResults, startResults] = await Promise.all([
       Promise.all(procs.map((proc) => this.killChildTracked(proc))),
-      Promise.all(pending)
+      Promise.all(pending),
+      Promise.allSettled(starts)
     ])
 
     if (this.figuresDir) {
@@ -862,7 +948,8 @@ class NotebookKernelExecutor implements NotebookExecutor {
     return {
       reaped:
         results.every((result) => result.reaped) &&
-        pendingResults.every((result) => result?.reaped === true)
+        pendingResults.every((result) => result?.reaped === true) &&
+        startResults.every((result) => result.status === 'fulfilled' && result.value.reaped)
     }
   }
 
@@ -926,12 +1013,67 @@ class NotebookKernelExecutor implements NotebookExecutor {
 
   // Reuses a live loop for the (kind, env) or spawns a fresh one, wiring its readline, stderr drain,
   // and exit handling.
-  private async ensureProc(
+  private ensureProc(
     key: ProcessKey,
     kind: KernelProcessKind,
     env: string,
     request: NotebookExecutionRequest
   ): Promise<ProcState> {
+    const existing = this.procs.get(key)
+    if (
+      existing?.alive &&
+      existing.interpreterIdentity === notebookInterpreterIdentity(request.resolvedInterpreter)
+    ) {
+      return this.prepareProc(key, kind, env, request)
+    }
+    const controller = new AbortController()
+    const abort = (): void => controller.abort()
+    request.signal?.addEventListener('abort', abort, { once: true })
+    if (request.signal?.aborted) abort()
+    const operation: KernelStartOperation = {
+      key,
+      kind,
+      env,
+      controller,
+      startedAt: Date.now(),
+      kernelEpochId: request.kernelEpochId,
+      completion: Promise.resolve(undefined as never)
+    }
+    this.starting.add(operation)
+    operation.completion = this.prepareProc(
+      key,
+      kind,
+      env,
+      { ...request, signal: controller.signal },
+      operation
+    )
+      .then(async (proc) => {
+        operation.proc = proc
+        if (controller.signal.aborted) {
+          await this.releaseProc(proc)
+          throw new NotebookExecutionCancelledError()
+        }
+        return proc
+      })
+      .finally(() => {
+        request.signal?.removeEventListener('abort', abort)
+        if (operation.cleanupResult?.reaped !== false) this.starting.delete(operation)
+      })
+    return operation.completion
+  }
+
+  private async prepareProc(
+    key: ProcessKey,
+    kind: KernelProcessKind,
+    env: string,
+    request: NotebookExecutionRequest,
+    operation?: KernelStartOperation
+  ): Promise<ProcState> {
+    const failedStart = Array.from(this.starting).find(
+      (start) => start !== operation && start.key === key && start.cleanupResult?.reaped === false
+    )
+    if (failedStart && !(await this.releaseStart(failedStart)).reaped)
+      throw new NotebookExecutionStopError()
     const identity = notebookInterpreterIdentity(request.resolvedInterpreter)
     const existing = this.procs.get(key)
     if (request.executionAdmission) {
@@ -968,7 +1110,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
       )
     }
 
-    const spawned = await this.spawnLoop(kind, env, request)
+    const spawned = await this.spawnLoop(kind, env, request, operation)
     const child = spawned.child
     const boundedOutput = createBoundedKernelOutput((error) => {
       if (this.procs.get(key) !== proc) return
@@ -980,6 +1122,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
     })
     const readline = createInterface({ input: boundedOutput })
     const proc: ProcState = {
+      startedAt: spawned.startedAt,
       kind,
       env,
       key,
@@ -1117,8 +1260,10 @@ class NotebookKernelExecutor implements NotebookExecutor {
   private async spawnLoop(
     kind: KernelProcessKind,
     env: string,
-    request: NotebookExecutionRequest
+    request: NotebookExecutionRequest,
+    operation?: KernelStartOperation
   ): Promise<{
+    startedAt: number
     child: ChildProcessWithoutNullStreams
     cwd: string
     beginSandboxExecution: NonNullable<
@@ -1504,6 +1649,27 @@ class NotebookKernelExecutor implements NotebookExecutor {
     }
     let child: ChildProcessWithoutNullStreams
     let spawnAdmission: Readonly<{ started: () => void; notStarted: () => void }> | undefined
+    const cleanupUnstarted = async (): Promise<NotebookResourceCleanupResult> => {
+      let result: NotebookResourceCleanupResult
+      try {
+        const cleanup = await cleanupSandbox(
+          'spawn-failed',
+          withNotebookSandboxProcessState({ processesTerminated: true }, 'never-started')
+        )
+        result = {
+          ...cleanup,
+          reaped:
+            cleanup.processesTerminated &&
+            cleanup.networkClosed &&
+            cleanup.temporaryResourcesRemoved
+        }
+      } catch (error) {
+        result = { reaped: false, error }
+      }
+      if (operation) operation.cleanupResult = result
+      return result
+    }
+    if (operation) operation.cleanup = cleanupUnstarted
     try {
       if (request.executionAdmission) await request.executionAdmission.prepare('create')
       if (request.signal?.aborted) throw new NotebookExecutionCancelledError()
@@ -1546,13 +1712,11 @@ class NotebookKernelExecutor implements NotebookExecutor {
     } catch (error) {
       spawnAdmission?.notStarted()
       if (ownershipIntent) this.processLifecycle?.abandonSpawn(ownershipIntent)
-      await cleanupSandbox(
-        'spawn-failed',
-        withNotebookSandboxProcessState({ processesTerminated: true }, 'never-started')
-      )
+      await cleanupUnstarted()
       throw error
     }
     child.once('spawn', () => spawnAdmission?.started())
+    const startedAt = Date.now()
     try {
       // laneKey is the existing owner's serialized identity, not a path or an inferred session.
       const lane = JSON.parse(this.laneKey ?? '[]') as unknown[]
@@ -1577,23 +1741,36 @@ class NotebookKernelExecutor implements NotebookExecutor {
     child.once('error', () => spawnAdmission?.notStarted())
     if (this.platform !== 'win32' && this.canTrackPosixProcesses)
       this.registerOwnedProcessGroup(child, processTreeOwnership.token)
-    const cleanupFailedSpawn = async (): Promise<void> => {
-      const result = await teardownProcess()
-      if (!ownershipReceipt && ownershipIntent && result.reaped) {
-        this.processLifecycle?.abandonSpawn(ownershipIntent)
-      }
-      await cleanupSandbox(
-        'spawn-failed',
-        withNotebookSandboxProcessState(
-          { processesTerminated: result.reaped },
-          child.pid === undefined
-            ? 'never-started'
-            : result.reaped
-              ? 'started-and-reaped'
-              : 'termination-unknown'
+    const cleanupFailedSpawn = async (): Promise<NotebookResourceCleanupResult> => {
+      const outcome = await (async () => {
+        const result = await teardownProcess()
+        if (!ownershipReceipt && ownershipIntent && result.reaped) {
+          this.processLifecycle?.abandonSpawn(ownershipIntent)
+        }
+        const cleanup = await cleanupSandbox(
+          'spawn-failed',
+          withNotebookSandboxProcessState(
+            { processesTerminated: result.reaped },
+            child.pid === undefined
+              ? 'never-started'
+              : result.reaped
+                ? 'started-and-reaped'
+                : 'termination-unknown'
+          )
         )
-      )
+        return {
+          ...result,
+          ...cleanup,
+          reaped:
+            cleanup.processesTerminated &&
+            cleanup.networkClosed &&
+            cleanup.temporaryResourcesRemoved
+        }
+      })().catch((error: unknown) => ({ reaped: false, error }))
+      if (operation) operation.cleanupResult = outcome
+      return outcome
     }
+    if (operation) operation.cleanup = cleanupFailedSpawn
     const recordOwnership = (): void => {
       if (!ownershipIntent || child.pid === undefined || ownershipReceipt) return
       ownershipReceipt = this.processLifecycle?.recordSpawned(ownershipIntent, {
@@ -1639,6 +1816,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
       tokenPipe.end(request.mcpRpcToken)
     }
     return {
+      startedAt,
       child,
       cwd: spawnCwd ?? process.cwd(),
       beginSandboxExecution: sandboxed?.beginExecution ?? (() => () => undefined),
@@ -2145,7 +2323,8 @@ class NotebookKernelExecutor implements NotebookExecutor {
   private killChildTracked(
     proc: ProcState,
     reason: NotebookSandboxCleanupReason = 'cancel'
-  ): Promise<ProcessTreeKillResult> {
+  ): Promise<NotebookResourceCleanupResult> {
+    if (proc.cleanupResult?.reaped) return Promise.resolve(proc.cleanupResult)
     const done = this.teardownProc(proc, reason)
     this.pendingTeardowns.set(proc.key, {
       completion: done,
@@ -2159,7 +2338,7 @@ class NotebookKernelExecutor implements NotebookExecutor {
   private teardownProc(
     proc: ProcState,
     reason: NotebookSandboxCleanupReason
-  ): Promise<ProcessTreeKillResult> {
+  ): Promise<NotebookResourceCleanupResult> {
     return (
       proc
         .teardownProcess()
@@ -2173,6 +2352,10 @@ class NotebookKernelExecutor implements NotebookExecutor {
             )
           )
           return {
+            ...result,
+            processesTerminated: cleanup.processesTerminated,
+            networkClosed: cleanup.networkClosed,
+            temporaryResourcesRemoved: cleanup.temporaryResourcesRemoved,
             reaped:
               cleanup.processesTerminated &&
               cleanup.networkClosed &&
@@ -2180,11 +2363,12 @@ class NotebookKernelExecutor implements NotebookExecutor {
           }
         })
         // A rejected cleanup is still an unconfirmed teardown, not a permanently rejected barrier.
-        .catch(() => ({ reaped: false }))
+        .catch((error: unknown) => ({ reaped: false, error }))
         .then((result) => {
           // Keep an unsuccessful teardown as a barrier: neither a replacement kernel nor shutdown
           // may claim that the old process tree is gone merely because the kill attempt settled.
           if (result.reaped) {
+            proc.cleanupResult = result
             markNotebookKernelExitCleanedUp(proc.terminationError)
             if (this.pendingTeardowns.get(proc.key)?.owner === proc) {
               this.pendingTeardowns.delete(proc.key)

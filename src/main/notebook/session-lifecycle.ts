@@ -38,8 +38,10 @@ import type { KernelProcessLifecycleOwner } from './kernel-process-lifecycle.win
 import type { NotebookExecutionOwner } from './execution-owner'
 import { assertResearchSessionWritable } from '../storage/session-package-state'
 import type { IdleInterpreter } from './idle-reclamation'
+import type { NotebookOwnedResource } from './owned-resources'
 
 type RuntimeSession = NotebookSessionAggregate
+type PendingOperation<Result> = Promise<Result> & { resource: NotebookOwnedResource }
 const log = createLogger('notebook:file-evidence-lifecycle')
 
 type NotebookExecutorLifecycleCallbacks = {
@@ -121,6 +123,28 @@ const kernelInstanceForProcessKey = (processKey: string): NotebookKernelInstance
 // Orchestrates one Registry generation without duplicating Registry or Aggregate state.
 class NotebookSessionLifecycleOwner {
   private readonly idleTeardowns = new Map<string, Promise<boolean>>()
+
+  resources(scope: { projectId?: string; sessionId?: string } = {}): NotebookOwnedResource[] {
+    const matches = (resource: { projectId?: string; sessionId?: string }): boolean =>
+      (scope.projectId === undefined || resource.projectId === scope.projectId) &&
+      (scope.sessionId === undefined || resource.sessionId === scope.sessionId)
+    const pending = new Set<PendingOperation<unknown>>([
+      ...Array.from(this.pendingEnsuresByProject.values()).flatMap((entries) => [...entries]),
+      ...Array.from(this.pendingOperationsByProject.values()).flatMap((entries) => [...entries])
+    ])
+    return [
+      ...Array.from(this.options.sessions.values())
+        .filter(matches)
+        .flatMap((session) =>
+          session.resources(async (resource) => {
+            if (resource.processKey)
+              await this.persistKernelStatus(session, 'terminated', resource.processKey)
+            this.notifyChanged(session)
+          })
+        ),
+      ...Array.from(pending, ({ resource }) => resource).filter(matches)
+    ]
+  }
 
   hasPendingWork(sessionId: string): boolean {
     return (
@@ -219,10 +243,16 @@ class NotebookSessionLifecycleOwner {
   private readonly announcedAgentLaneKeys = new Set<string>()
   private readonly deletingProjectIds = new Set<string>()
   private readonly deletingSessionIds = new Set<string>()
-  private readonly pendingEnsuresByProject = new Map<string, Set<Promise<RuntimeSession>>>()
-  private readonly pendingEnsuresBySession = new Map<string, Set<Promise<RuntimeSession>>>()
-  private readonly pendingOperationsByProject = new Map<string, Set<Promise<unknown>>>()
-  private readonly pendingOperationsBySession = new Map<string, Set<Promise<unknown>>>()
+  private readonly pendingEnsuresByProject = new Map<
+    string,
+    Set<PendingOperation<RuntimeSession>>
+  >()
+  private readonly pendingEnsuresBySession = new Map<
+    string,
+    Set<PendingOperation<RuntimeSession>>
+  >()
+  private readonly pendingOperationsByProject = new Map<string, Set<PendingOperation<unknown>>>()
+  private readonly pendingOperationsBySession = new Map<string, Set<PendingOperation<unknown>>>()
   private readonly operationAbortControllersByProject = new Map<string, Set<AbortController>>()
   private readonly operationAbortControllersBySession = new Map<string, Set<AbortController>>()
   private terminal = false
@@ -259,9 +289,15 @@ class NotebookSessionLifecycleOwner {
     } catch (error) {
       return Promise.reject(error)
     }
+    const controller = new AbortController()
+    const assertCreationAvailable = (): void => {
+      this.assertDeletionAvailable(projectId, request.sessionId)
+      if (controller.signal.aborted)
+        throw new Error('Notebook session initialization was cancelled.')
+    }
     const ensuring = this.options.sessions.getOrCreate(lane, async () => {
       await this.options.ensureProcessRecovery(notebookLaneKey(lane))
-      this.assertDeletionAvailable(projectId, request.sessionId)
+      assertCreationAvailable()
       await assertResearchSessionWritable(this.options.storageRoot, projectId, request.sessionId)
       let document = await this.options.repository.loadOrCreate({
         projectId: projectId,
@@ -298,6 +334,7 @@ class NotebookSessionLifecycleOwner {
         })
       })
 
+      assertCreationAvailable()
       const ownedExecutor = this.createExecutor(lane)
       const session = new NotebookSessionAggregate({
         sessionId: request.sessionId,
@@ -329,7 +366,7 @@ class NotebookSessionLifecycleOwner {
 
       try {
         await this.options.runtimeBindings.reload(session, document.runtimeBindings)
-        this.assertDeletionAvailable(projectId, request.sessionId)
+        assertCreationAvailable()
         return session
       } catch (error) {
         await session.shutdownExecutor().catch(() => undefined)
@@ -340,13 +377,29 @@ class NotebookSessionLifecycleOwner {
         }
         throw error
       }
-    })
+    }) as PendingOperation<RuntimeSession>
+    ensuring.resource ??= {
+      identity: ensuring,
+      group: 'operation',
+      kind: 'ensure',
+      phase: 'starting',
+      startedAt: Date.now(),
+      projectId,
+      sessionId: request.sessionId,
+      laneKey: notebookLaneKey(lane),
+      release: async () => {
+        controller.abort()
+        await ensuring.catch(() => undefined)
+        return { reaped: true }
+      }
+    }
     const pending =
-      this.pendingEnsuresByProject.get(projectId) ?? new Set<Promise<RuntimeSession>>()
+      this.pendingEnsuresByProject.get(projectId) ?? new Set<PendingOperation<RuntimeSession>>()
     pending.add(ensuring)
     this.pendingEnsuresByProject.set(projectId, pending)
     const sessionPending =
-      this.pendingEnsuresBySession.get(request.sessionId) ?? new Set<Promise<RuntimeSession>>()
+      this.pendingEnsuresBySession.get(request.sessionId) ??
+      new Set<PendingOperation<RuntimeSession>>()
     sessionPending.add(ensuring)
     this.pendingEnsuresBySession.set(request.sessionId, sessionPending)
     void ensuring
@@ -402,12 +455,28 @@ class NotebookSessionLifecycleOwner {
     const running = new Promise<Result>((resolve, reject) => {
       resolveRunning = resolve
       rejectRunning = reject
-    })
-    const pending = this.pendingOperationsByProject.get(projectId) ?? new Set<Promise<unknown>>()
+    }) as PendingOperation<Result>
+    running.resource = {
+      identity: running,
+      group: 'operation',
+      kind: 'session-work',
+      phase: 'running',
+      startedAt: Date.now(),
+      projectId,
+      sessionId: request.sessionId,
+      laneKey: notebookLaneKey(this.laneForRequest(request)),
+      release: async () => {
+        controller.abort(new Error('Notebook operation was released.'))
+        await running.catch(() => undefined)
+        return { reaped: true }
+      }
+    }
+    const pending =
+      this.pendingOperationsByProject.get(projectId) ?? new Set<PendingOperation<unknown>>()
     pending.add(running)
     this.pendingOperationsByProject.set(projectId, pending)
     const sessionPending =
-      this.pendingOperationsBySession.get(request.sessionId) ?? new Set<Promise<unknown>>()
+      this.pendingOperationsBySession.get(request.sessionId) ?? new Set<PendingOperation<unknown>>()
     sessionPending.add(running)
     this.pendingOperationsBySession.set(request.sessionId, sessionPending)
     // Register before invoking the operation so a synchronous teardown can observe the lease, while

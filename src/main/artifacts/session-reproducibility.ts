@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { ReproductionPreflightError } from '@aipoch/reproducibility'
 import { NotebookExecutionAdmissionError } from '../notebook/execution-admission'
+import {
+  releaseNotebookResources,
+  type NotebookOwnedResource,
+  type NotebookResourceCleanupResult
+} from '../notebook/owned-resources'
 import type { SessionReproducibilityStore } from './session-reproducibility-store'
 import { createLogger, errorLogFields } from '@aipoch/diagnostics/node'
 const log = createLogger('artifacts:session-reproducibility')
@@ -21,6 +26,8 @@ type Entry = {
   requests: ArtifactReproducibilityCheckRequest[]
   controller: AbortController
   settled: Promise<void>
+  releasing?: Promise<NotebookResourceCleanupResult>
+  cleanupError?: unknown
 }
 type Dependencies = {
   store?: Pick<SessionReproducibilityStore, 'load' | 'save'>
@@ -79,7 +86,10 @@ export class SessionReproducibilityBatches {
       if (saved) {
         if (this.entries.size >= 64) {
           const idle = [...this.entries].find(
-            ([, entry]) => !['preparing', 'running'].includes(entry.state.status)
+            ([, entry]) =>
+              !entry.releasing &&
+              !entry.cleanupError &&
+              !['preparing', 'running'].includes(entry.state.status)
           )
           if (!idle) return undefined
           this.entries.delete(idle[0])
@@ -100,6 +110,8 @@ export class SessionReproducibilityBatches {
       }
     }
     if (request.action === 'get') return current ? structuredClone(current.state) : undefined
+    if (current?.releasing || current?.cleanupError)
+      throw new Error('Session batch cleanup is incomplete. Retry cleanup.')
     if (request.action === 'prepare') {
       const others = [...this.entries].filter(
         ([entryKey, entry]) =>
@@ -107,7 +119,14 @@ export class SessionReproducibilityBatches {
           entry.state.projectId === request.projectId &&
           entry.state.appSessionId === request.appSessionId
       )
-      if (others.some(([, entry]) => ['preparing', 'running'].includes(entry.state.status)))
+      if (
+        others.some(
+          ([, entry]) =>
+            entry.releasing ||
+            entry.cleanupError ||
+            ['preparing', 'running'].includes(entry.state.status)
+        )
+      )
         throw new Error('A Session check is already active.')
       for (const [entryKey] of others) this.entries.delete(entryKey)
       if (current && ['preparing', 'running'].includes(current.state.status))
@@ -117,7 +136,10 @@ export class SessionReproducibilityBatches {
         throw new Error('Duplicate Artifact Versions.')
       if (!current && this.entries.size >= 64) {
         const idle = [...this.entries].find(
-          ([, entry]) => !['preparing', 'running'].includes(entry.state.status)
+          ([, entry]) =>
+            !entry.releasing &&
+            !entry.cleanupError &&
+            !['preparing', 'running'].includes(entry.state.status)
         )
         if (!idle) throw new Error('Too many active Session checks.')
         this.entries.delete(idle[0])
@@ -239,17 +261,84 @@ export class SessionReproducibilityBatches {
   }
   async stopWhere(matches: (scope: Scope, ownerId: number) => boolean): Promise<void> {
     this.loadGeneration++
-    const entries = [...this.entries.values()].filter((e) => matches(e.state, e.ownerId))
-    for (const entry of entries) this.stop(entry)
-    await Promise.all(entries.map((entry) => entry.settled))
-    await Promise.all(
-      entries.map((entry) => this.dependencies.store?.save(structuredClone(entry.state)))
-    )
-    for (const [key, entry] of this.entries) if (entries.includes(entry)) this.entries.delete(key)
+    const resources = [...this.entries]
+      .filter(([, entry]) => matches(entry.state, entry.ownerId))
+      .map(([key, entry]) => this.resource(key, entry))
+    const outcomes = await releaseNotebookResources(resources)
+    const errors = outcomes
+      .filter(({ result }) => !result.reaped || result.projection === 'failed')
+      .map(({ result }) => result.error)
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1)
+      throw new AggregateError(errors, 'Session batch cleanup did not complete.')
+  }
+
+  resources(scope: { projectId?: string; sessionId?: string } = {}): NotebookOwnedResource[] {
+    return [...this.entries]
+      .filter(
+        ([, entry]) =>
+          (scope.projectId === undefined || entry.state.projectId === scope.projectId) &&
+          (scope.sessionId === undefined || entry.state.appSessionId === scope.sessionId) &&
+          (['preparing', 'ready', 'running'].includes(entry.state.status) ||
+            entry.releasing ||
+            entry.cleanupError)
+      )
+      .map(([key, entry]) => this.resource(key, entry))
+  }
+
+  private resource(key: string, entry: Entry): NotebookOwnedResource {
+    return {
+      identity: entry,
+      group: 'batch',
+      kind: 'session-reproducibility',
+      phase:
+        entry.cleanupError || entry.releasing
+          ? 'cleanup-pending'
+          : entry.state.status === 'ready'
+            ? 'ready'
+            : entry.state.status === 'preparing'
+              ? 'starting'
+              : 'running',
+      startedAt: Date.parse(entry.state.createdAt),
+      projectId: entry.state.projectId,
+      sessionId: entry.state.appSessionId,
+      release: () => this.releaseEntry(key, entry)
+    }
+  }
+
+  private releaseEntry(key: string, entry: Entry): Promise<NotebookResourceCleanupResult> {
+    if (entry.releasing) return entry.releasing
+    this.loadGeneration++
+    let drained = false
+    const releasing = (async (): Promise<NotebookResourceCleanupResult> => {
+      this.stop(entry)
+      await entry.settled
+      drained = true
+      if (this.entries.get(key) === entry) {
+        await this.dependencies.store?.save(structuredClone(entry.state))
+        this.entries.delete(key)
+      }
+      entry.cleanupError = undefined
+      return { reaped: true, projection: 'complete' }
+    })().catch((error: unknown) => {
+      entry.cleanupError = error
+      return { reaped: drained, projection: 'failed' as const, error }
+    })
+    entry.releasing = releasing
+    void releasing.then((result) => {
+      if (result.projection === 'failed' && entry.releasing === releasing)
+        entry.releasing = undefined
+    })
+    return releasing
   }
   activeSessions(): Array<{ projectId: string; sessionId: string }> {
     return [...this.entries.values()]
-      .filter((entry) => ['preparing', 'running'].includes(entry.state.status))
+      .filter(
+        (entry) =>
+          ['preparing', 'ready', 'running'].includes(entry.state.status) ||
+          entry.cleanupError ||
+          entry.releasing
+      )
       .map((entry) => ({ projectId: entry.state.projectId, sessionId: entry.state.appSessionId }))
   }
 }

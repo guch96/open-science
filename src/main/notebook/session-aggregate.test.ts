@@ -6,6 +6,89 @@ import { createRootNotebookLane } from './lane-identity'
 import { NotebookSessionAggregate, type NotebookKernelEpochOwnership } from './session-aggregate'
 
 describe('NotebookSessionAggregate', () => {
+  it('retains epoch ownership and its release handle until termination projection succeeds', async () => {
+    let projectionAvailable = false
+    let live = true
+    const resource = {
+      identity: {},
+      group: 'kernel' as const,
+      kind: 'repl',
+      phase: 'idle' as const,
+      startedAt: 123,
+      processKey: 'repl',
+      kernelEpochId: '',
+      release: async () => {
+        live = false
+        return { reaped: true }
+      }
+    }
+    const session = new NotebookSessionAggregate({
+      sessionId: 'session-1',
+      projectId: 'project',
+      lane: createRootNotebookLane('project', 'session-1', 'root-frame-session-1'),
+      cwd: '/workspace',
+      notebookSessionRoot: '/workspace',
+      dataRoot: '/workspace/data',
+      runtimeRoot: '/runtime',
+      runJsonPath: '/workspace/run.json',
+      executionCount: 0,
+      executorGeneration: Symbol('original'),
+      executor: {
+        execute: async () => {
+          throw new Error('unused')
+        },
+        shutdown: async () => ({ reaped: false }),
+        resources: () => (live ? [resource] : [])
+      }
+    })
+    resource.kernelEpochId = session.kernelEpochId('repl')
+    const project = async (): Promise<void> => {
+      if (!projectionAvailable) throw new Error('disk unavailable')
+    }
+    const [original] = session.resources(project)
+    await expect(original.release()).resolves.toMatchObject({ reaped: true, projection: 'failed' })
+    expect(session.currentKernelEpochId('repl')).toBe(resource.kernelEpochId)
+    expect(session.resources(project)).toEqual([
+      expect.objectContaining({ identity: resource.identity, phase: 'cleanup-pending' })
+    ])
+    expect(() => session.kernelEpochId('repl')).toThrow('cleanup projection')
+    projectionAvailable = true
+    await expect(original.release()).resolves.toMatchObject({
+      reaped: true,
+      projection: 'complete'
+    })
+    expect(session.resources(project)).toEqual([])
+    expect(session.currentKernelEpochId('repl')).toBeUndefined()
+  })
+
+  it('keeps unreaped shutdown ownership fenced until the original executor can be retried', async () => {
+    let reaped = false
+    const session = new NotebookSessionAggregate({
+      sessionId: 'session-1',
+      projectId: 'project',
+      lane: createRootNotebookLane('project', 'session-1', 'root-frame-session-1'),
+      cwd: '/workspace',
+      notebookSessionRoot: '/workspace',
+      dataRoot: '/workspace/data',
+      runtimeRoot: '/runtime',
+      runJsonPath: '/workspace/run.json',
+      executionCount: 0,
+      executorGeneration: Symbol('original'),
+      executor: {
+        execute: async () => {
+          throw new Error('unused')
+        },
+        shutdown: async () => ({ reaped })
+      }
+    })
+    const epoch = session.kernelEpochId('repl')
+    await expect(session.shutdownExecutor()).resolves.toEqual({ reaped: false })
+    expect(session.currentKernelEpochId('repl')).toBe(epoch)
+    reaped = true
+    await expect(session.shutdownExecutor()).resolves.toEqual({ reaped: true })
+    expect(session.currentKernelEpochId('repl')).toBeUndefined()
+  })
+
   it('keeps a stable kernel epoch until that process is terminated', async () => {
     const terminate = vi.fn(async () => undefined)
     const onKernelEpochsRetired = vi
