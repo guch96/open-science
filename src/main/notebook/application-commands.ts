@@ -3,13 +3,15 @@ import {
   defineApplicationCommand,
   defineApplicationCommandGroup,
   type ApplicationCommandInstallation,
-  type ApplicationCommandRegistrar
+  type ApplicationCommandRegistrar,
+  type ApplicationInvocation
 } from '../application-command-router'
-import type { CallerContext } from '../caller-context'
+import { canSatisfyHumanApproval, type CallerContext } from '../caller-context'
 import type { NotebookCommandWorkflows } from './notebook-workflows'
 
 type NotebookApplicationCommandDependencies = Readonly<{
   workflows: NotebookCommandWorkflows
+  resourceReleaseBlockedReason?: () => string | undefined
   readInputPreview: (request: ReadArtifactPreviewRequest) => Promise<ArtifactPreviewResult>
 }>
 
@@ -43,6 +45,37 @@ const notebookProjectActivityCommand = defineApplicationCommand<
   WorkflowArgs<'projectActivity'>,
   WorkflowResult<'projectActivity'>
 >('notebook:project-activity')
+const notebookProjectResourcesCommand = defineApplicationCommand<
+  'notebook:project-resources',
+  WorkflowArgs<'projectResources'>,
+  WorkflowResult<'projectResources'>
+>('notebook:project-resources')
+const notebookReleaseSessionResourcesCommand = defineApplicationCommand<
+  'notebook:release-session-resources',
+  readonly [request: WorkflowArgs<'releaseSessionResources'>[0]],
+  WorkflowResult<'releaseSessionResources'>
+>('notebook:release-session-resources')
+const notebookResourceReleaseCommand = defineApplicationCommand<
+  'notebook:resource-release',
+  WorkflowArgs<'resourceRelease'>,
+  WorkflowResult<'resourceRelease'>
+>('notebook:resource-release')
+const notebookRetryResourceReleaseCommand = defineApplicationCommand<
+  'notebook:retry-resource-release',
+  readonly [request: WorkflowArgs<'retryResourceRelease'>[0]],
+  WorkflowResult<'retryResourceRelease'>
+>('notebook:retry-resource-release')
+
+const currentHuman =
+  (invocation: ApplicationInvocation<readonly unknown[]>): (() => void) =>
+  () => {
+    if (
+      !canSatisfyHumanApproval(invocation.callerContext) ||
+      invocation.callerLease.signal.aborted ||
+      !invocation.callerLease.isCurrent()
+    )
+      throw new Error('Only a current human caller can manage Notebook resources.')
+  }
 const notebookMemoryPolicyStateCommand = defineApplicationCommand<
   'notebook:memory-policy-state',
   WorkflowArgs<'memoryPolicyState'>,
@@ -128,6 +161,10 @@ const notebookApplicationCommands = defineApplicationCommandGroup('notebook', [
   notebookRunIndexCommand,
   notebookStateCommand,
   notebookProjectActivityCommand,
+  notebookProjectResourcesCommand,
+  notebookReleaseSessionResourcesCommand,
+  notebookResourceReleaseCommand,
+  notebookRetryResourceReleaseCommand,
   notebookMemoryPolicyStateCommand,
   notebookInspectNamespaceCommand,
   notebookReferenceCommand,
@@ -152,7 +189,31 @@ const installNotebookApplicationCommands = (
 ): ApplicationCommandInstallation => {
   const scope = registrar.createScope()
   try {
+    dependencies.workflows.configureResourceReleaseGuard(
+      dependencies.resourceReleaseBlockedReason ?? (() => undefined)
+    )
     scope.registerGroup(notebookApplicationCommands, {
+      'notebook:project-resources': async (invocation) => {
+        const assertCurrent = currentHuman(invocation)
+        assertCurrent()
+        const result = await dependencies.workflows.projectResources(invocation.args[0])
+        assertCurrent()
+        return result
+      },
+      'notebook:release-session-resources': (invocation) =>
+        dependencies.workflows.releaseSessionResources(
+          invocation.args[0],
+          currentHuman(invocation)
+        ),
+      'notebook:resource-release': async (invocation) => {
+        const assertCurrent = currentHuman(invocation)
+        assertCurrent()
+        const result = await dependencies.workflows.resourceRelease(invocation.args[0])
+        assertCurrent()
+        return result
+      },
+      'notebook:retry-resource-release': (invocation) =>
+        dependencies.workflows.retryResourceRelease(invocation.args[0], currentHuman(invocation)),
       'notebook:run-index': (invocation) => dependencies.workflows.runIndex(invocation.args[0]),
       'notebook:state': (invocation) => dependencies.workflows.state(invocation.args[0]),
       'notebook:memory-policy-state': (invocation) =>
@@ -210,6 +271,10 @@ export {
   notebookGetBackgroundRunCommand,
   notebookInspectNamespaceCommand,
   notebookProjectActivityCommand,
+  notebookProjectResourcesCommand,
+  notebookReleaseSessionResourcesCommand,
+  notebookResourceReleaseCommand,
+  notebookRetryResourceReleaseCommand,
   notebookMemoryPolicyStateCommand,
   notebookReadInputPreviewCommand,
   notebookReferenceCommand,

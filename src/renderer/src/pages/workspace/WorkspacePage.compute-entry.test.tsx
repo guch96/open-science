@@ -136,6 +136,9 @@ describe('WorkspacePage Compute entry with Web capabilities', () => {
     installWebRendererContracts(window.api, {
       availableRpcChannels: new Set([
         WEB_INVOKE_CHANNELS['notebook.getProjectActivity'],
+        WEB_INVOKE_CHANNELS['notebook.getProjectResources'],
+        WEB_INVOKE_CHANNELS['notebook.releaseSessionResources'],
+        WEB_INVOKE_CHANNELS['notebook.retryResourceRelease'],
         WEB_INVOKE_CHANNELS['compute.jobsList']
       ]),
       restrictedRpcChannels: new Set(),
@@ -250,6 +253,9 @@ describe('WorkspacePage Compute entry with Web capabilities', () => {
 
   it.each([
     ['notebook', 'getProjectActivity'],
+    ['notebook', 'getProjectResources'],
+    ['notebook', 'releaseSessionResources'],
+    ['notebook', 'retryResourceRelease'],
     ['notebook', 'onChanged'],
     ['compute', 'jobsList'],
     ['compute', 'onJobUpdated']

@@ -1,4 +1,5 @@
 import { compilePowerShellCommand } from './powershell-native-capture'
+import { createNotebookMemorySampler, type NotebookOwnedMemorySample } from './resource-memory'
 import { NotebookExecutionAdmissionError } from './execution-admission'
 import { NOTEBOOK_NETWORK_APPROVAL_RETRY_MESSAGE } from './process-sandbox'
 import { ExecutionDeadline } from './execution-deadline'
@@ -70,6 +71,7 @@ export class ShellCellSession {
   }
   private tail: Promise<unknown> = Promise.resolve()
   private child?: ChildProcessWithoutNullStreams
+  sampleMemory?: (signal: AbortSignal) => Promise<NotebookOwnedMemorySample>
   private controlServer?: Server
   private controlSocket?: Socket
   private completion?: Promise<NotebookShellResult>
@@ -328,6 +330,8 @@ export class ShellCellSession {
           (child) => {
             this.launchedProcess = true
             this.child = child
+            if (this.identity.runtimeBinding?.kind !== 'wsl2-bash')
+              this.sampleMemory = createNotebookMemorySampler(child)
             child.stdout.on('data', (chunk: string) => this.accept('stdout', chunk))
             child.stderr.on('data', (chunk: string) => this.accept('stderr', chunk))
             child.stdin.on('error', () => this.lifetime.abort())

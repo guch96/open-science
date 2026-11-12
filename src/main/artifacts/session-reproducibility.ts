@@ -31,6 +31,7 @@ type Entry = {
   cleanupError?: unknown
 }
 type Dependencies = {
+  onResourcesChanged?: () => void
   store?: Pick<SessionReproducibilityStore, 'load' | 'save'>
   preflight: (
     request: ArtifactReproducibilityCheckRequest,
@@ -55,6 +56,15 @@ export class SessionReproducibilityBatches {
   }
 
   async command(
+    raw: SessionReproducibilityCommand,
+    ownerId: number
+  ): Promise<SessionReproducibilityBatch | undefined> {
+    const operation = this.commandWithOwner(raw, ownerId)
+    this.dependencies.onResourcesChanged?.()
+    return operation.finally(() => this.dependencies.onResourcesChanged?.())
+  }
+
+  private async commandWithOwner(
     raw: SessionReproducibilityCommand,
     ownerId: number
   ): Promise<SessionReproducibilityBatch | undefined> {
@@ -189,10 +199,12 @@ export class SessionReproducibilityBatches {
       current.settled = (async () => {
         await this.dependencies.store?.save(structuredClone(entry.state))
         if (!entry.controller.signal.aborted) await this.run(entry)
-      })().catch((error) => {
-        this.stop(current!)
-        log.error('batch checkpoint failed', errorLogFields(error))
-      })
+      })()
+        .catch((error) => {
+          this.stop(current!)
+          log.error('batch checkpoint failed', errorLogFields(error))
+        })
+        .finally(() => this.dependencies.onResourcesChanged?.())
     }
     return structuredClone(current.state)
   }
@@ -336,6 +348,7 @@ export class SessionReproducibilityBatches {
       if (result.projection === 'failed' && entry.releasing === releasing)
         entry.releasing = undefined
     })
+    void releasing.finally(() => this.dependencies.onResourcesChanged?.())
     return releasing
   }
   activeSessions(): Array<{ projectId: string; sessionId: string }> {
