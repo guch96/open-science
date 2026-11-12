@@ -7,8 +7,11 @@ import type {
 import type { ArtifactPreviewResult, ReadArtifactPreviewRequest } from '../artifacts'
 import type { ReplayRunIndex } from '../replay'
 import type {
-  NotebookProjectResources, NotebookProjectResourcesRequest, NotebookResourceRelease,
-  NotebookResourceReleaseRequest, ReleaseNotebookSessionResourcesRequest
+  NotebookProjectResources,
+  NotebookProjectResourcesRequest,
+  NotebookResourceRelease,
+  NotebookResourceReleaseRequest,
+  ReleaseNotebookSessionResourcesRequest
 } from '../notebook-resources'
 
 import type {
@@ -52,10 +55,18 @@ import {
 } from './definition'
 
 export const contracts = {
-  'notebook.getProjectResources': callable<(request: NotebookProjectResourcesRequest) => Promise<NotebookProjectResources>>()('notebook', ['notebook:project-resources']),
-  'notebook.releaseSessionResources': callable<(request: ReleaseNotebookSessionResourcesRequest) => Promise<NotebookResourceRelease>>()('notebook', ['notebook:release-session-resources']),
-  'notebook.getResourceRelease': callable<(request: NotebookResourceReleaseRequest) => Promise<NotebookResourceRelease>>()('notebook', ['notebook:resource-release']),
-  'notebook.retryResourceRelease': callable<(request: NotebookResourceReleaseRequest) => Promise<NotebookResourceRelease>>()('notebook', ['notebook:retry-resource-release']),
+  'notebook.getProjectResources': callable<
+    (request: NotebookProjectResourcesRequest) => Promise<NotebookProjectResources>
+  >()('notebook', ['notebook:project-resources']),
+  'notebook.releaseSessionResources': callable<
+    (request: ReleaseNotebookSessionResourcesRequest) => Promise<NotebookResourceRelease>
+  >()('notebook', ['notebook:release-session-resources']),
+  'notebook.getResourceRelease': callable<
+    (request: NotebookResourceReleaseRequest) => Promise<NotebookResourceRelease>
+  >()('notebook', ['notebook:resource-release']),
+  'notebook.retryResourceRelease': callable<
+    (request: NotebookResourceReleaseRequest) => Promise<NotebookResourceRelease>
+  >()('notebook', ['notebook:retry-resource-release']),
   'notebook.appendCodeCell': callable<
     (request: AppendNotebookCodeCellRequest) => Promise<{
       sessionId: string

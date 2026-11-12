@@ -98,7 +98,7 @@ type NotebookCommandRuntime = {
 }
 
 type NotebookCommandWorkflows = {
-  configureResourceReleaseGuard(assertAvailable: () => void): void
+  configureResourceReleaseGuard(blockedReason: () => string | undefined): void
   projectResources(request: NotebookProjectResourcesRequest): Promise<NotebookProjectResources>
   releaseSessionResources(
     request: ReleaseNotebookSessionResourcesRequest,
@@ -170,10 +170,10 @@ const createNotebookCommandWorkflows = (
   runtime: NotebookCommandRuntime,
   resourceAvailability?: NotebookResourceAvailability
 ): NotebookCommandWorkflows => {
-  let assertReleaseAvailable = (): void => {
-    throw new Error(
-      'Notebook resource release is unavailable before application admission is installed.'
-    )
+  let releaseBlockedReason = (): string | undefined => 'application-unavailable'
+  const assertReleaseAvailable = (): void => {
+    const reason = releaseBlockedReason()
+    if (reason) throw new Error(`Notebook resources cannot be released: ${reason}`)
   }
   const available = (): NotebookResourceAvailability => {
     if (!resourceAvailability) throw new Error('Notebook Session authority is unavailable.')
@@ -221,7 +221,7 @@ const createNotebookCommandWorkflows = (
   }
   return {
     configureResourceReleaseGuard: (guard) => {
-      assertReleaseAvailable = guard
+      releaseBlockedReason = guard
     },
     projectResources: async (request) => {
       const view = await runtime.getProjectResources(request)
@@ -247,7 +247,17 @@ const createNotebookCommandWorkflows = (
       const readable = (scope: { projectId: string; sessionId: string }): boolean =>
         allowed.has(JSON.stringify([scope.projectId, scope.sessionId]))
       return {
-        groups: view.groups.filter(readable),
+        groups: view.groups.filter(readable).map((group) => {
+          let reason = group.releaseBlockedReason ?? releaseBlockedReason()
+          if (!reason) {
+            try {
+              available().assertSessionResourceReleaseAvailable(group.projectId, group.sessionId)
+            } catch {
+              reason = 'session-unavailable'
+            }
+          }
+          return { ...group, releaseBlockedReason: reason }
+        }),
         pendingDecisions: view.pendingDecisions.filter(readable),
         releases: view.releases.filter(readable).map((release) => ({
           ...release,

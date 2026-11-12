@@ -11,7 +11,7 @@ import type { NotebookCommandWorkflows } from './notebook-workflows'
 
 type NotebookApplicationCommandDependencies = Readonly<{
   workflows: NotebookCommandWorkflows
-  assertReleaseAvailable?: () => void
+  resourceReleaseBlockedReason?: () => string | undefined
   readInputPreview: (request: ReadArtifactPreviewRequest) => Promise<ArtifactPreviewResult>
 }>
 
@@ -190,7 +190,7 @@ const installNotebookApplicationCommands = (
   const scope = registrar.createScope()
   try {
     dependencies.workflows.configureResourceReleaseGuard(
-      dependencies.assertReleaseAvailable ?? (() => undefined)
+      dependencies.resourceReleaseBlockedReason ?? (() => undefined)
     )
     scope.registerGroup(notebookApplicationCommands, {
       'notebook:project-resources': async (invocation) => {

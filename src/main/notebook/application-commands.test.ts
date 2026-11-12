@@ -20,6 +20,10 @@ import {
   notebookGetBackgroundRunCommand,
   notebookInspectNamespaceCommand,
   notebookProjectActivityCommand,
+  notebookProjectResourcesCommand,
+  notebookReleaseSessionResourcesCommand,
+  notebookResourceReleaseCommand,
+  notebookRetryResourceReleaseCommand,
   notebookMemoryPolicyStateCommand,
   notebookReadInputPreviewCommand,
   notebookReferenceCommand,
@@ -78,6 +82,48 @@ const invocation = <Args extends readonly unknown[]>(
 })
 
 describe('Notebook application commands', () => {
+  it.each(['automation', 'agent-session'] as const)(
+    'does not expose resource management authority to %s callers',
+    async (principalKind) => {
+      const runtime = {
+        getProjectResources: vi.fn(),
+        releaseSessionResources: vi.fn(),
+        getResourceRelease: vi.fn(),
+        retryResourceRelease: vi.fn()
+      } as unknown as NotebookCommandRuntime
+      const workflows = createNotebookCommandWorkflows(runtime, {
+        withSessionAvailable: async (_project, _session, operation) => operation(),
+        isSessionResourceReadable: async () => true,
+        assertSessionResourceReleaseAvailable: () => undefined
+      })
+      const router = createApplicationCommandRouter()
+      installNotebookApplicationCommands(router.registrar, { workflows, readInputPreview: vi.fn() })
+      const caller = createCallerContext({
+        ...localCaller,
+        principalKind,
+        actionOrigin: principalKind
+      })
+      const scope = {
+        projectId: 'project',
+        sessionId: 'session',
+        revision: 'revision',
+        operationId: 'release'
+      }
+      for (const command of [
+        notebookProjectResourcesCommand,
+        notebookReleaseSessionResourcesCommand,
+        notebookResourceReleaseCommand,
+        notebookRetryResourceReleaseCommand
+      ]) {
+        await expect(
+          router.dispatcher.invoke(command as never, invocation([scope], caller) as never)
+        ).rejects.toThrow(/current human/i)
+      }
+      for (const operation of Object.values(runtime)) expect(operation).not.toHaveBeenCalled()
+      router.dispose()
+    }
+  )
+
   it('owns exactly the 27 renderer-callable Notebook and Environment commands', () => {
     expect([
       ...notebookApplicationCommands.commands,

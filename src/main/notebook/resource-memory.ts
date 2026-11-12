@@ -62,7 +62,9 @@ export const createNotebookMemorySampler = (
         members !== undefined &&
         ids.length <= MAX_PROCESSES &&
         sample.complete &&
-        retained.length === ids.length
+        retained.length === ids.length &&
+        currentMembers?.length === members.length &&
+        currentMembers.every((pid) => members.includes(pid))
       for (const original of retained) {
         const observed = sample.processes.find(
           (entry) => entry.pid === original.pid && entry.birth === original.birth

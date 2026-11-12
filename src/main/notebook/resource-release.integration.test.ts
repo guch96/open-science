@@ -13,6 +13,7 @@ import {
   clearMigrationPending,
   waitForDataRootWriters
 } from '../storage/migration-state'
+import { SessionReproducibilityBatches } from '../artifacts/session-reproducibility'
 
 it.skipIf(process.platform === 'win32')(
   'requires a fresh confirmation when another original resource appears and preserves both trees',
@@ -54,6 +55,88 @@ it.skipIf(process.platform === 'win32')(
         service.executeShell({ ...scope, command: 'printf "$kept_shell_value"' })
       ).resolves.toMatchObject({ exitCode: 0, stdout: '73' })
     } finally {
+      await service.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it.skipIf(process.platform === 'win32')(
+  'drops a disappeared group confirmation after original shutdown and keeps other projects readable',
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'notebook-release-empty-'))
+    const service = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: 'project',
+      memoryPolicy: healthyNotebookMemoryPolicy()
+    })
+    const scope = { projectId: 'project', sessionId: 'session', workspaceCwd: root }
+    const other = { ...scope, projectId: 'other-project', sessionId: 'other-session' }
+    try {
+      await service.executeControl({ ...scope, code: 'globalThis.kept = 41' })
+      await service.executeControl({ ...other, code: 'globalThis.kept = 73' })
+      const group = (await service.getProjectResources(scope)).groups[0]
+      const otherGroup = (await service.getProjectResources(other)).groups[0]
+      await service.shutdown(scope)
+      expect((await service.getProjectResources(scope)).groups).toEqual([])
+      await expect(
+        service.releaseSessionResources({ ...scope, revision: group.revision }, () => undefined)
+      ).rejects.toThrow(/changed.*refresh|refresh.*changed/i)
+      expect((await service.getProjectResources(other)).groups[0].revision).toBe(
+        otherGroup.revision
+      )
+      await expect(
+        service.executeControl({ ...other, code: 'console.log(kept)' })
+      ).resolves.toMatchObject({ status: 'completed', stdout: expect.stringContaining('73') })
+    } finally {
+      await service.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it.skipIf(process.platform === 'win32')(
+  'refuses an in-flight binding conflict immediately without queueing a later stop',
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'notebook-release-binding-'))
+    const entered = Promise.withResolvers<void>()
+    const discovery = Promise.withResolvers<[]>()
+    const service = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: 'project',
+      memoryPolicy: healthyNotebookMemoryPolicy(),
+      discoverRuntimes: async () => {
+        entered.resolve()
+        return discovery.promise
+      }
+    })
+    const scope = { projectId: 'project', sessionId: 'session', workspaceCwd: root }
+    const intent = service.createExecutionIntent(scope)
+    let binding: Promise<unknown> | undefined
+    try {
+      await service.executeControl(
+        withNotebookExecutionIntent({ ...scope, code: 'globalThis.kept = 41' }, intent)
+      )
+      binding = service.bindRuntime({ ...scope, language: 'python', runtimeId: 'unavailable' })
+      await entered.promise
+      const group = (await service.getProjectResources(scope)).groups[0]
+      expect(group.releaseBlockedReason).toBe('runtime-binding-changing')
+      await expect(
+        service.releaseSessionResources({ ...scope, revision: group.revision }, () => undefined)
+      ).rejects.toThrow(/binding.*changing/i)
+      expect(intent.refusalId).toBeUndefined()
+      discovery.resolve([])
+      await binding
+      await expect(
+        service.executeControl(
+          withNotebookExecutionIntent({ ...scope, code: 'console.log(kept)' }, intent)
+        )
+      ).resolves.toMatchObject({ status: 'completed', stdout: expect.stringContaining('41') })
+    } finally {
+      discovery.resolve([])
+      await binding
       await service.dispose()
       await rm(root, { recursive: true, force: true })
     }
@@ -229,11 +312,13 @@ it.skipIf(process.platform === 'win32')(
             await terminateProcessTree(child)
             return { reaped: proofAvailable }
           }
-        })
+        }),
+      shellRuntimeBinding: { kind: 'native-posix', shell: '/bin/bash' }
     })
     const scope = { projectId: 'project', sessionId: 'session', workspaceCwd: root }
     try {
       await service.executeControl({ ...scope, code: 'globalThis.kept = 41' })
+      await service.executeShell({ ...scope, command: 'original_shell_value=13' })
       const group = (await service.getProjectResources(scope)).groups[0]
       const operation = await service.releaseSessionResources(
         { ...scope, revision: group.revision },
@@ -243,16 +328,41 @@ it.skipIf(process.platform === 'win32')(
       const request = { ...scope, operationId: operation.operationId }
       expect(service.getResourceRelease(request)).toMatchObject({
         status: 'partial',
-        resources: [expect.objectContaining({ id: group.resources[0].id, status: 'incomplete' })]
+        resources: [
+          expect.objectContaining({
+            id: group.resources[0].id,
+            group: 'kernel',
+            laneKey: expect.any(String),
+            status: 'incomplete'
+          }),
+          expect.objectContaining({
+            id: group.resources[1].id,
+            group: 'shell',
+            laneKey: expect.any(String),
+            status: 'released'
+          })
+        ]
       })
       expect((await service.getProjectResources(scope)).groups[0].resources).toEqual([
         expect.objectContaining({ id: group.resources[0].id, phase: 'cleanup-pending' })
       ])
       await expect(service.waitForSessionTeardown(scope)).rejects.toThrow(/cleanup.*incomplete/i)
+      const freshIntent = service.createExecutionIntent(scope)
+      await service.executeShell(
+        withNotebookExecutionIntent({ ...scope, command: 'kept_shell_value=73' }, freshIntent)
+      )
       proofAvailable = true
       await service.retryResourceRelease(request, () => undefined)
       await service.waitForSessionTeardown(scope)
       expect(service.getResourceRelease(request).status).toBe('released')
+      await expect(
+        service.executeShell(
+          withNotebookExecutionIntent(
+            { ...scope, command: 'printf "$kept_shell_value"' },
+            freshIntent
+          )
+        )
+      ).resolves.toMatchObject({ exitCode: 0, stdout: '73' })
       await service.executeControl({ ...scope, code: 'globalThis.kept = 73' })
       expect((await service.retryResourceRelease(request, () => undefined)).status).toBe('released')
       await expect(
@@ -379,6 +489,288 @@ it.skipIf(process.platform === 'win32')(
     } finally {
       cleanup.resolve()
       clearMigrationPending()
+      await service.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it.skipIf(process.platform === 'win32')(
+  'projects only the current originating continuation across projects and never creates an intent while reading',
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'notebook-release-origin-'))
+    const service = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: 'project',
+      memoryPolicy: healthyNotebookMemoryPolicy()
+    })
+    const target = { projectId: 'target-project', sessionId: 'target', workspaceCwd: root }
+    const origin = { projectId: 'origin-project', sessionId: 'origin' }
+    const unseen = { projectId: 'origin-project', sessionId: 'unseen' }
+    const intent = service.createExecutionIntent(origin)
+    try {
+      await service.executeControl(
+        withNotebookExecutionIntent({ ...target, code: 'console.log(41)' }, intent)
+      )
+      const group = (await service.getProjectResources(target)).groups[0]
+      const release = await service.releaseSessionResources(
+        { ...target, revision: group.revision },
+        () => undefined
+      )
+      await service.waitForSessionTeardown(target)
+      const request = { ...target, operationId: release.operationId }
+      expect(service.getResourceRelease(request).continuations).toEqual([
+        { ...origin, refusalId: intent.refusalId }
+      ])
+      expect((await service.getProjectResources(target)).releases[0].continuations).toEqual([
+        { ...origin, refusalId: intent.refusalId }
+      ])
+      expect(service.currentExecutionIntent(unseen)).toBeUndefined()
+      expect(
+        (await service.getProjectResources({ projectId: unseen.projectId })).pendingDecisions
+      ).toEqual([{ ...origin, refusalId: intent.refusalId }])
+      expect(service.currentExecutionIntent(unseen)).toBeUndefined()
+      service.createExecutionIntent(origin)
+      expect(service.getResourceRelease(request).continuations).toEqual([])
+      expect((await service.getProjectResources(target)).releases[0].continuations).toEqual([])
+      expect((await service.getProjectResources(origin)).pendingDecisions).toEqual([])
+    } finally {
+      await service.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it.skipIf(process.platform === 'win32').each(['healthy', 'pressured', 'unavailable'] as const)(
+  'permits confirmed cleanup when execution memory is %s and retains the completed history',
+  async (status) => {
+    const root = await mkdtemp(join(tmpdir(), 'notebook-release-memory-'))
+    let current = 'healthy'
+    const policy = new MemoryPolicyService({
+      adapter: {
+        platform: 'win32',
+        sample: async () => {
+          if (current === 'unavailable') throw new Error('Memory sampler unavailable')
+          return {
+            platform: 'win32',
+            source: 'test',
+            executionScope: 'windows:host',
+            facts: {
+              availableBytes: current === 'pressured' ? 5 : 80,
+              totalBytes: 100,
+              committedBytes: 50,
+              commitLimitBytes: 100
+            }
+          }
+        }
+      }
+    })
+    const service = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: 'project',
+      memoryPolicy: policy
+    })
+    const scope = { projectId: 'project', sessionId: 'session', workspaceCwd: root }
+    try {
+      await service.executeControl({ ...scope, code: 'console.log(41)' })
+      current = status
+      expect((await policy.getState({ force: true })).status).toBe(status)
+      const group = (await service.getProjectResources(scope)).groups[0]
+      const release = await service.releaseSessionResources(
+        { ...scope, revision: group.revision },
+        () => undefined
+      )
+      await service.waitForSessionTeardown(scope)
+      expect(
+        service.getResourceRelease({ ...scope, operationId: release.operationId }).status
+      ).toBe('released')
+      expect(service.ownedResources(scope)).toEqual([])
+      expect((await service.state(scope)).runs).toEqual([
+        expect.objectContaining({
+          status: 'completed',
+          text: expect.objectContaining({ stdout: expect.stringContaining('41') })
+        })
+      ])
+    } finally {
+      await service.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it('observes and releases an unstarted original batch without opening Compute or starting any target', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'notebook-release-ready-batch-'))
+  const setActive = vi.fn()
+  const run = vi.fn()
+  const batches = new SessionReproducibilityBatches({
+    preflight: async () => ({
+      recipeId: 'a'.repeat(64),
+      steps: 1,
+      inputBytes: 0,
+      environmentCount: 1
+    }),
+    run,
+    cancel: vi.fn(),
+    onResourcesChanged: () => service.refreshResourceActivity()
+  })
+  const service: NotebookRuntimeService = new NotebookRuntimeService({
+    configRoot: root,
+    dataRoot: root,
+    projectId: 'project',
+    memoryPolicy: { ...healthyNotebookMemoryPolicy(), setActive },
+    externalNotebookResources: (scope) => batches.resources(scope)
+  })
+  const scope = { projectId: 'project', sessionId: 'session' }
+  try {
+    const ready = (await batches.command(
+      {
+        projectId: scope.projectId,
+        appSessionId: scope.sessionId,
+        action: 'prepare',
+        targets: [{ artifactId: 'artifact', versionId: 'version', name: 'result.csv' }]
+      },
+      1
+    ))!
+    await vi.waitFor(() => expect(setActive).toHaveBeenCalledWith(true))
+    const group = (await service.getProjectResources(scope)).groups[0]
+    expect(group.resources).toEqual([expect.objectContaining({ group: 'batch', phase: 'ready' })])
+    const operation = await service.releaseSessionResources(
+      { ...scope, revision: group.revision },
+      () => undefined
+    )
+    await service.waitForSessionTeardown(scope)
+    expect(
+      service.getResourceRelease({ ...scope, operationId: operation.operationId }).status
+    ).toBe('released')
+    await vi.waitFor(() => expect(setActive).toHaveBeenLastCalledWith(false))
+    await expect(
+      batches.command(
+        {
+          projectId: scope.projectId,
+          appSessionId: scope.sessionId,
+          action: 'start',
+          batchId: ready.batchId
+        },
+        1
+      )
+    ).rejects.toThrow(/no longer current/i)
+    expect(run).not.toHaveBeenCalled()
+    expect(service.ownedResources()).toEqual([])
+  } finally {
+    await batches.stopWhere(() => true)
+    await service.dispose()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('keeps a current refused decision visible after memory recovers even when no resource was ever created', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'notebook-release-empty-refusal-'))
+  let availableBytes = 5
+  const policy = new MemoryPolicyService({
+    adapter: {
+      platform: 'win32',
+      sample: async () => ({
+        platform: 'win32',
+        source: 'test',
+        executionScope: 'windows:host',
+        facts: {
+          availableBytes,
+          totalBytes: 100,
+          committedBytes: 50,
+          commitLimitBytes: 100
+        }
+      })
+    }
+  })
+  const service = new NotebookRuntimeService({
+    configRoot: root,
+    dataRoot: root,
+    projectId: 'project',
+    memoryPolicy: policy
+  })
+  const scope = { projectId: 'project', sessionId: 'session', workspaceCwd: root }
+  const intent = service.createExecutionIntent(scope)
+  try {
+    await expect(
+      service.executeControl(
+        withNotebookExecutionIntent({ ...scope, code: 'console.log("not started")' }, intent)
+      )
+    ).rejects.toMatchObject({ code: 'NOTEBOOK_MEMORY_PRESSURE' })
+    availableBytes = 80
+    expect((await policy.getState({ force: true })).status).toBe('healthy')
+    expect(await service.getProjectResources(scope)).toEqual({
+      groups: [],
+      releases: [],
+      pendingDecisions: [
+        { projectId: scope.projectId, sessionId: scope.sessionId, refusalId: intent.refusalId }
+      ]
+    })
+    expect(service.currentExecutionIntent(scope)).toBe(intent)
+    await expect(
+      service.executeControl(
+        withNotebookExecutionIntent({ ...scope, code: 'console.log("still blocked")' }, intent)
+      )
+    ).rejects.toMatchObject({ code: 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION' })
+    expect(service.ownedResources()).toEqual([])
+  } finally {
+    await service.dispose()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it.skipIf(process.platform === 'win32').each(['session', 'global', 'dispose'] as const)(
+  'lets the original %s teardown join a committed manual release without waiting for itself',
+  async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), 'notebook-release-lifecycle-'))
+    const entered = Promise.withResolvers<void>()
+    const cleanup = Promise.withResolvers<void>()
+    const service = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: 'project',
+      memoryPolicy: healthyNotebookMemoryPolicy(),
+      executorFactory: () =>
+        new NotebookKernelExecutor({
+          replLoopPath: join(__dirname, '../../../resources/notebook/repl_loop.js'),
+          terminateTree: async (child) => {
+            const result = await terminateProcessTree(child)
+            entered.resolve()
+            await cleanup.promise
+            return result
+          }
+        })
+    })
+    const scope = { projectId: 'project', sessionId: 'session', workspaceCwd: root }
+    try {
+      await service.executeControl({ ...scope, code: 'console.log(41)' })
+      const group = (await service.getProjectResources(scope)).groups[0]
+      const release = await service.releaseSessionResources(
+        { ...scope, revision: group.revision },
+        () => undefined
+      )
+      await entered.promise
+      let stopped = false
+      const teardown = (
+        kind === 'session'
+          ? service.shutdownSession(scope.sessionId)
+          : kind === 'global'
+            ? service.shutdownAll()
+            : service.dispose()
+      ).then(() => {
+        stopped = true
+      })
+      await Promise.resolve()
+      expect(stopped).toBe(false)
+      cleanup.resolve()
+      await teardown
+      expect(
+        service.getResourceRelease({ ...scope, operationId: release.operationId }).status
+      ).toBe('released')
+      expect(service.ownedResources(scope)).toEqual([])
+    } finally {
+      cleanup.resolve()
       await service.dispose()
       await rm(root, { recursive: true, force: true })
     }
