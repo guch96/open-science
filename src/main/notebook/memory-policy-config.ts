@@ -52,8 +52,7 @@ const parsePolicy = (value: unknown): NotebookMemoryPolicy | undefined => {
     windowsExitRatio: windowsExitRatio ?? DEFAULT_NOTEBOOK_MEMORY_POLICY.windowsExitRatio,
     linuxEnterRatio: linuxEnterRatio ?? DEFAULT_NOTEBOOK_MEMORY_POLICY.linuxEnterRatio,
     linuxExitRatio: linuxExitRatio ?? DEFAULT_NOTEBOOK_MEMORY_POLICY.linuxExitRatio,
-    macNormalRecoveryMs:
-      macNormalRecoveryMs ?? DEFAULT_NOTEBOOK_MEMORY_POLICY.macNormalRecoveryMs
+    macNormalRecoveryMs: macNormalRecoveryMs ?? DEFAULT_NOTEBOOK_MEMORY_POLICY.macNormalRecoveryMs
   }
 
   if (
@@ -88,7 +87,11 @@ const loadNotebookMemoryPolicyConfig = async (
   try {
     parsed = JSON.parse(contents)
   } catch {
-    return { policy: DEFAULT_NOTEBOOK_MEMORY_POLICY, source: 'fallback', diagnostic: 'invalid-json' }
+    return {
+      policy: DEFAULT_NOTEBOOK_MEMORY_POLICY,
+      source: 'fallback',
+      diagnostic: 'invalid-json'
+    }
   }
 
   const policy = parsePolicy(parsed)

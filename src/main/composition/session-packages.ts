@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { BrowserPackageImport } from '../session-package/browser-import'
 import { getDefaultPermissionProfile } from '../../shared/permission-profiles'
 import type { SensitiveContentEvidence } from '../../shared/session-diagnostics'
+import type { SessionPackageRequest } from '../../shared/session-package'
 import { createAcpRuntime } from '../acp/runtime-composition'
 import type { ApplicationEvents } from '../application-events'
 import { type ApplicationModuleBuilder } from '../application-runtime'
@@ -33,6 +34,12 @@ import { detectActiveSessions } from '../storage/detect-active'
 import { runDataRootStartupRecovery } from '../storage/migration-state'
 import { normalizeLegacyDataPaths } from '../storage/normalize-legacy-paths'
 import { createDefaultUploadRepository } from '../uploads/ipc'
+import type { NotebookRuntimeService } from '../notebook/runtime-service'
+
+type SessionExportReservation = (
+  request: SessionPackageRequest,
+  signal?: AbortSignal
+) => Promise<() => void>
 
 export async function composeSessionPackages({
   settingsRepository,
@@ -42,6 +49,7 @@ export async function composeSessionPackages({
   uploadRepository,
   sessionRepository,
   getDetectSessionExportBlockingSessions,
+  getSessionExportOwners,
   modules
 }: {
   settingsRepository: SettingsRepository
@@ -51,6 +59,11 @@ export async function composeSessionPackages({
   uploadRepository: ReturnType<typeof createDefaultUploadRepository>
   sessionRepository: ReturnType<typeof createDefaultSessionRepository>
   getDetectSessionExportBlockingSessions: () => () => ReturnType<typeof detectActiveSessions>
+  getSessionExportOwners: () => {
+    archiveCoordinator: Pick<ArchiveCoordinator, 'reserveSessionExport'>
+    sessionPersistenceCoordinator: Pick<SessionPersistenceCommands, 'reserveSessionExport'>
+    notebookService: Pick<NotebookRuntimeService, 'waitForSessionTeardown'>
+  }
   modules: ApplicationModuleBuilder
 }): Promise<{
   projectRepository: ReturnType<typeof createDefaultProjectRepository>
@@ -60,6 +73,7 @@ export async function composeSessionPackages({
     current?: Pick<SessionPersistenceCommands, 'adoptPublishedSession' | 'runSessionMutation'>
   }
   sessionPackageService: import('../session-package/service').SessionPackageService
+  reserveSessionExport: SessionExportReservation
   previewStateRepository: ReturnType<typeof createDefaultPreviewStateRepository>
 }> {
   const projectRepository = createDefaultProjectRepository()
@@ -73,6 +87,60 @@ export async function composeSessionPackages({
   const packagePublicationOwner: {
     current?: Pick<SessionPersistenceCommands, 'adoptPublishedSession' | 'runSessionMutation'>
   } = {}
+  // Package recovery precedes the Notebook runtime. Resolve live owners only for an export.
+  const reserveSessionExport: SessionExportReservation = async (request, signal) => {
+    const { archiveCoordinator, sessionPersistenceCoordinator, notebookService } =
+      getSessionExportOwners()
+    let releasePersistence: (() => void) | undefined
+    let releaseAdmission: (() => void) | undefined
+    try {
+      releaseAdmission = await archiveCoordinator.reserveSessionExport(
+        request.projectId,
+        request.sessionId,
+        async () => {
+          signal?.throwIfAborted()
+          const teardown = notebookService.waitForSessionTeardown(request)
+          if (signal) {
+            // Cancelling this observer must not cancel an already committed cleanup.
+            await new Promise<void>((resolve, reject) => {
+              const abort = (): void => {
+                signal.removeEventListener('abort', abort)
+                reject(signal.reason)
+              }
+              signal.addEventListener('abort', abort, { once: true })
+              void teardown.then(
+                () => {
+                  signal.removeEventListener('abort', abort)
+                  resolve()
+                },
+                (error: unknown) => {
+                  signal.removeEventListener('abort', abort)
+                  reject(error)
+                }
+              )
+              if (signal.aborted) abort()
+            })
+          } else await teardown
+          signal?.throwIfAborted()
+          releasePersistence = await sessionPersistenceCoordinator.reserveSessionExport(
+            request.projectId,
+            request.sessionId
+          )
+          signal?.throwIfAborted()
+        },
+        signal
+      )
+      signal?.throwIfAborted()
+      return () => {
+        releasePersistence?.()
+        releaseAdmission?.()
+      }
+    } catch (error) {
+      releasePersistence?.()
+      releaseAdmission?.()
+      throw error
+    }
+  }
   const sessionPackageService = await modules.add(undefined, () => {
     const service = new SessionPackageService({
       literatureSource: createLiteraturePackageSource(() =>
@@ -91,6 +159,7 @@ export async function composeSessionPackages({
       configRoot: resolveConfigRoot(),
       storageRoot: resolveDataRoot(),
       getClient: () => getProjectDbClient(resolveConfigRoot()),
+      reserveExport: reserveSessionExport,
       isSessionActive: (projectId, sessionId) =>
         getDetectSessionExportBlockingSessions()().some(
           (item) => item.projectId === projectId && item.sessionId === sessionId
@@ -149,6 +218,7 @@ export async function composeSessionPackages({
     packageHandoffHeld,
     packagePublicationOwner,
     sessionPackageService,
+    reserveSessionExport,
     previewStateRepository
   }
 }
@@ -162,7 +232,7 @@ export function composeSessionPackageSurfaces({
   sessionPackageDesktopLifecycle,
   packageHandoffHeld,
   sessionPackageService,
-  sessionPersistenceCoordinator,
+  reserveSessionExport,
   archiveCoordinator,
   runtime,
   translate
@@ -179,7 +249,7 @@ export function composeSessionPackageSurfaces({
   sessionPackageDesktopLifecycle: { close: () => Promise<void>; isActive: () => boolean }
   packageHandoffHeld: { current: boolean }
   sessionPackageService: import('../session-package/service').SessionPackageService
-  sessionPersistenceCoordinator: Pick<SessionPersistenceCommands, 'reserveSessionExport'>
+  reserveSessionExport: SessionExportReservation
   archiveCoordinator: ArchiveCoordinator
   runtime: ReturnType<typeof createAcpRuntime>
   translate: import('../locale/main-process-messages').NativeTranslator
@@ -190,28 +260,7 @@ export function composeSessionPackageSurfaces({
 } {
   const conversationExportService = createConversationExportService({
     translate,
-    reserveExport: async (projectId, sessionId) => {
-      let releasePersistence: (() => void) | undefined
-      try {
-        const releaseAdmission = await archiveCoordinator.reserveSessionExport(
-          projectId,
-          sessionId,
-          async () => {
-            releasePersistence = await sessionPersistenceCoordinator.reserveSessionExport(
-              projectId,
-              sessionId
-            )
-          }
-        )
-        return () => {
-          releasePersistence?.()
-          releaseAdmission()
-        }
-      } catch (error) {
-        releasePersistence?.()
-        throw error
-      }
-    },
+    reserveExport: (projectId, sessionId) => reserveSessionExport({ projectId, sessionId }),
     loadSession: (projectId, sessionId) => sessionRepository.loadSession(projectId, sessionId),
     isSessionActive: (projectId, sessionId) =>
       runtime
@@ -228,7 +277,6 @@ export function composeSessionPackageSurfaces({
     sessionPackageService,
     translate,
     archiveCoordinator,
-    sessionPersistenceCoordinator,
     applicationEvents,
     projectRepository,
     sessionRepository,
