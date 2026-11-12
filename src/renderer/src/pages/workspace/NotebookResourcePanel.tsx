@@ -96,9 +96,12 @@ const NotebookContinuation = ({
         size="sm"
         variant="outline"
         disabled={sending}
+        aria-busy={sending}
         onClick={() => void continueWork()}
       >
-        {t('Continue Notebook work')}
+        <span key={String(sending)} className="button-feedback">
+          {t('Continue Notebook work')}
+        </span>
       </Button>
     </div>
   )
@@ -497,8 +500,16 @@ const NotebookResourcePanel = ({
                   {t('Cancel')}
                 </Button>
               </AlertDialog.Cancel>
-              <Button type="button" disabled={submitting} onClick={() => void confirm()}>
-                {t('Stop and release')}
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={submitting}
+                aria-busy={submitting}
+                onClick={() => void confirm()}
+              >
+                <span key={String(submitting)} className="button-feedback">
+                  {t('Stop and release')}
+                </span>
               </Button>
             </div>
           </AlertDialog.Content>
@@ -588,10 +599,13 @@ const NotebookResourcePanel = ({
                 <Button
                   type="button"
                   disabled={submitting || Boolean(progressBlockedReason)}
+                  aria-busy={submitting}
                   aria-describedby={progressBlockedReason ? 'notebook-retry-blocked' : undefined}
                   onClick={() => void retry(progress)}
                 >
-                  {t('Retry cleanup')}
+                  <span key={String(submitting)} className="button-feedback">
+                    {t('Retry cleanup')}
+                  </span>
                 </Button>
               ) : null}
             </div>
