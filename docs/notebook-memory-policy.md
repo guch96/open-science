@@ -53,6 +53,26 @@ descendants. Host pressure uses `pressureScope: host`. Unknown sampling never su
 reclamation authority. History, imports/exports, cancellation, status, and identity-confirmed manual
 release must remain outside the execution admission gate.
 
+Execution admission (issue #25) is a main-process capability owned by each
+`NotebookRuntimeService` generation. Direct service construction lazily creates the real platform
+policy; production research reproduction shares the same service capability. The optional test seam
+requires an explicit policy. Admission callbacks and observations are temporary and are never saved
+to Notebook history or portable packages.
+
+Every execution checks at submission and after asynchronous queues, approvals, environment and
+sandbox preparation. The interpreter creation and final synchronous stdin writes carry the trusted
+capability and compose cancellation, epoch and runtime-binding checks. Pressure or unavailable
+sampling uses the existing failed result with `execution: not-started`, `kernelDispatched: false`
+and `executionStarted: false`. It does not create a retry queue, erase an existing namespace or
+rewrite already dispatched outcomes. Batch reproduction stops later targets after a memory refusal
+while retaining completed targets.
+
+An explicit user terminal submission freezes the actual live interpreter object before admission
+awaits and rechecks it through dispatch. It cannot start a replacement interpreter. Legacy user
+requests without `inputKind` retain their cell execution contract. Restart preflights memory before
+modifying the old namespace or editing state. Runtime probes, history, repair and teardown keep their
+existing gates without acquiring execution admission.
+
 Linux source references: [namespace inode](https://github.com/torvalds/linux/blob/v6.12/include/linux/proc_ns.h),
 [reader-relative cgroup paths](https://github.com/torvalds/linux/blob/v6.12/kernel/cgroup/cgroup.c#L6377),
 [filesystem magic](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/magic.h), and

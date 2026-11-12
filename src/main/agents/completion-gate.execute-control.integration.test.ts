@@ -10,6 +10,7 @@ import type { AcpStateSnapshot } from '../../shared/acp'
 import { NotebookLocalRpcServer } from '../notebook/local-rpc-server'
 import { fetchLocalRpc } from '../local-rpc-transport'
 import { NotebookRunRepository } from '../notebook/repository'
+import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import {
   NotebookControlCompletionCapturedError,
   NotebookRuntimeService,
@@ -78,6 +79,7 @@ const createExecuteControlHarness = async (
     ...(options.deliverToOldPrompt ? { deliverToOldPrompt: options.deliverToOldPrompt } : {})
   })
   const service = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: root,
     dataRoot: root,
     projectId: 'default-project',

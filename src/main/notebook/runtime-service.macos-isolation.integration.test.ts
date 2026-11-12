@@ -18,6 +18,7 @@ import { createRootNotebookLane } from './lane-identity'
 import { NotebookNetworkSandboxOwner } from './network-sandbox-owner'
 import type { NotebookSandboxedSpawn } from './process-sandbox'
 import { NotebookRunRepository } from './repository'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
 import { NotebookRuntimeService } from './runtime-service'
 
 // Point at an existing, read-only interpreter fixture. This suite never provisions environments.
@@ -45,6 +46,7 @@ it.skipIf(process.platform !== 'darwin').each([false, true])(
     })
     const repository = new NotebookRunRepository(root)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'repl-cancel',
@@ -179,6 +181,7 @@ it
           })
         : undefined
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: storage,
       dataRoot: storage,
       projectId,
@@ -510,6 +513,7 @@ for (const runtime of ['bash', 'repl', 'python'] as const) {
       const sessionId = `independent-${runtime}`
       const scope = { projectId, sessionId, workspaceCwd: storage }
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: storage,
         dataRoot: storage,
         projectId,
@@ -673,6 +677,7 @@ it
       requestDecision: async () => 'deny'
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'repl-exit',

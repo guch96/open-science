@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 
 import { NotebookLocalRpcServer } from '../notebook/local-rpc-server'
+import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
 import { NotebookRunRepository } from '../notebook/repository'
 import {
@@ -222,6 +223,7 @@ gate('host.agents repl privileged integration', () => {
     approvalCount = composed.approvalCount
     void agentsService
     const notebookService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: runtimeStorage,
       dataRoot: runtimeStorage,
       projectId: 'default-project',
@@ -571,6 +573,7 @@ gate('host.agents repl privileged integration', () => {
     const composed = composeService({ profileStorage, gateway: declineGateway })
     const declineRpc = new NotebookLocalRpcServer(
       new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: runtimeStorage,
         dataRoot: runtimeStorage,
         projectId: 'decline-project',
@@ -649,6 +652,7 @@ gate('host.agents repl privileged integration', () => {
     const composed = composeService({ profileStorage, gateway: declineGateway })
     const declineRpc = new NotebookLocalRpcServer(
       new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: runtimeStorage,
         dataRoot: runtimeStorage,
         projectId: 'decline-del-project',
@@ -758,6 +762,7 @@ gate('host.agents repl privileged integration', () => {
     const composed = composeService({ profileStorage, gateway: { decide } })
     const declineRpc = new NotebookLocalRpcServer(
       new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: runtimeStorage,
         dataRoot: runtimeStorage,
         projectId: 'no-approval-upd-project',
@@ -824,6 +829,7 @@ gate('host.agents repl privileged integration', () => {
     const composed = composeService({ profileStorage, gateway: { decide } })
     const declineRpc = new NotebookLocalRpcServer(
       new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: runtimeStorage,
         dataRoot: runtimeStorage,
         projectId: 'no-retry-project',

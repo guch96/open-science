@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { ReproductionPreflightError } from '@aipoch/reproducibility'
+import { NotebookExecutionAdmissionError } from '../notebook/execution-admission'
 import type { SessionReproducibilityStore } from './session-reproducibility-store'
 import { createLogger, errorLogFields } from '@aipoch/diagnostics/node'
 const log = createLogger('artifacts:session-reproducibility')
@@ -211,8 +212,15 @@ export class SessionReproducibilityBatches {
         )
         target.status = result.status
         if (result.receipt) target.receiptChecksum = result.receipt.receiptChecksum
-      } catch {
+      } catch (error) {
         target.status = entry.controller.signal.aborted ? 'cancelled' : 'failed'
+        if (
+          error instanceof NotebookExecutionAdmissionError &&
+          ['NOTEBOOK_MEMORY_PRESSURE', 'NOTEBOOK_MEMORY_UNAVAILABLE'].includes(error.code)
+        ) {
+          this.stop(entry)
+          break
+        }
       }
     }
     entry.state.status = entry.controller.signal.aborted ? 'cancelled' : 'completed'

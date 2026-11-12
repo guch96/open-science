@@ -1,4 +1,5 @@
 import { compilePowerShellCommand } from './powershell-native-capture'
+import { NotebookExecutionAdmissionError } from './execution-admission'
 import { ExecutionDeadline } from './execution-deadline'
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { dirname } from 'node:path'
@@ -700,7 +701,8 @@ const runShellCommand = (
         : withIncompleteCleanup(cancelled, 'not-started')
     }
 
-    const spawnAdmission = sandboxed?.beginSpawn?.()
+    let spawnAdmission:
+      ReturnType<NonNullable<NonNullable<typeof sandboxed>['beginSpawn']>> | undefined
     let processTreeOwnership: ReturnType<typeof createPosixProcessTreeOwnership>
     const launchOwnership = options.prepareProcessOwnership?.({
       hosted: platform === 'win32' && Boolean(sandboxed?.confirmProcessTreeTermination)
@@ -708,6 +710,10 @@ const runShellCommand = (
     const ownershipHost = launchOwnership?.host
     let child: ChildProcessWithoutNullStreams
     try {
+      await options.executionAdmission?.prepare('create')
+      options.signal?.throwIfAborted()
+      options.executionAdmission?.assertCurrent('create')
+      spawnAdmission = sandboxed?.beginSpawn?.()
       processTreeOwnership = createPosixProcessTreeOwnership(sandboxed?.env ?? baseEnv, platform)
       child = spawn(
         ownershipHost ? process.execPath : (sandboxed?.executable ?? invocation.executable),
@@ -752,7 +758,11 @@ const runShellCommand = (
       const result: NotebookShellResult = {
         stdout: '',
         stderr: error instanceof Error ? error.message : String(error),
-        exitCode: null
+        exitCode: error instanceof NotebookExecutionAdmissionError ? 1 : null,
+        ...(options.signal?.aborted ? { cancelled: true } : {}),
+        ...(error instanceof NotebookExecutionAdmissionError
+          ? { kernelDispatched: false, executionStarted: false, recovery: error.recovery }
+          : {})
       }
       return complete ? result : withIncompleteCleanup(result, 'not-started')
     }

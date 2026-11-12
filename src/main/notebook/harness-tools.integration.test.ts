@@ -15,6 +15,7 @@ import { SessionPersistenceCoordinator } from '../session-persistence/coordinato
 import { createLinearConversationGraph } from '../../shared/conversation-graph'
 import type { PersistedChatMessage } from '../../shared/session-persistence'
 import { initDataRoot } from '../storage-root'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
 import { NotebookRuntimeService, type NotebookExecutionRequest } from './runtime-service'
 import { NotebookRunRepository } from './repository'
 
@@ -50,6 +51,7 @@ async function setup(name = 'list_authorized_directories', args: unknown = {}, c
   })
   const service = compute
     ? new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'project',

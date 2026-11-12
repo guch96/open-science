@@ -4,6 +4,13 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { NotebookExecutionStopError } from '../../shared/notebook-execution-error'
+import {
+  NotebookExecutionAdmissionError,
+  notebookExecutionAdmission,
+  withNotebookExecutionAdmission,
+  prepareNotebookExecution,
+  guardNotebookExecutionAdmission
+} from './execution-admission'
 
 import type { Logger } from '@aipoch/diagnostics/node'
 import {
@@ -180,6 +187,9 @@ const errorToExecutionResult = (error: unknown, cwd: string): NotebookSessionExe
   return {
     status: 'failed',
     kernelDispatched: false,
+    ...(error instanceof NotebookExecutionAdmissionError
+      ? { executionStarted: false, recovery: error.recovery }
+      : {}),
     stdout: '',
     stderr: message,
     traceback: message,
@@ -616,7 +626,11 @@ class NotebookExecutionOwner {
     // Snapshot caller-owned inputs before the first queue/preparation/persistence wait.
     // The host-owned input lease stays live so resolver access reaches the completed run.
     const { registeredInputFiles, ...submittedRequest } = request
-    const executionRequest = { ...structuredClone(submittedRequest), registeredInputFiles }
+    const frozenRequest = { ...structuredClone(submittedRequest), registeredInputFiles }
+    const executionAdmission = notebookExecutionAdmission(request)
+    const executionRequest = executionAdmission
+      ? withNotebookExecutionAdmission(frozenRequest, executionAdmission)
+      : frozenRequest
     const executionHelperIds = helperModuleIds?.slice()
     return session.withCellExecution(executionRequest.cellId, async (cell) => {
       const submissionFingerprint = dataRunFingerprint(
@@ -828,6 +842,20 @@ class NotebookExecutionOwner {
             notebookInterpreterIdentity(resolvedInterpreter)
           )
           const kernelEpochId = kernelEpoch.id
+          const executionAdmission = guardNotebookExecutionAdmission(
+            notebookExecutionAdmission(request),
+            signal,
+            () => {
+              if (
+                session.currentKernelEpochId(processKey) !== kernelEpochId ||
+                !isDeepStrictEqual(session.runtimeBinding(cell.language), binding)
+              ) {
+                throw new Error(
+                  'Notebook runtime changed before dispatch. Retry against the current runtime.'
+                )
+              }
+            }
+          )
           const executionRun = {
             ...durableAdmission.run,
             inputFiles: queuedRun.inputFiles,
@@ -853,7 +881,7 @@ class NotebookExecutionOwner {
               this.options.dataExecutionAdmission.runShared(
                 session,
                 admission,
-                async (rejection) => {
+                async (rejection): Promise<NotebookSessionExecutionResult> => {
                   if (rejection !== undefined) {
                     executedOnLiveKernel = false
                     return errorToExecutionResult(rejection, cwdBefore)
@@ -886,6 +914,13 @@ class NotebookExecutionOwner {
                     sourceFileAccessContext,
                     signal
                   )
+                  try {
+                    await prepareNotebookExecution(request, 'dispatch')
+                  } catch (error) {
+                    if (error instanceof NotebookExecutionAdmissionError)
+                      return errorToExecutionResult(error, cwdBefore)
+                    throw error
+                  }
                   signal?.throwIfAborted()
                   if (
                     session.currentKernelEpochId(processKey) !== kernelEpochId ||
@@ -898,6 +933,7 @@ class NotebookExecutionOwner {
                   reachedExecutor = true
                   let executionResult = await session
                     .execute({
+                      executionAdmission,
                       runId,
                       code: durableAdmission.run.script,
                       ...(helperPlan.injections.length
@@ -928,6 +964,8 @@ class NotebookExecutionOwner {
                     })
                     .catch((error: unknown) => {
                       if (error instanceof NotebookExecutionStopError) throw error
+                      if (error instanceof NotebookExecutionAdmissionError)
+                        return errorToExecutionResult(error, cwdBefore)
                       executedOnLiveKernel = false
                       const fallback =
                         session.consumeForceStopped(processKey) || signal?.aborted
@@ -1328,6 +1366,14 @@ class NotebookExecutionOwner {
     const runId = queuedRun.runId
     const kernelEpochId = epoch.id
     const replEpochId = blockedMutation ? undefined : kernelEpochId
+    const executionAdmission = guardNotebookExecutionAdmission(
+      notebookExecutionAdmission(request),
+      signal,
+      () => {
+        if (session.currentKernelEpochId('repl') !== kernelEpochId)
+          throw new Error('Notebook REPL epoch retired before dispatch.')
+      }
+    )
     let executedOnLiveKernel = !blockedMutation
     let reachedExecutor = false
     const terminalized = await this.options.runTerminalization.runAdmitted({
@@ -1357,6 +1403,7 @@ class NotebookExecutionOwner {
                 .sourceFileAccessContext?.(session, queuedRun)
                 .catch(() => undefined)
               await this.options.reviewCode?.(session, queuedRun, sourceFileAccessContext, signal)
+              await prepareNotebookExecution(request, 'dispatch')
               signal?.throwIfAborted()
               if (session.currentKernelEpochId('repl') !== epoch.id) {
                 throw new Error('Notebook REPL epoch retired before dispatch.')
@@ -1388,6 +1435,7 @@ class NotebookExecutionOwner {
               reachedExecutor = true
               return session
                 .execute({
+                  executionAdmission,
                   runId,
                   kernelEpochId,
                   code: request.code,
@@ -1431,6 +1479,8 @@ class NotebookExecutionOwner {
               outputs: []
             }
           }
+          if (error instanceof NotebookExecutionAdmissionError)
+            return errorToExecutionResult(error, session.cwd)
           executedOnLiveKernel = false
           return errorToExecutionResult(error, session.cwd)
         }),
@@ -1676,6 +1726,11 @@ class NotebookExecutionOwner {
         // Recheck admission after async lookup - shutdown or revocation could have happened
         this.assertShellAdmissionAvailable(session)
         const shellProcessRequest = {
+          executionAdmission: guardNotebookExecutionAdmission(
+            notebookExecutionAdmission(request),
+            lifecycleSignal,
+            () => this.assertShellAdmissionAvailable(session)
+          ),
           laneKey: notebookLaneKey(session.lane),
           runId,
           executionReference: runId,
@@ -1771,6 +1826,12 @@ class NotebookExecutionOwner {
                 undefined,
                 lifecycleSignal
               )
+              try {
+                await prepareNotebookExecution(request, 'dispatch')
+              } catch (error) {
+                if (!(error instanceof NotebookExecutionAdmissionError)) throw error
+                return { ...errorToExecutionResult(error, frozenShellContext.cwd), exitCode: 1 }
+              }
               lifecycleSignal.throwIfAborted()
               const workingFileObservation = await startWorkingFileObservation({
                 dataRoot: session.dataRoot,
@@ -1878,7 +1939,9 @@ class NotebookExecutionOwner {
                 exitCode: shellResult.exitCode,
                 runtimeStatus: shellResult.runtimeStatus,
                 errorCode: shellResult.errorCode,
-                recovery: shellResult.recovery
+                recovery: shellResult.recovery,
+                kernelDispatched: shellResult.kernelDispatched,
+                executionStarted: shellResult.executionStarted
               }
             }
           })

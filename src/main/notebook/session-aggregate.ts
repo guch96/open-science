@@ -94,6 +94,7 @@ export type NotebookSessionRuntimeBinding = NotebookRuntimeBinding & {
 }
 
 export type NotebookSessionExecutionRequest = {
+  executionAdmission?: import('./execution-admission').NotebookExecutionAdmission
   // App-owned identity used to seal per-run file evidence. Optional keeps injected executors and
   // direct tests source-compatible; production execution always supplies it.
   runId?: string

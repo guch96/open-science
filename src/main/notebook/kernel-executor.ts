@@ -1,4 +1,5 @@
 import { createLogger } from '@aipoch/diagnostics/node'
+import { NotebookExecutionAdmissionError } from './execution-admission'
 import type { analyzeNotebookSourceFileAccess } from '@aipoch/notebook-analysis'
 import { observeResourceProcess, recordResourceEvent } from '../resource-diagnostics/recorder'
 import { resourceActivity } from '../resource-diagnostics/activity'
@@ -455,6 +456,8 @@ const errorToExecutionResult = (
   kernelDispatched = false,
   helperModulesInitialized: readonly string[] = []
 ): NotebookExecutionResult => {
+  if (!kernelDispatched && request.signal?.aborted && error === request.signal.reason)
+    error = new NotebookExecutionCancelledError()
   if (error instanceof NotebookRuntimeAccessCancelledError) {
     return {
       status: 'cancelled',
@@ -485,6 +488,9 @@ const errorToExecutionResult = (
 
   return {
     status: error instanceof NotebookExecutionTimeoutError ? 'timeout' : 'failed',
+    ...(!kernelDispatched && error instanceof NotebookExecutionAdmissionError
+      ? { executionStarted: false, recovery: error.recovery }
+      : {}),
     ...(notebookErrorRecovery(error) ? { recovery: notebookErrorRecovery(error) } : {}),
     kernelDispatched,
     stdout: '',
@@ -927,6 +933,10 @@ class NotebookKernelExecutor implements NotebookExecutor {
   ): Promise<ProcState> {
     const identity = notebookInterpreterIdentity(request.resolvedInterpreter)
     const existing = this.procs.get(key)
+    if (request.executionAdmission) {
+      await request.executionAdmission.prepare(existing?.alive ? 'dispatch' : 'create')
+      request.executionAdmission.assertCurrent(existing?.alive ? 'dispatch' : 'create')
+    }
     if (existing && existing.alive) {
       if (existing.interpreterIdentity === identity) {
         // Start of a new request on this proc: disarm the idle timer armed after its last completion.
@@ -1494,6 +1504,9 @@ class NotebookKernelExecutor implements NotebookExecutor {
     let child: ChildProcessWithoutNullStreams
     let spawnAdmission: Readonly<{ started: () => void; notStarted: () => void }> | undefined
     try {
+      if (request.executionAdmission) await request.executionAdmission.prepare('create')
+      if (request.signal?.aborted) throw new NotebookExecutionCancelledError()
+      request.executionAdmission?.assertCurrent('create')
       // No await may separate this check from spawn: settings mutations must not interleave
       // between validating the prepared launch and creating its process.
       spawnAdmission = sandboxed?.beginSpawn?.()
@@ -1747,13 +1760,14 @@ class NotebookKernelExecutor implements NotebookExecutor {
 
   // Frames one request onto the loop's stdin and returns a promise settled by the matching response
   // line, the timeout manager, or an unexpected process exit.
-  private sendRequest(
+  private async sendRequest(
     proc: ProcState,
     reqId: string,
     request: NotebookExecutionRequest,
     onDispatch: () => void,
     replBindings?: ReplCellBindings
   ): Promise<{ response: KernelLoopResponse; timedOut: boolean; cancelled: boolean }> {
+    if (request.executionAdmission) await request.executionAdmission.prepare('dispatch')
     return new Promise((resolve, reject) => {
       if (request.signal?.aborted) {
         reject(new NotebookExecutionCancelledError())
@@ -1874,23 +1888,33 @@ class NotebookKernelExecutor implements NotebookExecutor {
       }
 
       try {
+        const assertDispatch = (): void => {
+          if (request.signal?.aborted) throw new NotebookExecutionCancelledError()
+          request.executionAdmission?.assertCurrent('dispatch')
+          if (request.executionAdmission && (!proc.alive || this.procs.get(proc.key) !== proc))
+            throw (
+              proc.terminationError ?? new Error('Notebook kernel process exited before execution.')
+            )
+        }
         if (proc.kind === 'r') {
-          proc.child.stdin.write(frameRRequest(reqId, request.code))
+          const frame = frameRRequest(reqId, request.code)
+          assertDispatch()
+          proc.child.stdin.write(frame)
         } else {
           // Python and the repl (JS) loop share the same JSON-lines request framing.
           const protectedDirAdditions = (request.protectedDirs ?? []).filter(
             (directory) => !proc.protectedDirs.has(directory)
           )
-          proc.child.stdin.write(
-            framePythonRequest(
-              reqId,
-              replBindings?.source ?? request.code,
-              request.controlInvocationId,
-              protectedDirAdditions,
-              request.language === 'python' ? request.pythonRandomState : undefined,
-              replBindings?.publisher
-            )
+          const frame = framePythonRequest(
+            reqId,
+            replBindings?.source ?? request.code,
+            request.controlInvocationId,
+            protectedDirAdditions,
+            request.language === 'python' ? request.pythonRandomState : undefined,
+            replBindings?.publisher
           )
+          assertDispatch()
+          proc.child.stdin.write(frame)
           for (const directory of protectedDirAdditions) proc.protectedDirs.add(directory)
         }
         onDispatch()

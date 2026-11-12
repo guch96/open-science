@@ -2,6 +2,15 @@ import { withDataRootWrite } from '../storage/migration-state'
 import type { NotebookDependencyAnalyzer } from '@aipoch/notebook-analysis'
 import { randomUUID } from 'node:crypto'
 import { NotebookIdleReclamation } from './idle-reclamation'
+import {
+  createNotebookExecutionAdmission,
+  createNotebookMemoryPolicy,
+  notebookExecutionAdmission,
+  withNotebookExecutionAdmission,
+  NotebookExecutionAdmissionError,
+  type NotebookMemoryPolicyPort,
+  type NotebookExecutionAdmission
+} from './execution-admission'
 import { existsSync, realpathSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -206,7 +215,17 @@ type ResolvedInterpreter = NotebookSessionResolvedInterpreter
 type NotebookDependencyAnalyzerPort = Pick<NotebookDependencyAnalyzer, 'project'> &
   Partial<Pick<NotebookDependencyAnalyzer, 'sourceFileAccessContext' | 'finalizeEpochs'>>
 
-type NotebookRuntimeServiceCallbacks = NotebookSessionLifecycleCallbacks
+type NotebookMemoryRejectionContext = Pick<NotebookSessionReference, 'projectId' | 'sessionId'> & {
+  workspaceCwd?: string
+  source?: string
+  inputKind?: string
+}
+type NotebookRuntimeServiceCallbacks = NotebookSessionLifecycleCallbacks & {
+  onMemoryPolicyRejected?: (
+    context: NotebookMemoryRejectionContext,
+    state: import('./memory-policy').MemoryPolicyObservation
+  ) => void
+}
 
 // Background execution is part of the normal Notebook contract. Environment flags remain an
 // emergency/rollout override: unset means enabled, exact "1" enables, and any other explicit value
@@ -227,6 +246,7 @@ type McpRpcConnectionBinding = {
 }
 
 type NotebookRuntimeServiceOptions = ProjectIdScope & {
+  memoryPolicy?: NotebookMemoryPolicyPort
   isSessionBusy?: (projectId: string, sessionId: string) => boolean | Promise<boolean>
   admitSessionWork?: (projectId: string, sessionId: string) => () => void
   // Config root: source of the app-owned claude config dir (protected from the kernel). Never relocated.
@@ -436,6 +456,102 @@ const resolveDefaultExecutorOptions = (): NotebookKernelExecutorOptions => {
 
 // Coordinates notebook cells, shared interpreters, persisted run history, and UI notifications.
 class NotebookRuntimeService {
+  private memoryPolicyPromise?: Promise<NotebookMemoryPolicyPort>
+  getMemoryPolicy(): Promise<NotebookMemoryPolicyPort> {
+    return (this.memoryPolicyPromise ??= this.options.memoryPolicy
+      ? Promise.resolve(this.options.memoryPolicy)
+      : createNotebookMemoryPolicy(this.options.configRoot, this.options.platform))
+  }
+
+  createExecutionAdmission(
+    signal?: AbortSignal,
+    executionScope?: string,
+    context?: NotebookMemoryRejectionContext
+  ): NotebookExecutionAdmission {
+    return createNotebookExecutionAdmission({
+      policy: () => this.getMemoryPolicy(),
+      signal,
+      executionScope,
+      ...(context
+        ? {
+            onRejected: (state) => this.options.callbacks?.onMemoryPolicyRejected?.(context, state)
+          }
+        : {})
+    })
+  }
+
+  private shellMemoryScope(request: ExecuteShellRequest): string | undefined {
+    const binding =
+      request.shellRuntime ??
+      this.options.shellRuntimeBinding ??
+      defaultShellRuntimeBinding(this.options.platform)
+    return binding.kind === 'wsl2-bash' ? `wsl:${binding.profileId}` : undefined
+  }
+
+  private async admitExecutionRequest<
+    T extends NotebookSessionRequest & {
+      source?: string
+      inputKind?: string
+      language?: NotebookLanguage
+      cellId?: string
+    }
+  >(request: T, signal?: AbortSignal, executionScope?: string): Promise<T> {
+    if (notebookExecutionAdmission(request)) return request
+    // Snapshot the actual host-owned live object before the first await. Historical statuses and
+    // caller-provided epochs never authorize an explicit terminal to cold-start a replacement.
+    let assertHostCurrent:
+      ((boundary: import('./execution-admission').NotebookExecutionBoundary) => void) | undefined
+    if (request.source === 'user' && request.inputKind === 'terminal') {
+      const lane = this.sessionLifecycle.laneForRequest(request)
+      const session = this.sessions.get(lane)
+      const language =
+        request.language ??
+        (request.cellId ? session?.cellView(request.cellId).language : undefined) ??
+        'python'
+      const binding = session?.runtimeBinding(language)
+      const key = dataProcessKey(language, binding?.envName)
+      const identity = session?.idleProcesses().find((proc) => proc.processKey === key)?.identity
+      assertHostCurrent = (boundary) => {
+        if (
+          boundary === 'create' ||
+          !identity ||
+          this.sessions.get(lane) !== session ||
+          session?.runtimeBinding(language)?.runtimeId !== binding?.runtimeId ||
+          !session
+            ?.idleProcesses()
+            .some((proc) => proc.processKey === key && proc.identity === identity)
+        ) {
+          throw new NotebookExecutionAdmissionError(
+            'NOTEBOOK_TERMINAL_KERNEL_UNAVAILABLE',
+            'The terminal kernel is no longer running. Execution was not started. Ask the Agent to start the Notebook kernel before retrying.'
+          )
+        }
+      }
+    }
+    const admission = createNotebookExecutionAdmission({
+      policy: () => this.getMemoryPolicy(),
+      signal,
+      executionScope,
+      assertHostCurrent,
+      onRejected: (state) =>
+        this.options.callbacks?.onMemoryPolicyRejected?.(
+          {
+            projectId: resolveProjectId(request, this.options.projectId),
+            sessionId: request.sessionId,
+            workspaceCwd: request.workspaceCwd,
+            source: request.source,
+            inputKind: request.inputKind
+          },
+          state
+        )
+    })
+    const trusted = withNotebookExecutionAdmission(request, admission)
+    await this.sessionLifecycle.runProjectOperation(request, async () => {
+      await admission.prepare('submit')
+      admission.assertCurrent('submit')
+    })
+    return trusted
+  }
   private executionApproval: NotebookExecutionApproval | undefined
   private runtimeBindingApproval: NotebookRuntimeBindingApproval | undefined
   private readonly runtimeBindingPermissionPolicies = new WeakMap<AbortSignal, 'none'>()
@@ -1524,6 +1640,7 @@ class NotebookRuntimeService {
         'Background execution must use the background admission path.'
       )
     }
+    request = await this.admitExecutionRequest(request, signal)
     return this.sessionLifecycle.runProjectOperation(request, async (deletionSignal) => {
       const session = await this.sessionLifecycle.ensure(request)
       // Select the execution route only after an admitted binding transition has committed or
@@ -1559,6 +1676,7 @@ class NotebookRuntimeService {
       )
     }
     assertNotebookCodeWithinLimit(request.code)
+    request = await this.admitExecutionRequest(request, signal)
     const begin = await this.beginCodeCell(request, signal)
 
     await this.appendCodeCell({
@@ -1623,39 +1741,49 @@ class NotebookRuntimeService {
     }
     if (signal?.aborted) throw signal.reason
     assertNotebookCodeWithinLimit(request.code)
-    const begin = await this.beginCodeCell(request)
+    const controller = new AbortController()
+    const cancelBeforeReceipt = (): void => controller.abort(signal?.reason)
+    signal?.addEventListener('abort', cancelBeforeReceipt, { once: true })
     try {
-      await this.appendCodeCell({
-        ...request,
-        writeId: begin.writeId,
-        cellId: begin.cellId,
-        delta: request.code
-      })
-      await this.finishCodeCell({ ...request, writeId: begin.writeId, cellId: begin.cellId })
-      signal?.throwIfAborted()
-      return await this.startBackgroundDataRun(
-        { ...request, cellId: begin.cellId },
-        signal,
-        request.helperModules
-      )
-    } catch (error) {
-      await this.sessionLifecycle
-        .runProjectOperation(request, async () => {
-          const session = await this.sessionLifecycle.ensure(request)
-          if (session.discardUnusedCell(begin.cellId)) this.sessionLifecycle.notifyChanged(session)
+      request = await this.admitExecutionRequest(request, controller.signal)
+      const begin = await this.beginCodeCell(request)
+      try {
+        await this.appendCodeCell({
+          ...request,
+          writeId: begin.writeId,
+          cellId: begin.cellId,
+          delta: request.code
         })
-        .catch(() => undefined)
-      throw error
+        await this.finishCodeCell({ ...request, writeId: begin.writeId, cellId: begin.cellId })
+        signal?.throwIfAborted()
+        return await this.startBackgroundDataRun(
+          { ...request, cellId: begin.cellId },
+          controller,
+          signal,
+          request.helperModules
+        )
+      } catch (error) {
+        await this.sessionLifecycle
+          .runProjectOperation(request, async () => {
+            const session = await this.sessionLifecycle.ensure(request)
+            if (session.discardUnusedCell(begin.cellId))
+              this.sessionLifecycle.notifyChanged(session)
+          })
+          .catch(() => undefined)
+        throw error
+      }
+    } finally {
+      signal?.removeEventListener('abort', cancelBeforeReceipt)
     }
   }
 
   private async startBackgroundDataRun(
     request: RunNotebookCellRequest,
+    controller: AbortController,
     transportSignal?: AbortSignal,
     helperModules?: readonly string[]
   ): Promise<NotebookBackgroundRunReceipt> {
     const createdCellId = request.cellId
-    const controller = new AbortController()
     const cancelBeforeReceipt = (): void => controller.abort(transportSignal?.reason)
     transportSignal?.addEventListener('abort', cancelBeforeReceipt, { once: true })
     let resolveReceipt!: (receipt: NotebookBackgroundRunReceipt) => void
@@ -1963,6 +2091,7 @@ class NotebookRuntimeService {
         'Background execution must use the background admission path.'
       )
     }
+    request = await this.admitExecutionRequest(request, signal)
     return this.sessionLifecycle.runProjectOperation(request, async (deletionSignal) => {
       assertNotebookCodeWithinLimit(request.code)
       const session = await this.sessionLifecycle.ensure(request)
@@ -1996,6 +2125,12 @@ class NotebookRuntimeService {
     const controller = new AbortController()
     const cancelBeforeReceipt = (): void => controller.abort(transportSignal?.reason)
     transportSignal?.addEventListener('abort', cancelBeforeReceipt, { once: true })
+    try {
+      request = await this.admitExecutionRequest(request, controller.signal)
+    } catch (error) {
+      transportSignal?.removeEventListener('abort', cancelBeforeReceipt)
+      throw error
+    }
     let resolveReceipt!: (receipt: NotebookBackgroundRunReceipt) => void
     let rejectReceipt!: (error: unknown) => void
     const receiptPromise = new Promise<NotebookBackgroundRunReceipt>((resolve, reject) => {
@@ -2078,6 +2213,7 @@ class NotebookRuntimeService {
         'Background execution must use the background admission path.'
       )
     }
+    request = await this.admitExecutionRequest(request, signal, this.shellMemoryScope(request))
     return this.sessionLifecycle.runProjectOperation(request, async (deletionSignal) => {
       assertNotebookCodeWithinLimit(request.command)
       const session = await this.sessionLifecycle.ensure(request)
@@ -2104,13 +2240,23 @@ class NotebookRuntimeService {
         'Background execution is disabled.'
       )
     }
-    const backgroundRequest = { ...request, background: true }
-    this.assertManagedShellCommand(backgroundRequest)
+    this.assertManagedShellCommand(request)
     transportSignal?.throwIfAborted()
-    assertNotebookCodeWithinLimit(backgroundRequest.command)
+    assertNotebookCodeWithinLimit(request.command)
     const controller = new AbortController()
     const cancelBeforeReceipt = (): void => controller.abort(transportSignal?.reason)
     transportSignal?.addEventListener('abort', cancelBeforeReceipt, { once: true })
+    try {
+      request = await this.admitExecutionRequest(
+        request,
+        controller.signal,
+        this.shellMemoryScope(request)
+      )
+    } catch (error) {
+      transportSignal?.removeEventListener('abort', cancelBeforeReceipt)
+      throw error
+    }
+    const backgroundRequest = { ...request, background: true }
     let resolveReceipt!: (receipt: NotebookBackgroundRunReceipt) => void
     let rejectReceipt!: (error: unknown) => void
     const receiptPromise = new Promise<NotebookBackgroundRunReceipt>((resolve, reject) => {
@@ -2376,6 +2522,9 @@ class NotebookRuntimeService {
         }
       }
 
+      const admission = this.createExecutionAdmission()
+      await admission.prepare('restart')
+      admission.assertCurrent('restart')
       const session = await this.sessionLifecycle.ensure(request)
 
       if (!target) {
@@ -2955,8 +3104,8 @@ class NotebookRuntimeService {
           throw error
         }
       )
-    const disposal = Promise.allSettled([shutdown, recoveryDisposal, idleDisposal]).then(
-      ([shutdownResult, recoveryResult, idleResult]) => {
+    const disposal = Promise.allSettled([shutdown, recoveryDisposal, idleDisposal])
+      .then(([shutdownResult, recoveryResult, idleResult]) => {
         const failures = [shutdownResult, recoveryResult, idleResult]
           .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
           .map((result) => result.reason)
@@ -2968,8 +3117,11 @@ class NotebookRuntimeService {
           )
         }
         return (shutdownResult as PromiseFulfilledResult<{ reaped: boolean }>).value
-      }
-    )
+      })
+      .finally(async () => {
+        const policy = await this.memoryPolicyPromise?.catch(() => undefined)
+        policy?.dispose?.()
+      })
     this.disposalPromise = disposal
     return disposal
   }
@@ -3036,6 +3188,7 @@ export type {
   NotebookExecutor,
   NotebookExecutorLifecycleCallbacks,
   NotebookHandoffContext,
+  NotebookMemoryRejectionContext,
   NotebookRuntimeServiceCallbacks,
   NotebookRuntimeServiceOptions,
   NotebookShellResult
