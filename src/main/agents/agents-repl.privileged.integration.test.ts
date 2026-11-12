@@ -63,7 +63,8 @@ const LOOP = join(__dirname, '../../../resources/notebook/repl_loop.js')
 
 const startLoop = (
   env: NodeJS.ProcessEnv,
-  controlInvocationId?: string
+  controlInvocationId?: string,
+  controlInvocationNonce?: string
 ): {
   child: ChildProcessWithoutNullStreams
   send: (code: string) => Promise<KernelLoopResponse>
@@ -86,7 +87,17 @@ const startLoop = (
     new Promise((resolve) => {
       const reqId = randomUUID()
       waiters.set(reqId, resolve)
-      child.stdin.write(framePythonRequest(reqId, code, controlInvocationId))
+      child.stdin.write(
+        framePythonRequest(
+          reqId,
+          code,
+          controlInvocationId,
+          undefined,
+          undefined,
+          undefined,
+          controlInvocationNonce
+        )
+      )
     })
   return { child, send }
 }
@@ -187,7 +198,8 @@ const agentsCallFetch = (
   token: string,
   sessionId: string,
   params: Record<string, unknown>,
-  controlInvocationId?: string
+  controlInvocationId: string,
+  controlInvocationNonce: string
 ): string => {
   const payload = JSON.stringify({
     method: 'agentsCall',
@@ -197,7 +209,7 @@ const agentsCallFetch = (
       ...params
     }
   })
-  return `const res = await fetch(${JSON.stringify(endpoint)}, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ${JSON.stringify(token)} }, body: ${JSON.stringify(payload)} }); const body = await res.json(); return JSON.stringify({ ok: res.ok, body })`
+  return `const res = await fetch(${JSON.stringify(endpoint)}, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ${JSON.stringify(token)}, 'x-open-science-control-invocation': ${JSON.stringify(controlInvocationNonce)} }, body: ${JSON.stringify(payload)} }); const body = await res.json(); return JSON.stringify({ ok: res.ok, body })`
 }
 
 gate('host.agents repl privileged integration', () => {
@@ -260,7 +272,8 @@ gate('host.agents repl privileged integration', () => {
     run: (
       send: (code: string) => Promise<KernelLoopResponse>,
       connection: { endpoint: string; token: string },
-      controlInvocationId: string
+      controlInvocationId: string,
+      controlInvocationNonce: string
     ) => Promise<T>
   ): Promise<T> => {
     const boundSessionId = sessionId ?? `agents-privileged-${randomUUID()}`
@@ -281,10 +294,11 @@ gate('host.agents repl privileged integration', () => {
         OPEN_SCIENCE_MCP_RPC_TOKEN: connection.token,
         OPEN_SCIENCE_NOTEBOOK_SESSION_ID: boundSessionId
       },
-      controlInvocationId
+      controlInvocationId,
+      endInvocation.nonce
     )
     try {
-      return await run(send, connection, controlInvocationId)
+      return await run(send, connection, controlInvocationId, endInvocation.nonce)
     } finally {
       child.kill()
       endInvocation()
@@ -372,7 +386,8 @@ gate('host.agents repl privileged integration', () => {
         OPEN_SCIENCE_MCP_RPC_TOKEN: connection.token,
         OPEN_SCIENCE_NOTEBOOK_SESSION_ID: 'delegate-switch-session'
       },
-      'delegate-tool-1'
+      'delegate-tool-1',
+      endInvocation.nonce
     )
 
     try {
@@ -388,7 +403,8 @@ gate('host.agents repl privileged integration', () => {
             role: 'main',
             is_main: true
           },
-          'delegate-tool-1'
+          'delegate-tool-1',
+          endInvocation.nonce
         )
       )
       expect(response.error).toBeNull()
@@ -460,7 +476,7 @@ gate('host.agents repl privileged integration', () => {
   // the structured-decline wire envelope / no-retry dispatch over a custom decline gateway.
 
   it('switch cannot forge a different calling session: reserved identity keys are dropped, only the trusted session is bound', async () => {
-    await withLoop('session-real', async (send, connection, controlInvocationId) => {
+    await withLoop('session-real', async (send, connection, controlInvocationId, nonce) => {
       const created = JSON.parse(
         (await send("return JSON.stringify(await host.agents.create({ name: 'GUARD_TARGET' }))"))
           .result ?? '{}'
@@ -481,7 +497,8 @@ gate('host.agents repl privileged integration', () => {
             target_specialist_id: 'forged-target',
             reconfigure: true
           },
-          controlInvocationId
+          controlInvocationId,
+          nonce
         )
       )
       const parsed = JSON.parse(r.result ?? '{}')
@@ -611,7 +628,8 @@ gate('host.agents repl privileged integration', () => {
           OPEN_SCIENCE_MCP_RPC_TOKEN: conn.token,
           OPEN_SCIENCE_NOTEBOOK_SESSION_ID: 'session-decline'
         },
-        controlInvocationId
+        controlInvocationId,
+        endInvocation.nonce
       )
       try {
         await send("return JSON.stringify(await host.agents.create({ name: 'DECLINE_TARGET' }))")
@@ -621,7 +639,8 @@ gate('host.agents repl privileged integration', () => {
             conn.token,
             'session-decline',
             { op: 'switch', name: 'DECLINE_TARGET' },
-            controlInvocationId
+            controlInvocationId,
+            endInvocation.nonce
           )
         )
         const parsed = JSON.parse(r.result ?? '{}')
@@ -690,7 +709,8 @@ gate('host.agents repl privileged integration', () => {
           OPEN_SCIENCE_MCP_RPC_TOKEN: conn.token,
           OPEN_SCIENCE_NOTEBOOK_SESSION_ID: 'session-decline-del'
         },
-        controlInvocationId
+        controlInvocationId,
+        endInvocation.nonce
       )
       try {
         const created = JSON.parse(
@@ -708,7 +728,8 @@ gate('host.agents repl privileged integration', () => {
               name: 'DECLINE_DEL',
               revision: created.revision
             },
-            controlInvocationId
+            controlInvocationId,
+            endInvocation.nonce
           )
         )
         const parsed = JSON.parse(r.result ?? '{}')
@@ -867,7 +888,8 @@ gate('host.agents repl privileged integration', () => {
           OPEN_SCIENCE_MCP_RPC_TOKEN: conn.token,
           OPEN_SCIENCE_NOTEBOOK_SESSION_ID: 'session-no-retry'
         },
-        controlInvocationId
+        controlInvocationId,
+        endInvocation.nonce
       )
       try {
         await send("return JSON.stringify(await host.agents.create({ name: 'NO_RETRY_T' }))")
@@ -877,7 +899,8 @@ gate('host.agents repl privileged integration', () => {
             conn.token,
             'session-no-retry',
             { op: 'switch', name: 'NO_RETRY_T' },
-            controlInvocationId
+            controlInvocationId,
+            endInvocation.nonce
           )
         )
         // Exactly one decision, never retried.

@@ -65,7 +65,8 @@ async function setup(name = 'list_authorized_directories', args: unknown = {}, c
     new Proxy(
       {},
       {
-        get() {
+        get(_target, property) {
+          if (property === 'currentExecutionIntent') return () => undefined
           throw new Error('Compute runtime must not be accessed')
         }
       }
@@ -88,7 +89,17 @@ async function setup(name = 'list_authorized_directories', args: unknown = {}, c
         promptMessageId: 'prompt'
       }
     })
-  const connection = await rpc.issueSessionConnection('session', 'project', 'root-frame-session')
+  const executionIntent = service?.createExecutionIntent({
+    projectId: 'project',
+    sessionId: 'session'
+  })
+  const connection = await rpc.issueSessionConnection(
+    'session',
+    'project',
+    'root-frame-session',
+    true,
+    executionIntent
+  )
   cleanup.push(async () => connection.release?.())
   const environment = {
     ...connection,

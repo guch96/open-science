@@ -1,3 +1,7 @@
+import {
+  markNotebookExecutionIntent,
+  type NotebookExecutionIntent
+} from '../notebook/execution-intent'
 import { randomUUID } from 'node:crypto'
 import { SessionReproducibilityBatches } from './session-reproducibility'
 import { SessionReproducibilityStore } from './session-reproducibility-store'
@@ -56,9 +60,13 @@ const log = createLogger('artifacts:reproducibility')
 const REPRODUCIBILITY_LOG_LIMIT_CHARACTERS = 128 * 1024
 
 type ArtifactReproducibilityAttemptOwnerDependencies = {
+  prepareExecutionIntent?: (
+    request: ArtifactReproducibilityCheckRequest | SessionReproducibilityCommand
+  ) => NotebookExecutionIntent
   createExecutionAdmission?: (
     request: ArtifactReproducibilityCheckRequest,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    intent?: NotebookExecutionIntent
   ) => NotebookExecutionAdmission
   storageRoot: string
   processSandbox: NotebookProcessSandbox
@@ -90,6 +98,7 @@ type ArtifactReproducibilityAttemptOwnerDependencies = {
 }
 
 type Attempt = {
+  executionIntent?: NotebookExecutionIntent
   memoryAdmissionError?: NotebookExecutionAdmissionError
   ownerId: number
   controller: AbortController
@@ -275,6 +284,8 @@ class ArtifactReproducibilityAttemptOwner {
     )
       throw new Error('Reproducibility checks are shutting down.')
     if (publish) this.batchPublishers.set(ownerId, publish)
+    if (request.action === 'start' && this.dependencies.prepareExecutionIntent)
+      markNotebookExecutionIntent(request, this.dependencies.prepareExecutionIntent(request))
     return this.batches.command(request, ownerId)
   }
 
@@ -324,6 +335,7 @@ class ArtifactReproducibilityAttemptOwner {
     const attemptId = (this.dependencies.createId ?? randomUUID)()
     const startedAt = (this.dependencies.now ?? (() => new Date()))().toISOString()
     const attempt: Attempt = {
+      executionIntent: this.dependencies.prepareExecutionIntent?.(request),
       ownerId,
       controller: new AbortController(),
       recording: false,
@@ -792,7 +804,12 @@ class ArtifactReproducibilityAttemptOwner {
           storageRoot: this.dependencies.storageRoot,
           processSandbox: this.dependencies.processSandbox,
           createExecutionAdmission: this.dependencies.createExecutionAdmission
-            ? (signal) => this.dependencies.createExecutionAdmission!(attempt.state.request, signal)
+            ? (signal) =>
+                this.dependencies.createExecutionAdmission!(
+                  attempt.state.request,
+                  signal,
+                  attempt.executionIntent
+                )
             : undefined,
           onAdmissionRejected: (error) => {
             attempt.memoryAdmissionError = error

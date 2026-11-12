@@ -1,3 +1,4 @@
+import { notebookExecutionIntent, markNotebookExecutionIntent } from '../notebook/execution-intent'
 import { randomUUID } from 'node:crypto'
 import { ReproductionPreflightError } from '@aipoch/reproducibility'
 import { NotebookExecutionAdmissionError } from '../notebook/execution-admission'
@@ -179,6 +180,8 @@ export class SessionReproducibilityBatches {
     } else {
       if (current.state.status !== 'ready')
         throw new Error('Prepare the Session check before starting.')
+      const intent = notebookExecutionIntent(raw)
+      if (intent) for (const target of current.requests) markNotebookExecutionIntent(target, intent)
       current.state.status = 'running'
       const entry = current
       // Include admission publication in the drain barrier: deleting a Session must not race a
@@ -238,7 +241,11 @@ export class SessionReproducibilityBatches {
         target.status = entry.controller.signal.aborted ? 'cancelled' : 'failed'
         if (
           error instanceof NotebookExecutionAdmissionError &&
-          ['NOTEBOOK_MEMORY_PRESSURE', 'NOTEBOOK_MEMORY_UNAVAILABLE'].includes(error.code)
+          [
+            'NOTEBOOK_MEMORY_PRESSURE',
+            'NOTEBOOK_MEMORY_UNAVAILABLE',
+            'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION'
+          ].includes(error.code)
         ) {
           this.stop(entry)
           break

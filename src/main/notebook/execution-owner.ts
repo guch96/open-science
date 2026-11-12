@@ -1,3 +1,4 @@
+import { notebookExecutionIntent, notebookExecutionCredential } from './execution-intent'
 import { createHash } from 'node:crypto'
 import { resourceActivity } from '../resource-diagnostics/activity'
 import { existsSync } from 'node:fs'
@@ -1409,29 +1410,33 @@ class NotebookExecutionOwner {
                 throw new Error('Notebook REPL epoch retired before dispatch.')
               }
               if (mcpRpc) session.retainControlInvocationConnection(runId, mcpRpc)
-              const releaseControlInvocation = mcpRpc?.beginControlInvocation?.({
-                rootExecutionId: request.rootExecutionId,
-                turnId: runId,
-                controlInvocationGeneration,
-                toolInvocationId: runId,
-                executionMode: request.background ? 'background' : 'foreground',
-                ...(request.provenanceContext
-                  ? {
-                      originatingTurnId: request.provenanceContext.promptMessageId,
-                      originatingUserMessageId:
-                        request.provenanceContext.originMessageId ??
-                        request.provenanceContext.promptMessageId
-                    }
-                  : {}),
-                attachmentIds:
-                  request.registeredInputFiles
-                    ?.filter((input) => input.sourceKind === 'upload-version')
-                    .map((input) => input.sourceFileId) ?? [],
-                artifactIds:
-                  request.registeredInputFiles
-                    ?.filter((input) => input.sourceKind === 'artifact-version')
-                    .map((input) => input.sourceFileId) ?? []
-              })
+              const releaseControlInvocation = mcpRpc?.beginControlInvocation?.(
+                {
+                  rootExecutionId: request.rootExecutionId,
+                  turnId: runId,
+                  controlInvocationGeneration,
+                  toolInvocationId: runId,
+                  executionMode: request.background ? 'background' : 'foreground',
+                  ...(request.provenanceContext
+                    ? {
+                        originatingTurnId: request.provenanceContext.promptMessageId,
+                        originatingUserMessageId:
+                          request.provenanceContext.originMessageId ??
+                          request.provenanceContext.promptMessageId
+                      }
+                    : {}),
+                  attachmentIds:
+                    request.registeredInputFiles
+                      ?.filter((input) => input.sourceKind === 'upload-version')
+                      .map((input) => input.sourceFileId) ?? [],
+                  artifactIds:
+                    request.registeredInputFiles
+                      ?.filter((input) => input.sourceKind === 'artifact-version')
+                      .map((input) => input.sourceFileId) ?? []
+                },
+                notebookExecutionIntent(request),
+                notebookExecutionCredential(request)
+              )
               reachedExecutor = true
               return session
                 .execute({
@@ -1457,7 +1462,8 @@ class NotebookExecutionOwner {
                   projectId: session.projectId,
                   workspaceCwd: request.workspaceCwd,
                   inputRunLeaseId: request.inputRunLeaseId,
-                  controlInvocationId: runId
+                  controlInvocationId: runId,
+                  controlInvocationNonce: releaseControlInvocation?.nonce
                 })
                 .finally(() => releaseControlInvocation?.())
             })()

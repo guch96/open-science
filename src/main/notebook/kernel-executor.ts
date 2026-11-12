@@ -2090,7 +2090,8 @@ class NotebookKernelExecutor implements NotebookExecutor {
             request.controlInvocationId,
             protectedDirAdditions,
             request.language === 'python' ? request.pythonRandomState : undefined,
-            replBindings?.publisher
+            replBindings?.publisher,
+            request.controlInvocationNonce
           )
           assertDispatch()
           proc.child.stdin.write(frame)

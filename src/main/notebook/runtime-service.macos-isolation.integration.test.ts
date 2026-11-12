@@ -221,7 +221,9 @@ it
     const connection = await rpc.issueSessionConnection(
       'crashed-A',
       projectId,
-      'root-frame-crashed-A'
+      'root-frame-crashed-A',
+      true,
+      service.createExecutionIntent({ projectId, sessionId: 'crashed-A' })
     )
     rpc.setArtifactTurnBinding('crashed-A', {
       ownerExecutionId: 'recovery-turn',
@@ -688,7 +690,9 @@ it
     const connection = await rpc.issueSessionConnection(
       'session',
       'repl-exit',
-      'root-frame-session'
+      'root-frame-session',
+      true,
+      service.createExecutionIntent({ projectId: 'repl-exit', sessionId: 'session' })
     )
     const mcp = createNotebookMcpServer({
       ...connection,

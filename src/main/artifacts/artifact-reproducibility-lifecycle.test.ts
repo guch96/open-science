@@ -24,6 +24,7 @@ import { CHILD_UNCONFIRMED } from '@aipoch/environment'
 import { ReproducibilityCleanupError } from '@aipoch/reproducibility'
 import { withReproducibilityNotebookLifecycle } from './reproducibility-notebook-lifecycle'
 import { SessionDeletionOwner } from '../session-deletion/owner'
+import { NotebookExecutionIntent } from '../notebook/execution-intent'
 import {
   ArtifactReproducibilityAttemptOwner,
   type ArtifactReproducibilityAttemptOwnerDependencies
@@ -81,6 +82,35 @@ const deferred = (): { promise: Promise<void>; resolve: () => void } => {
 }
 
 describe('reproducibility resource lifecycle', () => {
+  it('retains one originating intent for every step without publishing it in check state', async () => {
+    const intent = new NotebookExecutionIntent({
+      projectId: request.projectId,
+      sessionId: request.appSessionId
+    })
+    const prepareExecutionIntent = vi.fn(() => intent)
+    const createExecutionAdmission = vi.fn<
+      NonNullable<ArtifactReproducibilityAttemptOwnerDependencies['createExecutionAdmission']>
+    >(() => ({
+      prepare: async () => {},
+      assertCurrent: () => {}
+    }))
+    const execute: NonNullable<ArtifactReproducibilityAttemptOwnerDependencies['execute']> = async (
+      input
+    ) => {
+      input.createExecutionAdmission?.(input.signal)
+      input.createExecutionAdmission?.(input.signal)
+      return { matched: true, completedStepIds: [], comparisons: [] }
+    }
+    const owner = createOwner({ prepareExecutionIntent, createExecutionAdmission, execute })
+    const states: ArtifactReproducibilityCheckState[] = []
+    owner.start(request, 1, (state) => states.push(state))
+    await vi.waitFor(() => expect(terminalStates(states)).toHaveLength(1))
+    expect(prepareExecutionIntent).toHaveBeenCalledTimes(1)
+    expect(createExecutionAdmission).toHaveBeenCalledTimes(2)
+    for (const call of createExecutionAdmission.mock.calls) expect(call[2]).toBe(intent)
+    expect(JSON.stringify(states)).not.toContain('executionIntent')
+    expect(JSON.stringify(states)).not.toContain('Notebook host execution intent')
+  })
   it('retains the original isolated cleanup handle in the application scope and retries without replay', async () => {
     let reaped = false
     const treeIdentity = {}

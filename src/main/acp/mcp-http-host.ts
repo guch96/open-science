@@ -77,6 +77,7 @@ type SessionEntry = {
   skills?: SkillRuntimeEnvironment
   artifact?: ArtifactMcpEnvironment
   notebook?: NotebookMcpEnvironment
+  notebookRouteToken?: string
   skillImport?: SkillImportMcpEnvironment
   plan?: PlanMcpEnvironment
   planRouteToken?: string
@@ -213,6 +214,7 @@ class AgentMcpHttpHost {
   registerNotebook(routingId: string, environment: NotebookMcpEnvironment): void {
     const entry = this.sessions.get(routingId) ?? {}
     entry.notebook = environment
+    entry.notebookRouteToken = randomUUID()
     this.sessions.set(routingId, entry)
   }
 
@@ -353,10 +355,11 @@ class AgentMcpHttpHost {
     }
 
     const route = `${this.endpoint}/mcp/${kind}/${encodeURIComponent(routingId)}`
-    if (kind !== 'plan') return route
+    if (kind !== 'plan' && kind !== 'notebook') return route
 
-    const routeToken = this.sessions.get(routingId)?.planRouteToken
-    if (!routeToken) throw new Error(`No registered plan MCP session: ${routingId}`)
+    const entry = this.sessions.get(routingId)
+    const routeToken = kind === 'plan' ? entry?.planRouteToken : entry?.notebookRouteToken
+    if (!routeToken) throw new Error(`No registered ${kind} MCP session: ${routingId}`)
     // `token` is covered by the shared diagnostic URL redactor if this provider config is logged.
     return `${route}?token=${encodeURIComponent(routeToken)}`
   }
@@ -384,7 +387,8 @@ class AgentMcpHttpHost {
     }
 
     if (kind === 'notebook') {
-      if (!entry.notebook) return undefined
+      if (!entry.notebook || !routeToken || routeToken !== entry.notebookRouteToken)
+        return undefined
 
       return createNotebookMcpServer(entry.notebook)
     }
