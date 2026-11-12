@@ -49,6 +49,7 @@ import type {
 import type { AcpSessionToolingAvailability } from './session-presentation-policy'
 import type { AcpSessionRegistry } from './session-registry'
 import type { AcpTurnSkillOwner, TurnSkillHandle } from './turn-skill-owner'
+import { markNotebookExecutionIntent, notebookExecutionIntent } from '../notebook/execution-intent'
 
 const log = createLogger('acp-prompt-turn-workflow')
 
@@ -142,7 +143,11 @@ type AcpPromptTurnEnvironment = Readonly<{
     providerSessionId: string
     cwd: string
     skillRuntimeAllowlist?: readonly string[]
+    request?: AcpPromptRequest
+    signal?: AbortSignal
+    assertCurrent?: () => void
   }) => Promise<void>
+  prepareNotebookIntent?: (request: AcpPromptRequest, mode: AcpPromptTurnMode) => void
 }>
 
 type AcpPromptTurnArtifacts = Readonly<{
@@ -465,6 +470,11 @@ class AcpPromptTurnWorkflow {
         this.options.interactions.updatePromptProvenance(interaction, admittedProvenanceContext)
         admittedRequest = { ...request, provenanceContext: admittedProvenanceContext }
       }
+      this.options.environment.prepareNotebookIntent?.(admittedRequest, mode)
+      // The coordinator retains the original object for automatic Reviewer/settlement work.
+      // Copy only Main-owned symbols, never wire metadata, onto that retained request.
+      const intent = notebookExecutionIntent(admittedRequest)
+      if (intent) markNotebookExecutionIntent(request, intent)
       if (this.options.beginRuntimeSessionTurn) {
         await this.options.beginRuntimeSessionTurn(
           admittedRequest,
@@ -701,6 +711,13 @@ class AcpPromptTurnWorkflow {
               framework,
               providerSessionId: session.sessionId,
               cwd,
+              request,
+              signal: interaction.signal,
+              assertCurrent: () => {
+                interaction.signal.throwIfAborted()
+                if (!this.isCurrent(turn))
+                  throw new Error('ACP prompt interaction is no longer active')
+              },
               ...(readyPrepared.skillRuntimeAllowlist
                 ? { skillRuntimeAllowlist: readyPrepared.skillRuntimeAllowlist }
                 : {})

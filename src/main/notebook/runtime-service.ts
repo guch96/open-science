@@ -469,6 +469,25 @@ class NotebookRuntimeService {
     return this.executionIntents.create(scope)
   }
 
+  currentExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
+    return this.executionIntents.current(scope)
+  }
+
+  rememberExecutionIntent(
+    scope: NotebookExecutionIntentScope,
+    promptId: string,
+    intent: NotebookExecutionIntent
+  ): void {
+    this.executionIntents.remember(scope, promptId, intent)
+  }
+
+  resolveExecutionIntent(
+    scope: NotebookExecutionIntentScope,
+    promptId: string
+  ): NotebookExecutionIntent | undefined {
+    return this.executionIntents.resolve(scope, promptId)
+  }
+
   refusedExecutionIntent(
     scope: NotebookExecutionIntentScope,
     refusalId: string
@@ -528,6 +547,14 @@ class NotebookRuntimeService {
     if (notebookExecutionAdmission(request)) return request
     const intent = notebookExecutionIntent(request)
     intent?.assertExecutable()
+    if (intent)
+      this.executionIntents.register(
+        {
+          projectId: resolveProjectId(request, this.options.projectId),
+          sessionId: request.sessionId
+        },
+        intent
+      )
     // Snapshot the actual host-owned live object before the first await. Historical statuses and
     // caller-provided epochs never authorize an explicit terminal to cold-start a replacement.
     let assertHostCurrent:

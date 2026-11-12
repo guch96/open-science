@@ -228,6 +228,16 @@ type NotebookRuntimeBindingRequest = NotebookSessionRequest & {
 
 type NotebookLocalRpcCapability = {
   createExecutionIntent?(scope: NotebookExecutionIntentScope): NotebookExecutionIntent
+  currentExecutionIntent?(scope: NotebookExecutionIntentScope): NotebookExecutionIntent
+  rememberExecutionIntent?(
+    scope: NotebookExecutionIntentScope,
+    promptId: string,
+    intent: NotebookExecutionIntent
+  ): void
+  resolveExecutionIntent?(
+    scope: NotebookExecutionIntentScope,
+    promptId: string
+  ): NotebookExecutionIntent | undefined
   beginCodeCell(request: BeginNotebookCodeCellRequest, signal?: AbortSignal): Promise<unknown>
   appendCodeCell(request: AppendNotebookCodeCellRequest): Promise<unknown>
   abortCodeCell(request: AbortNotebookCodeCellRequest): Promise<unknown>

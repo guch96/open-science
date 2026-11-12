@@ -420,6 +420,8 @@ class AcpRuntime {
       }
     })
     const prompt = composeAcpRuntimePromptOwners(options, base, session, {
+      refreshNotebookConnection: (input) =>
+        this.providerSessionResumer.refreshNotebookConnection(input),
       onProviderPromptAccepted: (sessionId) => {
         this.restoredContinuationContextResetSessionIds?.delete(sessionId)
       },

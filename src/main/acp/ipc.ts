@@ -12,6 +12,7 @@ import type {
   AcpConnectRequest,
   AcpCreateSessionRequest,
   AcpContinueInterruptedTurnRequest,
+  AcpContinueNotebookExecutionRequest,
   AcpDeleteSessionRequest,
   AcpPromptRequest,
   AcpSteerFollowUpRequest,
@@ -29,6 +30,8 @@ import type { AcpHandlerWorkflows } from './handler-workflows'
 import { bindResumeRequestToProject } from './session-project-binding'
 import { installAgentShutdownGuard } from './shutdown-guard'
 import { withAgentAuthenticationRecovery } from './prompt-error'
+import { withNotebookUserOperation } from '../notebook/execution-intent'
+import { callerContextForEvent, canSatisfyHumanApproval } from '../caller-context'
 
 type AcpIpcSessionAdmission = {
   withSessionAvailableById<Result>(
@@ -120,8 +123,52 @@ const registerAcpIpcHandlerSet = (
       continuation: undefined,
       suppressUserMessage: undefined
     }
-    return stateCommand(workflows.sendPrompt(rendererRequest))
+    return stateCommand(
+      workflows.sendPrompt(
+        withNotebookUserOperation(rendererRequest, {
+          assertCurrent: () => {
+            if (_event.sender?.isDestroyed()) throw new Error('Notebook user operation expired.')
+          }
+        })
+      )
+    )
   })
+  ipcMainHandle(
+    'acp:continue-notebook-execution',
+    (event, input: AcpContinueNotebookExecutionRequest) => {
+      const caller = callerContextForEvent(event)
+      const assertCurrent = (): void => {
+        if (!canSatisfyHumanApproval(caller) || event.sender.isDestroyed())
+          throw new Error('Only a current human caller can continue Notebook execution.')
+      }
+      assertCurrent()
+      const { projectId, refusalId, ...request } = input
+      if (!projectId?.trim() || !refusalId?.trim() || !request.text?.trim())
+        throw new Error('Notebook continuation requires a current refusal and a new user prompt.')
+      const { attribution: _untrustedAttribution, ...rendererRequest } =
+        request as AcpPromptRequest & { attribution?: unknown }
+      void _untrustedAttribution
+      const referencedSessions = sanitizeSessionReferences(request.referencedSessions)
+      const parts = sanitizeMessageParts(request.parts)
+      return stateCommand(
+        workflows.sendPrompt(
+          withNotebookUserOperation(
+            {
+              ...rendererRequest,
+              memoryEnabled: request.memoryEnabled !== false,
+              referencedSessions,
+              parts,
+              permissionPrompts: undefined,
+              turnIntent: undefined,
+              continuation: undefined,
+              suppressUserMessage: undefined
+            },
+            { projectId, refusalId, assertCurrent }
+          )
+        )
+      )
+    }
+  )
   ipcMainHandle('acp:steer-follow-up', (_event, request: AcpSteerFollowUpRequest) =>
     runtime.steerFollowUp({
       sessionId: request.sessionId,

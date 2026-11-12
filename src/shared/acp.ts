@@ -759,6 +759,11 @@ export type AcpSetPermissionProfileRequest = {
   profile: PermissionProfileId
 }
 
+export type AcpContinueNotebookExecutionRequest = AcpPromptRequest & {
+  projectId: string
+  refusalId: string
+}
+
 export type AcpPromptRequest = {
   /** Application-owned execution policy; never grants additional authority. */
   permissionPrompts?: 'none'

@@ -139,6 +139,7 @@ describe('ACP application commands', () => {
       'acp:compact-session',
       'acp:connect',
       'acp:continue-interrupted-turn',
+      'acp:continue-notebook-execution',
       'acp:create-session',
       'acp:delete-session',
       'acp:discard-unavailable-plan',
@@ -302,6 +303,32 @@ describe('ACP application commands', () => {
     expect(dependencies.workflows.continueInterruptedTurn).toHaveBeenCalledTimes(1)
   })
 
+  it('accepts a new Notebook execution prompt only from a current human caller', async () => {
+    const dependencies = createDependencies()
+    const router = createApplicationCommandRouter()
+    registerAcpCommands(router.registrar, dependencies)
+    const request = {
+      projectId: 'project-1',
+      sessionId: 'session-1',
+      refusalId: 'refusal',
+      text: 'Continue execution after checking memory.'
+    }
+    await expect(
+      router.dispatcher.invoke(
+        acpCommands.continueNotebookExecution,
+        invocation([request], createTaskCallerContext())
+      )
+    ).rejects.toThrow('Only a current human caller')
+    expect(dependencies.workflows.sendPrompt).not.toHaveBeenCalled()
+    await expect(
+      router.dispatcher.invoke(
+        acpCommands.continueNotebookExecution,
+        invocation([request], createWebCallerContext('local-web'))
+      )
+    ).resolves.toEqual(commandResponse)
+    expect(dependencies.workflows.sendPrompt).toHaveBeenCalledOnce()
+  })
+
   it.each([
     createElectronCallerContext(7),
     createWebCallerContext('local-web'),
@@ -342,11 +369,13 @@ describe('ACP application commands', () => {
 
     await router.dispatcher.invoke(acpCommands.sendPrompt, invocation([request]))
 
-    expect(dependencies.workflows.sendPrompt).toHaveBeenCalledWith({
-      ...request,
-      continuation: undefined,
-      suppressUserMessage: undefined
-    })
+    expect(dependencies.workflows.sendPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ...request,
+        continuation: undefined,
+        suppressUserMessage: undefined
+      })
+    )
     expect(request.continuation.originatingTurnToken).toBe('renderer-forged-turn')
   })
 

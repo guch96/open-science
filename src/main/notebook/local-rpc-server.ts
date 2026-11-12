@@ -127,7 +127,11 @@ import {
   type NotebookLocalRpcCapability
 } from './local-rpc-notebook-adapter'
 import type { NotebookRpcConnection } from './mcp-server'
-import { withNotebookExecutionIntent, NotebookExecutionIntent } from './execution-intent'
+import {
+  withNotebookExecutionIntent,
+  NotebookExecutionIntent,
+  type NotebookExecutionIntentScope
+} from './execution-intent'
 
 const log = createLogger('notebook:local-rpc')
 const MAX_COMPLETED_COMPUTE_SUBMISSIONS_PER_SESSION = 100
@@ -1431,6 +1435,25 @@ class NotebookLocalRpcServer {
     return Array.isArray(requestOrRequests) ? canonicalized : canonicalized[0]
   }
 
+  createExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
+    return this.service.createExecutionIntent?.(scope) ?? new NotebookExecutionIntent(scope)
+  }
+
+  rememberExecutionIntent(
+    scope: NotebookExecutionIntentScope,
+    promptId: string,
+    intent: NotebookExecutionIntent
+  ): void {
+    this.service.rememberExecutionIntent?.(scope, promptId, intent)
+  }
+
+  resolveExecutionIntent(
+    scope: NotebookExecutionIntentScope,
+    promptId: string
+  ): NotebookExecutionIntent | undefined {
+    return this.service.resolveExecutionIntent?.(scope, promptId)
+  }
+
   async issueSessionConnection(
     sessionId: string,
     projectId: string,
@@ -1454,30 +1477,34 @@ class NotebookLocalRpcServer {
         ? `root-frame-${resolvedSessionId}`
         : agentFrameId
     this.sessionRpcTokens.set(sessionId, token)
+    const intent =
+      executionIntent ??
+      this.service.currentExecutionIntent?.({ projectId, sessionId: resolvedSessionId }) ??
+      new NotebookExecutionIntent({ projectId, sessionId: resolvedSessionId })
     this.sessionRpcCapabilities.set(token, {
       sessionId: resolvedSessionId,
       projectId,
       agentFrameId: resolvedAgentFrameId,
       memoryTools,
-      executionIntent:
-        executionIntent ??
-        this.service.createExecutionIntent?.({ projectId, sessionId: resolvedSessionId }) ??
-        new NotebookExecutionIntent({ projectId, sessionId: resolvedSessionId }),
+      executionIntent: intent,
       delegatedWorkRole: 'main'
     })
-    return {
-      endpoint: connection.endpoint,
-      socketPath: connection.socketPath,
-      token,
-      release: () => {
-        // A stale startup may release after a same-ID successor has rotated the current token. Revoke
-        // only this concrete capability and clear the owner projection only while it still points here.
-        if (this.sessionRpcTokens.get(sessionId) === token) {
-          this.sessionRpcTokens.delete(sessionId)
+    return withNotebookExecutionIntent(
+      {
+        endpoint: connection.endpoint,
+        socketPath: connection.socketPath,
+        token,
+        release: () => {
+          // A stale startup may release after a same-ID successor has rotated the current token. Revoke
+          // only this concrete capability and clear the owner projection only while it still points here.
+          if (this.sessionRpcTokens.get(sessionId) === token) {
+            this.sessionRpcTokens.delete(sessionId)
+          }
+          this.revokeSessionCapability(token)
         }
-        this.revokeSessionCapability(token)
-      }
-    }
+      },
+      intent
+    )
   }
 
   // Provisions one fail-closed child capability. The caller supplies the durable Attempt check;

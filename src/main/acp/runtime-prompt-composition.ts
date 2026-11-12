@@ -17,6 +17,14 @@ import {
 import type { AcpRuntimeBaseOwners } from './runtime-base-composition'
 import type { AcpRuntimeOptions } from './runtime-contract'
 import type { AcpRuntimeSessionOwners } from './runtime-session-composition'
+import {
+  NotebookExecutionIntent,
+  markNotebookExecutionIntent,
+  notebookExecutionIntent,
+  notebookUserOperation
+} from '../notebook/execution-intent'
+import type { AcpProviderSessionResumer } from './provider-session-resumer'
+import { shellRuntimeAgentContract } from '../notebook/shell-runtime'
 
 type AcpRuntimePromptReloadHost = Readonly<{
   prepareContinuationReplay: AcpPromptTurnWorkflowOptions['prepareContinuationReplay']
@@ -25,6 +33,7 @@ type AcpRuntimePromptReloadHost = Readonly<{
 }>
 
 type AcpRuntimePromptHost = Readonly<{
+  refreshNotebookConnection?: AcpProviderSessionResumer['refreshNotebookConnection']
   plan: AcpPromptTurnPlanWorkflow
   reload: AcpRuntimePromptReloadHost
   onPromptEnded?: (sessionId: string, turnToken: string) => void
@@ -223,8 +232,51 @@ const composeAcpRuntimePromptOwners = (
     providerSessionId: string
     cwd: string
     skillRuntimeAllowlist?: readonly string[]
+    request?: AcpPromptRequest
+    signal?: AbortSignal
+    assertCurrent?: () => void
   }): Promise<void> => {
     session.sessionUpdateProjector.clearAssistantOutput(input.appSessionId)
+    const intent = input.request && notebookExecutionIntent(input.request)
+    if (
+      intent &&
+      intent !== base.sessionCapabilities.notebookExecutionIntentFor(input.appSessionId)
+    ) {
+      const refresh = await base.sessionCapabilities.prepareNotebookConnectionRefresh({
+        appSessionId: input.appSessionId,
+        projectId: projectId(input.appSessionId),
+        cwd: input.cwd,
+        executionIntent: intent
+      })
+      try {
+        const assertCurrent = (): void => {
+          input.signal?.throwIfAborted()
+          input.assertCurrent?.()
+          if (input.request) notebookUserOperation(input.request)?.assertCurrent()
+        }
+        assertCurrent()
+        if (!host.refreshNotebookConnection)
+          throw new Error('Notebook provider refresh is unavailable.')
+        const shellRuntime = base.sessionCapabilities.shellRuntimeBindingFor(input.appSessionId)
+        await host.refreshNotebookConnection({
+          sessionId: input.appSessionId,
+          cwd: input.cwd,
+          mcpServers: refresh.mcpServers,
+          skillRuntimeAllowlist: input.skillRuntimeAllowlist,
+          ...(shellRuntime
+            ? { shellRuntimeAgentContract: shellRuntimeAgentContract(shellRuntime) }
+            : {}),
+          signal: input.signal,
+          assertCurrent
+        })
+        assertCurrent()
+        refresh.commit()
+      } catch (error) {
+        refresh.release()
+        throw error
+      }
+      return
+    }
     if (!input.framework.beforePromptDispatch) return
     const connection = base.connectionResources.connection
     if (!connection) throw new Error('ACP connection is not available.')
@@ -377,7 +429,51 @@ const composeAcpRuntimePromptOwners = (
           ...(attribution ? { attribution } : {}),
           text
         }),
-      beforePromptDispatch: beforeFrameworkPromptDispatch
+      beforePromptDispatch: beforeFrameworkPromptDispatch,
+      prepareNotebookIntent: (request, mode) => {
+        const notebook = options.notebook
+        if (!notebook?.createExecutionIntent) return
+        const scope = { projectId: projectId(request.sessionId), sessionId: request.sessionId }
+        const current = base.sessionCapabilities.notebookExecutionIntentFor(request.sessionId)
+        const operation = notebookUserOperation(request)
+        let intent = notebookExecutionIntent(request)
+        const humanTurn =
+          mode.kind === 'user' &&
+          mode.runtimeReviewOwner !== 'task' &&
+          !request.continuation &&
+          !request.suppressUserMessage
+        if (humanTurn && operation) {
+          operation.assertCurrent()
+          if (operation.projectId && operation.projectId !== scope.projectId)
+            throw new Error('Notebook continuation does not belong to this Project.')
+          if (operation.refusalId && current?.refusalId !== operation.refusalId)
+            throw new Error('The Notebook refusal changed. Refresh it before continuing execution.')
+          // Ordinary chat may explain a refusal; only the purpose-owned human command creates
+          // another executable context after rejection.
+          intent =
+            current?.refusalId && !operation.refusalId
+              ? current
+              : notebook.createExecutionIntent(scope)
+        } else if (!intent) {
+          const origin =
+            request.provenanceContext?.originMessageId ?? request.provenanceContext?.promptMessageId
+          intent = origin ? notebook.resolveExecutionIntent?.(scope, origin) : undefined
+          if (
+            !intent &&
+            mode.kind === 'user' &&
+            !request.continuation &&
+            !request.suppressUserMessage
+          )
+            intent = current
+        }
+        if (!intent) {
+          intent = new NotebookExecutionIntent(scope)
+          intent.block('originating-execution-context-unavailable')
+        }
+        markNotebookExecutionIntent(request, intent)
+        const promptId = request.provenanceContext?.promptMessageId
+        if (promptId) notebook.rememberExecutionIntent?.(scope, promptId, intent)
+      }
     },
     artifacts: {
       open: openArtifact,

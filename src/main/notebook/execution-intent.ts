@@ -38,9 +38,31 @@ export const withNotebookExecutionIntent = <T extends object>(
 export const notebookExecutionIntent = (request: object): NotebookExecutionIntent | undefined =>
   (request as { [intentKey]?: NotebookExecutionIntent })[intentKey]
 
+export const markNotebookExecutionIntent = (
+  request: object,
+  intent: NotebookExecutionIntent
+): void => {
+  Object.assign(request, { [intentKey]: intent })
+}
+
+type NotebookUserOperation = Readonly<{
+  refusalId?: string
+  projectId?: string
+  assertCurrent(): void
+}>
+const userOperationKey = Symbol('Trusted Notebook user operation')
+export const withNotebookUserOperation = <T extends object>(
+  request: T,
+  operation: NotebookUserOperation
+): T => Object.assign({}, request, { [userOperationKey]: operation })
+export const notebookUserOperation = (request: object): NotebookUserOperation | undefined =>
+  (request as { [userOperationKey]?: NotebookUserOperation })[userOperationKey]
+
 // Active credentials/Attempts keep their authority alive. Completed turns need no durable ledger.
 export class NotebookExecutionIntentOwner {
   private readonly scopes = new Map<string, Set<WeakRef<NotebookExecutionIntent>>>()
+  private readonly currentIntents = new Map<string, NotebookExecutionIntent>()
+  private readonly origins = new Map<string, WeakRef<NotebookExecutionIntent>>()
 
   private live(scope: NotebookExecutionIntentScope): Set<WeakRef<NotebookExecutionIntent>> {
     const key = JSON.stringify([scope.projectId, scope.sessionId])
@@ -52,8 +74,42 @@ export class NotebookExecutionIntentOwner {
 
   create(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
     const intent = new NotebookExecutionIntent(Object.freeze({ ...scope }))
-    this.live(scope).add(new WeakRef(intent))
+    this.register(scope, intent)
+    this.currentIntents.set(JSON.stringify([scope.projectId, scope.sessionId]), intent)
     return intent
+  }
+
+  current(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
+    return (
+      this.currentIntents.get(JSON.stringify([scope.projectId, scope.sessionId])) ??
+      this.create(scope)
+    )
+  }
+
+  register(scope: NotebookExecutionIntentScope, intent: NotebookExecutionIntent): void {
+    const refs = this.live(scope)
+    if (![...refs].some((ref) => ref.deref() === intent)) refs.add(new WeakRef(intent))
+  }
+
+  remember(
+    scope: NotebookExecutionIntentScope,
+    promptMessageId: string,
+    intent: NotebookExecutionIntent
+  ): void {
+    this.register(scope, intent)
+    this.origins.set(
+      JSON.stringify([scope.projectId, scope.sessionId, promptMessageId]),
+      new WeakRef(intent)
+    )
+  }
+
+  resolve(
+    scope: NotebookExecutionIntentScope,
+    promptMessageId: string
+  ): NotebookExecutionIntent | undefined {
+    return this.origins
+      .get(JSON.stringify([scope.projectId, scope.sessionId, promptMessageId]))
+      ?.deref()
   }
 
   refused(

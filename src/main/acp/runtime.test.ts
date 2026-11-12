@@ -124,6 +124,12 @@ import type { PermissionGrantRegistry } from '../permission-grants/registry'
 import { createProjectDbClient, migrateApplicationDatabase } from '../projects/prisma-client'
 import { NotebookLocalRpcServer } from '../notebook/local-rpc-server'
 import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
+import {
+  notebookExecutionIntent,
+  withNotebookUserOperation,
+  withNotebookExecutionIntent
+} from '../notebook/execution-intent'
+import { fetchLocalRpc } from '../local-rpc-transport'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
 import { NotebookRunRepository } from '../notebook/repository'
 import {
@@ -33513,6 +33519,156 @@ it('connects the optional built-in harness through the host runtime and releases
     process.stderr.destroy()
     http.closeAllConnections()
     await new Promise<void>((resolve) => http.close(() => resolve()))
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('pins each trusted Notebook user intent before provider dispatch and keeps rejected automatic work blocked', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'acp-notebook-intent-'))
+  const child = new FakeAgentProcess()
+  const agent = startFakeAgent(child, ['notebook-provider-session'], { supportsResume: true })
+  let pressured = false
+  let refusalId: string | undefined
+  const healthy = healthyNotebookMemoryPolicy()
+  const service = new NotebookRuntimeService({
+    configRoot: root,
+    dataRoot: root,
+    projectId: 'project',
+    memoryPolicy: {
+      getState: async () =>
+        pressured
+          ? {
+              status: 'pressured',
+              source: 'test',
+              executionScope: 'test:host',
+              reason: { code: 'low-memory' }
+            }
+          : healthy.getState(),
+      currentState: () =>
+        pressured
+          ? {
+              status: 'pressured',
+              source: 'test',
+              executionScope: 'test:host',
+              reason: { code: 'low-memory' }
+            }
+          : healthy.currentState()
+    },
+    callbacks: {
+      onMemoryPolicyRejected: (context) => {
+        refusalId = context.refusalId
+      }
+    }
+  })
+  const rpc = new NotebookLocalRpcServer(service, { transport: 'tcp' })
+  let current: Awaited<ReturnType<typeof rpc.issueSessionConnection>> | undefined
+  const runtime = new AcpRuntime({
+    appVersion: 'test',
+    defaultCwd: root,
+    resolveBackend: () => ({
+      framework: { ...claudeCodeFramework, spawn: () => asAgentProcess(child) },
+      executablePath: '/agent',
+      env: {}
+    }),
+    notebook: {
+      projectId: 'project',
+      mcpEntryPath: '/app/main.js',
+      createExecutionIntent: (scope) => service.createExecutionIntent(scope),
+      rememberExecutionIntent: (scope, promptId, intent) =>
+        service.rememberExecutionIntent(scope, promptId, intent),
+      resolveExecutionIntent: (scope, promptId) => service.resolveExecutionIntent(scope, promptId),
+      getRpcConnection: async ({ sessionId, projectId, memoryTools, executionIntent }) => {
+        current = await rpc.issueSessionConnection(
+          sessionId,
+          projectId,
+          `root-frame-${sessionId}`,
+          memoryTools,
+          executionIntent
+        )
+        return current
+      }
+    }
+  })
+  const assertCurrent = (): void => undefined
+  try {
+    const session = await runtime.createSession({ cwd: root, projectId: 'project' })
+    const first = withNotebookUserOperation(
+      {
+        sessionId: session.sessionId,
+        text: 'Analyze the data.',
+        provenanceContext: { promptMessageId: 'user-one' }
+      },
+      { assertCurrent }
+    )
+    await runtime.sendPrompt(first)
+    expect(agent.resumedSessions).toHaveLength(1)
+    const old = current!
+    const run = async (connection: typeof old): Promise<string> => {
+      const response = await fetchLocalRpc(
+        connection,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${connection.token}`,
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({
+            method: 'executeControl',
+            params: { sessionId: session.sessionId, workspaceCwd: root, code: '1' }
+          })
+        },
+        'ACP Notebook user intent test'
+      )
+      return response.text()
+    }
+    pressured = true
+    expect(await run(old)).toContain('NOTEBOOK_MEMORY_PRESSURE')
+    pressured = false
+    await runtime.sendPrompt(
+      withNotebookUserOperation(
+        {
+          sessionId: session.sessionId,
+          text: 'Explain the refusal.',
+          provenanceContext: { promptMessageId: 'user-chat' }
+        },
+        { assertCurrent }
+      )
+    )
+    expect(agent.resumedSessions).toHaveLength(1)
+    expect(await run(current!)).toContain('NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION')
+    await runtime.sendPrompt(
+      withNotebookUserOperation(
+        {
+          sessionId: session.sessionId,
+          text: 'Continue execution after checking memory.',
+          provenanceContext: { promptMessageId: 'user-two' }
+        },
+        { projectId: 'project', refusalId, assertCurrent }
+      )
+    )
+    expect(agent.resumedSessions).toHaveLength(2)
+    expect(await run(old)).toContain('Invalid notebook RPC token')
+    const oldIntent = notebookExecutionIntent(first)!
+    await runtime.sendApplicationPrompt(
+      withNotebookExecutionIntent(
+        {
+          sessionId: session.sessionId,
+          text: 'Automatic correction.',
+          provenanceContext: { promptMessageId: 'correction', originMessageId: 'user-one' }
+        },
+        oldIntent
+      ),
+      { kind: 'application', feature: 'reviewer', purpose: 'correction', causeReviewId: 'review' }
+    )
+    expect(await run(current!)).toContain('NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION')
+    expect(agent.newSessions).toHaveLength(1)
+  } finally {
+    await runtime.shutdownForQuit()
+    await rpc.close()
+    await service.dispose()
+    child.stdin.destroy()
+    child.stdout.destroy()
+    child.stderr.destroy()
     await rm(root, { recursive: true, force: true })
   }
 })

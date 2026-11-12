@@ -4,6 +4,7 @@ import { harnessFramework } from '../agent-framework/harness'
 import { createSkillRuntimeAcpServerConfig } from '../skills/runtime-mcp-server'
 
 import type { ShellRuntimeBinding } from '../../shared/notebook'
+import { NotebookExecutionIntent } from '../notebook/execution-intent'
 import {
   claudeCodeFramework,
   codeBuddyFramework,
@@ -41,6 +42,50 @@ const createOwner = (
   })
 
 describe('ACP session capability owner', () => {
+  it('refreshes only Notebook credentials while preserving other capabilities and the namespace', async () => {
+    let sequence = 0
+    const notebook = {
+      projectId: 'project',
+      mcpEntryPath: '/app/main.js',
+      getRpcConnection: vi.fn(async () => ({
+        endpoint: 'http://127.0.0.1:1',
+        token: `notebook-${++sequence}`
+      }))
+    }
+    const owner = createOwner({ notebook })
+    const provision = await owner.provision({
+      stableAppSessionId: 'session',
+      sessionCwd: '/workspace',
+      projectId: 'project',
+      framework: claudeCodeFramework,
+      nativeMcpEnabled: true,
+      bridgeMcpAliasesEnabled: false,
+      policy: CURRENT_PRIMARY_SESSION_CAPABILITY_POLICY
+    })
+    provision.commit('session')
+    const before = owner.mcpServersFor('session')
+    const intent = new NotebookExecutionIntent({ projectId: 'project', sessionId: 'session' })
+    const refresh = await owner.prepareNotebookConnectionRefresh({
+      appSessionId: 'session',
+      projectId: 'project',
+      cwd: '/workspace',
+      executionIntent: intent
+    })
+    const retained = before.filter(({ name }) => !name.includes('notebook'))
+    expect(retained.length).toBeGreaterThan(0)
+    for (const server of retained)
+      expect(refresh.mcpServers.find(({ name }) => name === server.name)).toBe(server)
+    expect(JSON.stringify(refresh.mcpServers)).toContain('notebook-2')
+    expect(notebook.getRpcConnection).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionId: 'session',
+        executionIntent: intent
+      })
+    )
+    refresh.commit()
+    expect(owner.mcpServersFor('session')).toEqual(refresh.mcpServers)
+    expect(owner.notebookExecutionIntentFor('session')).toBe(intent)
+  })
   it('releases provisional and committed HTTP Skill loaders without revoking a successor', async () => {
     const releases: ReturnType<typeof vi.fn>[] = []
     const host = {

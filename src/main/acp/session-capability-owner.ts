@@ -56,6 +56,7 @@ import {
 } from '../notebook/shell-runtime'
 import { createCodexBridgeMcpTools, namespaceFor } from '../settings/codex-bridge-tools'
 import type { ResponsesNamespacedTool } from '@aipoch/providers/protocol'
+import { notebookExecutionIntent, type NotebookExecutionIntent } from '../notebook/execution-intent'
 
 const log = createLogger('acp')
 
@@ -161,6 +162,7 @@ export type SessionCapabilityNotebookOptions = {
     sessionId: string
     projectId: string
     memoryTools: boolean
+    executionIntent?: NotebookExecutionIntent
   }) => Promise<NotebookRpcConnection>
   registerSessionAlias?: (aliasSessionId: string, sessionId: string) => void
   releaseSessionCapabilities?: (sessionId: string, capabilityTokens: readonly string[]) => void
@@ -262,6 +264,8 @@ type CommitSessionCapabilitiesRequest = {
   descriptor: EffectiveSessionCapabilityDescriptor
   shellRuntime?: ShellRuntimeBinding
   notebookRelease?: () => void
+  notebookIntent?: NotebookExecutionIntent
+  notebookToken?: string
   skillImportRelease?: () => void
   planRelease?: () => void
   capabilityTokens: readonly string[]
@@ -351,6 +355,8 @@ export class AcpSessionCapabilityOwner {
   private readonly artifactRoutingIds = new Map<string, string>()
   private readonly notebookRoutingIds = new Map<string, string>()
   private readonly notebookCapabilityReleases = new Map<string, () => void>()
+  private readonly notebookIntents = new Map<string, NotebookExecutionIntent>()
+  private readonly notebookTokens = new Map<string, string>()
   private readonly skillImportRoutingIds = new Map<string, string>()
   private readonly skillImportCapabilityReleases = new Map<string, () => void>()
   private readonly planRoutingIds = new Map<string, string>()
@@ -397,6 +403,8 @@ export class AcpSessionCapabilityOwner {
     const provisionGeneration = this.provisionalGeneration
     let ownedSkillServer: McpServer | undefined
     let notebookRelease: (() => void) | undefined
+    let notebookIntent: NotebookExecutionIntent | undefined
+    let notebookToken: string | undefined
     let skillImportRelease: (() => void) | undefined
     let planRelease: (() => void) | undefined
     let preparePlanHttpRouteRollback: (() => (() => void) | undefined) | undefined
@@ -420,6 +428,8 @@ export class AcpSessionCapabilityOwner {
         onNotebookConnection: (connection) => {
           capabilityTokens.push(connection.token)
           notebookRelease = connection.release
+          notebookIntent = notebookExecutionIntent(connection)
+          notebookToken = connection.token
         },
         onSkillImportConnection: (connection) => {
           capabilityTokens.push(connection.token)
@@ -680,6 +690,8 @@ export class AcpSessionCapabilityOwner {
           descriptor: built.descriptor,
           shellRuntime: built.shellRuntime,
           notebookRelease,
+          notebookIntent,
+          notebookToken,
           skillImportRelease,
           planRelease
         })
@@ -1079,6 +1091,8 @@ export class AcpSessionCapabilityOwner {
         appSessionId,
         this.options.notebook?.registerSessionAlias
       )
+      if (request.notebookIntent) this.notebookIntents.set(appSessionId, request.notebookIntent)
+      if (request.notebookToken) this.notebookTokens.set(appSessionId, request.notebookToken)
     }
     if (routingIds.skillImport && this.skillImportEnabled) {
       this.skillImportRoutingIds.set(appSessionId, routingIds.skillImport)
@@ -1227,6 +1241,8 @@ export class AcpSessionCapabilityOwner {
 
     this.artifactRoutingIds.delete(appSessionId)
     this.notebookRoutingIds.delete(appSessionId)
+    this.notebookIntents.delete(appSessionId)
+    this.notebookTokens.delete(appSessionId)
     this.skillImportRoutingIds.delete(appSessionId)
     this.planRoutingIds.delete(appSessionId)
     this.sideChatRoutingIds.delete(appSessionId)
@@ -1287,6 +1303,8 @@ export class AcpSessionCapabilityOwner {
     this.sessionCapabilityTokens.clear()
     this.artifactRoutingIds.clear()
     this.notebookRoutingIds.clear()
+    this.notebookIntents.clear()
+    this.notebookTokens.clear()
     this.skillImportRoutingIds.clear()
     this.planRoutingIds.clear()
     this.sideChatRoutingIds.clear()
@@ -1375,6 +1393,95 @@ export class AcpSessionCapabilityOwner {
 
   mcpServersFor(appSessionId: string): readonly McpServer[] {
     return this.mcpServers.get(appSessionId) ?? []
+  }
+
+  notebookExecutionIntentFor(appSessionId: string): NotebookExecutionIntent | undefined {
+    return this.notebookIntents.get(appSessionId)
+  }
+
+  async prepareNotebookConnectionRefresh(request: {
+    appSessionId: string
+    projectId: string
+    cwd: string
+    executionIntent: NotebookExecutionIntent
+  }): Promise<{ mcpServers: readonly McpServer[]; commit(): void; release(): void }> {
+    const { appSessionId, projectId, cwd, executionIntent } = request
+    const previous = this.mcpServersFor(appSessionId)
+    const old = previous.find(
+      (server) => canonicalAppMcpServerName(server.name) === NOTEBOOK_MCP_SERVER_NAME
+    )
+    const routingId = this.notebookRoutingIds.get(appSessionId)
+    const notebook = this.options.notebook
+    if (!old || !routingId || !notebook) throw new Error('Notebook capability is unavailable.')
+    let connection: NotebookRpcConnection | undefined
+    const environment = await this.buildNotebookEnvironment(
+      routingId,
+      cwd,
+      projectId,
+      notebook.memoryTools ?? true,
+      this.shellRuntimeBindings.get(appSessionId) ?? defaultShellRuntimeBinding(),
+      (value) => {
+        connection = value
+      },
+      (await this.options.wslSetupSessions?.isBound(appSessionId)) === true,
+      executionIntent
+    )
+    if (!environment || !connection) throw new Error('Notebook capability is unavailable.')
+    const ownedConnection = connection
+    let replacement: McpServer
+    if ('command' in old) {
+      replacement = {
+        ...createNotebookMcpServerConfig({
+          command: notebook.mcpCommand ?? process.execPath,
+          entryPath: notebook.mcpEntryPath,
+          memoryTools: notebook.memoryTools ?? true,
+          ...environment
+        }),
+        name: old.name
+      }
+    } else {
+      const host = this.options.mcpHttpHost
+      if (!host) {
+        ownedConnection.release?.()
+        throw new Error('Notebook HTTP host is unavailable.')
+      }
+      const { token } = await host.ensureStarted()
+      host.registerNotebook(routingId, environment)
+      replacement = {
+        type: 'http',
+        name: old.name,
+        url: host.urlFor('notebook', routingId),
+        headers: [{ name: 'authorization', value: `Bearer ${token}` }]
+      }
+    }
+    const mcpServers = Object.freeze(
+      previous.map((server) => (server === old ? replacement : server))
+    )
+    let finalized = false
+    return {
+      mcpServers,
+      commit: () => {
+        if (finalized) throw new Error('Notebook capability refresh is already finalized.')
+        if (this.mcpServers.get(appSessionId) !== previous)
+          throw new Error('Notebook capability refresh was superseded.')
+        const oldToken = this.notebookTokens.get(appSessionId)
+        const tokens = this.sessionCapabilityTokens.get(appSessionId) ?? []
+        this.sessionCapabilityTokens.set(appSessionId, [
+          ...tokens.filter((token) => token !== oldToken),
+          ownedConnection.token
+        ])
+        this.notebookTokens.set(appSessionId, ownedConnection.token)
+        this.notebookIntents.set(appSessionId, executionIntent)
+        this.mcpServers.set(appSessionId, mcpServers)
+        this.commitNotebookRelease(appSessionId, ownedConnection.release)
+        finalized = true
+      },
+      release: () => {
+        if (finalized) return
+        finalized = true
+        ownedConnection.release?.()
+      }
+    }
   }
 
   enableLiterature(appSessionId: string): boolean {
@@ -1473,7 +1580,8 @@ export class AcpSessionCapabilityOwner {
     memoryTools: boolean,
     shellRuntime: ShellRuntimeBinding,
     onConnection?: (connection: NotebookRpcConnection) => void,
-    wslSetupEnabled = false
+    wslSetupEnabled = false,
+    executionIntent?: NotebookExecutionIntent
   ): Promise<NotebookMcpEnvironment | undefined> {
     if (!this.options.notebook || !routingId) return undefined
     if (!this.options.notebook.getRpcConnection) {
@@ -1482,7 +1590,8 @@ export class AcpSessionCapabilityOwner {
     const connection = await this.options.notebook.getRpcConnection({
       sessionId: routingId,
       projectId: projectId,
-      memoryTools
+      memoryTools,
+      ...(executionIntent ? { executionIntent } : {})
     })
     onConnection?.(connection)
     return {

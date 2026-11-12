@@ -805,6 +805,17 @@ const createAcpRuntime = ({
             }
           : undefined,
         notebook: {
+          ...(!delegatedNotebookConnection
+            ? {
+                createExecutionIntent: (
+                  scope: import('../notebook/execution-intent').NotebookExecutionIntentScope
+                ) => notebookRpcServer.createExecutionIntent(scope)
+              }
+            : {}),
+          rememberExecutionIntent: (scope, promptId, intent) =>
+            notebookRpcServer.rememberExecutionIntent(scope, promptId, intent),
+          resolveExecutionIntent: (scope, promptId) =>
+            notebookRpcServer.resolveExecutionIntent(scope, promptId),
           canOwnRuntimeBindingDecision: async (request) => {
             const trustedRequest = notebookRpcServer.runtimeBindingAdmissionRequest(
               request,
@@ -824,14 +835,15 @@ const createAcpRuntime = ({
           memoryTools: !delegatedNotebookConnection,
           isMemoryEnabled: () => memory?.isEnabled?.() ?? Promise.resolve(false),
           getShellRuntimeBinding,
-          getRpcConnection: ({ sessionId, projectId, memoryTools }) =>
+          getRpcConnection: ({ sessionId, projectId, memoryTools, executionIntent }) =>
             delegatedNotebookConnection
               ? Promise.resolve(delegatedNotebookConnection)
               : notebookRpcServer.issueSessionConnection(
                   sessionId,
                   projectId,
                   `root-frame-${sessionId}`,
-                  memoryTools
+                  memoryTools,
+                  executionIntent
                 ),
           ...(delegatedNotebookConnection
             ? {}
