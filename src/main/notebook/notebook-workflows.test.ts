@@ -6,6 +6,7 @@ import type {
   NotebookRunSummary,
   NotebookSessionReference
 } from '../../shared/notebook'
+import type { NotebookResourceRelease } from '../../shared/notebook-resources'
 import {
   acceptMissingDataRoot,
   beginMigration,
@@ -25,6 +26,12 @@ const unavailable = (operation: string): (() => Promise<never>) =>
 const createRuntime = (
   overrides: Partial<NotebookCommandRuntime> = {}
 ): NotebookCommandRuntime => ({
+  getProjectResources: unavailable('getProjectResources'),
+  releaseSessionResources: unavailable('releaseSessionResources'),
+  getResourceRelease: vi.fn(() => {
+    throw new Error('Unexpected getResourceRelease call')
+  }),
+  retryResourceRelease: unavailable('retryResourceRelease'),
   runIndex: unavailable('runIndex'),
   state: unavailable('state'),
   getMemoryPolicyState: unavailable('getMemoryPolicyState'),
@@ -66,6 +73,58 @@ const runSummary = (runId: string): NotebookRunSummary => ({
 })
 
 describe('Notebook command workflows', () => {
+  it('only exposes current readable continuation scopes in resource views and every release response', async () => {
+    const target = { projectId: 'project-1', sessionId: 'target' }
+    const origin = { projectId: 'project-2', sessionId: 'origin', refusalId: 'current-refusal' }
+    const deleted = { projectId: 'project-2', sessionId: 'deleted', refusalId: 'deleted-refusal' }
+    const release: NotebookResourceRelease = {
+      ...target,
+      operationId: 'release',
+      revision: 'revision',
+      status: 'released',
+      startedAt: 1,
+      resources: [],
+      continuations: [origin, deleted]
+    }
+    const runtime = createRuntime({
+      getProjectResources: async () => ({
+        groups: [],
+        pendingDecisions: [deleted],
+        releases: [release]
+      }),
+      getResourceRelease: () => release,
+      releaseSessionResources: async (_request, assertCurrent) => {
+        assertCurrent()
+        return release
+      },
+      retryResourceRelease: async (_request, assertCurrent) => {
+        assertCurrent()
+        return release
+      }
+    })
+    const workflows = createNotebookCommandWorkflows(runtime, {
+      withSessionAvailable: async (_project, _session, operation) => operation(),
+      isSessionResourceReadable: async (_project, session) => session !== 'deleted',
+      assertSessionResourceReleaseAvailable: () => undefined
+    })
+    workflows.configureResourceReleaseGuard(() => undefined)
+    const expected = { ...release, continuations: [origin] }
+    await expect(workflows.projectResources({ projectId: target.projectId })).resolves.toEqual({
+      groups: [],
+      pendingDecisions: [],
+      releases: [expected]
+    })
+    await expect(workflows.resourceRelease({ ...target, operationId: 'release' })).resolves.toEqual(
+      expected
+    )
+    await expect(
+      workflows.releaseSessionResources({ ...target, revision: 'revision' }, () => undefined)
+    ).resolves.toEqual(expected)
+    await expect(
+      workflows.retryResourceRelease({ ...target, operationId: 'release' }, () => undefined)
+    ).resolves.toEqual(expected)
+  })
+
   it('reads in-memory Project activity while data-root writes are blocked', async () => {
     const getProjectActivity = vi.fn<NotebookCommandRuntime['getProjectActivity']>(() => ({
       kernels: [],

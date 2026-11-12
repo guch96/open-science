@@ -1143,6 +1143,7 @@ class NotebookShellProcessAdapter implements NotebookShellProcess {
       projectId: session.identity.projectId,
       sessionId: session.identity.sessionId,
       laneKey: session.identity.laneKey,
+      sampleMemory: session.sampleMemory,
       ...(session.identity.runtimeBinding?.kind === 'wsl2-bash'
         ? {}
         : { executionDomain: 'host' as const }),

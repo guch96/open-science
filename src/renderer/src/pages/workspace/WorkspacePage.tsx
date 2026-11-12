@@ -1552,6 +1552,9 @@ const WorkspacePage = ({
   }
   const canOpenProjectCompute =
     typeof window.api.notebook?.getProjectActivity === 'function' &&
+    typeof window.api.notebook?.getProjectResources === 'function' &&
+    typeof window.api.notebook?.releaseSessionResources === 'function' &&
+    typeof window.api.notebook?.retryResourceRelease === 'function' &&
     typeof window.api.notebook?.onChanged === 'function' &&
     typeof window.api.compute?.jobsList === 'function' &&
     typeof window.api.compute?.onJobUpdated === 'function'

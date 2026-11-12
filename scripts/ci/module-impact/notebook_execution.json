@@ -153,7 +153,8 @@
     "src/main/notebook/memory-policy.test.ts",
     "src/main/notebook/memory-policy.ts",
     "src/main/notebook/owned-resources.integration.test.ts",
-    "src/main/notebook/owned-resources.ts"
+    "src/main/notebook/owned-resources.ts",
+    "src/main/notebook/resource-memory.ts"
   ],
   "interfacePaths": [
     "src/main/notebook/environment-application-commands.ts",
@@ -251,7 +252,8 @@
     "src/main/notebook/memory-policy-platform.ts",
     "src/main/notebook/memory-policy.test-support.ts",
     "src/main/notebook/memory-policy.ts",
-    "src/main/notebook/owned-resources.ts"
+    "src/main/notebook/owned-resources.ts",
+    "src/main/notebook/resource-memory.ts"
   ],
   "consumerModules": [],
   "testFiles": {
@@ -870,12 +872,10 @@
       "src/main/session-replay/session-reading.test.ts",
       "src/main/storage/normalize-legacy-paths.test.ts",
       "src/main/desktop-runtime-session-size.integration.test.ts",
-      "src/main/web-service/session-payload.integration.test.ts"
+      "src/main/web-service/session-payload.integration.test.ts",
+      "src/main/notebook/resource-release.integration.test.ts"
     ]
   },
-  "capabilityOverlays": [
-    "notebook_network_sandbox",
-    "windows_sensitive"
-  ],
+  "capabilityOverlays": ["notebook_network_sandbox", "windows_sensitive"],
   "fallbackCapability": "main_runtime"
 }

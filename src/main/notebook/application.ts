@@ -2,7 +2,11 @@ import type { ApplicationEventPublisher } from '../application-events'
 import type { ApplicationModule } from '../application-runtime'
 import type { NotebookEnvironmentLifecycle } from './environment-lifecycle-workflows'
 import type { NotebookLocalRpcCapability } from './local-rpc-notebook-adapter'
-import { createNotebookCommandWorkflows, type NotebookCommandWorkflows } from './notebook-workflows'
+import {
+  createNotebookCommandWorkflows,
+  type NotebookCommandWorkflows,
+  type NotebookResourceAvailability
+} from './notebook-workflows'
 import {
   NotebookRuntimeService,
   projectNotebookMemoryPolicyState,
@@ -14,6 +18,8 @@ type NotebookApplicationDeps = Pick<
   NotebookRuntimeServiceOptions,
   | 'configRoot'
   | 'admitSessionWork'
+  | 'externalNotebookResources'
+  | 'holdExternalNotebookStarts'
   | 'isSessionBusy'
   | 'isSessionExporting'
   | 'dataRoot'
@@ -34,6 +40,7 @@ type NotebookApplicationDeps = Pick<
 > &
   ProjectIdScope & {
     events: ApplicationEventPublisher
+    resourceAvailability?: NotebookResourceAvailability
   }
 
 type NotebookApplication = {
@@ -57,7 +64,7 @@ type NotebookLocalRpcLifecycle = {
 // transport. Host metadata and publication are injected so this module has no Electron or ACP
 // dependency and cannot become a second renderer/event owner.
 const createNotebookApplication = (deps: NotebookApplicationDeps): NotebookApplication => {
-  const { events, ...runtimeOptions } = deps
+  const { events, resourceAvailability, ...runtimeOptions } = deps
   const runtime = new NotebookRuntimeService({
     ...runtimeOptions,
     callbacks: {
@@ -79,7 +86,7 @@ const createNotebookApplication = (deps: NotebookApplicationDeps): NotebookAppli
 
   return {
     runtime,
-    commands: createNotebookCommandWorkflows(runtime),
+    commands: createNotebookCommandWorkflows(runtime, resourceAvailability),
     localRpc
   }
 }

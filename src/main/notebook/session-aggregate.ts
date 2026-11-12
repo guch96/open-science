@@ -1,7 +1,9 @@
-import type { NotebookExecutionIntent } from './execution-intent'
 import { randomUUID } from 'node:crypto'
 import type { NotebookOwnedResource } from './owned-resources'
-import type { NotebookKernelEpochOwnership } from './execution-model-contract'
+import type {
+  NotebookExecutionIntentReference,
+  NotebookKernelEpochOwnership
+} from './execution-model-contract'
 export type { NotebookKernelEpochOwnership } from './execution-model-contract'
 
 import type {
@@ -230,11 +232,11 @@ export type NotebookSessionMcpRpcConnection = {
   endpoint: string
   socketPath?: string
   token: string
-  beginControlInvocation?: (
+  beginControlInvocation?(
     context: TrustedControlInvocationIdentity,
-    intent?: NotebookExecutionIntent,
+    intent?: NotebookExecutionIntentReference,
     credential?: string
-  ) => (() => void) & { readonly nonce?: string }
+  ): (() => void) & { readonly nonce?: string }
   completeControlInvocation?: (
     controlInvocationId: string,
     signal?: AbortSignal
@@ -643,14 +645,21 @@ export class NotebookSessionAggregate<
         laneKey: notebookLaneKey(this.lane),
         executorGeneration: generation,
         ...(ownedSlot?.cleanupResource ? { phase: 'cleanup-pending' as const } : {}),
+        retainForRelease: () => {
+          if (ownedSlot && this.kernelEpochs.get(ownedSlot.ownership.processKey) === ownedSlot)
+            ownedSlot.cleanupResource = resource
+        },
         release: async () => {
           if (ownedSlot && this.kernelEpochs.get(ownedSlot.ownership.processKey) === ownedSlot) {
             ownedSlot.cleanupResource = resource
           }
           const result = await resource.release()
           if (!result.reaped) return result
-          if (ownedSlot && this.kernelEpochs.get(ownedSlot.ownership.processKey) !== ownedSlot)
-            return result
+          const currentSlot = resource.processKey
+            ? this.kernelEpochs.get(resource.processKey)
+            : undefined
+          if (ownedSlot && currentSlot && currentSlot !== ownedSlot)
+            return { ...result, projection: 'complete' as const }
           try {
             await afterRelease?.(resource)
             if (ownedSlot) {
@@ -787,7 +796,9 @@ export class NotebookSessionAggregate<
 
   private async retireKernelEpochs(processKeys: readonly string[], finalize = true): Promise<void> {
     const epochs = processKeys.flatMap((processKey) => {
-      const epoch = this.kernelEpochs.get(processKey)?.ownership
+      const slot = this.kernelEpochs.get(processKey)
+      if (finalize && slot?.cleanupResource) return []
+      const epoch = slot?.ownership
       this.kernelEpochs.delete(processKey)
       if (epoch && this.mcpRpcConnection?.epoch === epoch) {
         const connection = this.mcpRpcConnection.connection
@@ -863,7 +874,10 @@ export class NotebookSessionAggregate<
     const result = await executor.shutdown()
     if (!result.reaped) return result
     this.releaseMcpRpcConnection()
-    await this.retireKernelEpochs([...this.kernelEpochs.keys()])
+    await this.onKernelEpochsRetired?.(
+      [...this.kernelEpochs.values()].map(({ ownership }) => ownership)
+    )
+    await this.retireKernelEpochs([...this.kernelEpochs.keys()], false)
     return result
   }
 

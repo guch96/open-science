@@ -103,6 +103,15 @@ export async function composeNotebookRuntime({
     {
       admitSessionWork: (projectId: string, sessionId: string) =>
         archiveCoordinator.admitSessionWork(projectId, sessionId),
+      resourceAvailability: archiveCoordinator,
+      externalNotebookResources: (scope: { projectId?: string; sessionId?: string }) =>
+        artifactReproducibilityAttemptOwnerRef.current?.resources(scope) ?? [],
+      holdExternalNotebookStarts: (scope: { projectId: string; sessionId: string }) =>
+        artifactReproducibilityAttemptOwnerRef.current?.holdSessionStarts(
+          scope.projectId,
+          scope.sessionId,
+          true
+        ) ?? (() => undefined),
       isSessionBusy: (projectId: string, sessionId: string) =>
         archiveCoordinator.isSessionBusy(projectId, sessionId),
       isSessionExporting: (projectId: string, sessionId: string) =>

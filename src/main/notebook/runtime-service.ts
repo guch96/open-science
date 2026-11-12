@@ -4,6 +4,14 @@ import type {
 } from '../../shared/notebook-memory'
 import { withDataRootWrite } from '../storage/migration-state'
 import type { NotebookOwnedResource } from './owned-resources'
+import { NotebookResourceReleaseOwner } from './resource-release'
+import type {
+  NotebookProjectResources,
+  NotebookProjectResourcesRequest,
+  NotebookResourceRelease,
+  NotebookResourceReleaseRequest,
+  ReleaseNotebookSessionResourcesRequest
+} from '../../shared/notebook-resources'
 import type { NotebookDependencyAnalyzer } from '@aipoch/notebook-analysis'
 import { randomUUID } from 'node:crypto'
 import { NotebookIdleReclamation } from './idle-reclamation'
@@ -264,6 +272,11 @@ type McpRpcConnectionBinding = {
 }
 
 type NotebookRuntimeServiceOptions = ProjectIdScope & {
+  externalNotebookResources?: (scope: {
+    projectId?: string
+    sessionId?: string
+  }) => NotebookOwnedResource[]
+  holdExternalNotebookStarts?: (scope: NotebookExecutionIntentScope) => () => void
   memoryPolicy?: NotebookMemoryPolicyPort
   isSessionBusy?: (projectId: string, sessionId: string) => boolean | Promise<boolean>
   isSessionExporting?: (projectId: string, sessionId: string) => boolean
@@ -495,6 +508,7 @@ const projectNotebookMemoryPolicyState = (
 // Coordinates notebook cells, shared interpreters, persisted run history, and UI notifications.
 class NotebookRuntimeService {
   private readonly executionIntents = new NotebookExecutionIntentOwner()
+  private readonly resourceReleases: NotebookResourceReleaseOwner
 
   createExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
     return this.executionIntents.create(scope)
@@ -1406,7 +1420,7 @@ class NotebookRuntimeService {
               this.sessionLifecycle.reclaimIdleInterpreter(resource, stillIdle)
           }))
         ]
-        this.updateMemoryPolicyActivity(resources.length > 0)
+        this.refreshResourceActivity()
         return resources
       },
       memoryPolicy: () => this.getMemoryPolicy(),
@@ -1427,6 +1441,98 @@ class NotebookRuntimeService {
           result
         })
     })
+    this.resourceReleases = new NotebookResourceReleaseOwner({
+      resources: (scope) => this.ownedResources(scope),
+      hold: (scope, resources) => {
+        const releases: Array<() => void> = []
+        try {
+          releases.push(this.sessionLifecycle.holdSessionResources(scope))
+          releases.push(this.executionOwner.fenceShellRuns(scope))
+          if (options.holdExternalNotebookStarts)
+            releases.push(options.holdExternalNotebookStarts(scope))
+          releases.push(
+            this.runtimeBindingOwner.tryHoldSessionTeardown(this.resourceLaneKeys(scope, resources))
+          )
+          return () => {
+            for (const release of releases.reverse()) release()
+          }
+        } catch (error) {
+          for (const release of releases.reverse()) release()
+          throw error
+        }
+      },
+      observe: (scope, operation) => this.sessionLifecycle.observeSessionRelease(scope, operation),
+      block: (scope) => this.blockExecutionIntents(scope),
+      decisions: (projectId) => this.executionIntents.blockedContinuations(projectId),
+      blockedReason: (scope, scopeHeld) => {
+        if (options.isSessionExporting?.(scope.projectId, scope.sessionId))
+          return 'session-exporting'
+        if (scopeHeld) return undefined
+        return (
+          this.sessionLifecycle.resourceReleaseBlockedReason(scope) ??
+          (this.runtimeBindingOwner.hasSessionTeardownConflict(
+            this.resourceLaneKeys(scope, this.ownedResources(scope))
+          )
+            ? 'runtime-binding-changing'
+            : undefined)
+        )
+      },
+      changed: () => this.refreshResourceActivity(),
+      logger: this.runtimeLogger
+    })
+  }
+
+  private resourceLaneKeys(
+    scope: NotebookExecutionIntentScope,
+    resources: readonly NotebookOwnedResource[]
+  ): string[] {
+    return [
+      ...Array.from(this.sessions.values())
+        .filter(
+          (session) =>
+            session.projectId === scope.projectId && session.sessionId === scope.sessionId
+        )
+        .map((session) => notebookLaneKey(session.lane)),
+      ...resources.flatMap((resource) => (resource.laneKey ? [resource.laneKey] : []))
+    ]
+  }
+
+  refreshResourceActivity(): void {
+    this.updateMemoryPolicyActivity(this.ownedResources().length > 0)
+  }
+
+  async getProjectResources(
+    request: NotebookProjectResourcesRequest
+  ): Promise<NotebookProjectResources> {
+    return this.resourceReleases.project(request.projectId)
+  }
+
+  async releaseSessionResources(
+    request: ReleaseNotebookSessionResourcesRequest,
+    assertCurrent: () => void
+  ): Promise<NotebookResourceRelease> {
+    return this.resourceReleases.release(request, assertCurrent)
+  }
+
+  getResourceRelease(request: NotebookResourceReleaseRequest): NotebookResourceRelease {
+    return this.resourceReleases.get(request)
+  }
+
+  async retryResourceRelease(
+    request: NotebookResourceReleaseRequest,
+    assertCurrent: () => void
+  ): Promise<NotebookResourceRelease> {
+    return this.resourceReleases.retry(request, assertCurrent)
+  }
+
+  async waitForSessionTeardown(
+    scope: { projectId?: string; sessionId?: string } = {}
+  ): Promise<void> {
+    await this.sessionLifecycle.waitForSessionTeardown(scope)
+    if (this.ownedResources(scope).some((resource) => resource.phase === 'cleanup-pending'))
+      throw new Error(
+        'Notebook cleanup is incomplete. Retry the original cleanup before exporting.'
+      )
   }
 
   noteSessionActivity(sessionId: string): void {
@@ -3312,7 +3418,8 @@ class NotebookRuntimeService {
         (resource) =>
           (scope.projectId === undefined || resource.projectId === scope.projectId) &&
           (scope.sessionId === undefined || resource.sessionId === scope.sessionId)
-      )
+      ),
+      ...(this.options.externalNotebookResources?.(scope) ?? [])
     ]
   }
 
