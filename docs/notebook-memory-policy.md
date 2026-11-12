@@ -48,10 +48,36 @@ Platform facts:
   kernel page size in authenticated `/proc/self/auxv`, including 16/64 KiB ARM64 kernels.
 
 Local cgroup pressure observations carry `pressureScope: execution-domain` and the limiting
-`constraintPath`. A future reclaimer must prove candidate membership in that group or its
+`constraintPath`. A reclaimer must prove candidate membership in that group or its
 descendants. Host pressure uses `pressureScope: host`. Unknown sampling never supplies pressure
 reclamation authority. History, imports/exports, cancellation, status, and identity-confirmed manual
 release must remain outside the execution admission gate.
+
+Pressure idle reclamation (issue #26) extends the existing `NotebookIdleReclamation` resource
+collection and serial owner release path. Ordinary fifteen-minute expiry and per-kind idle capacity
+of three run first and retain their existing limits. A pressure pass considers only continuously
+unprotected resources idle for at least five minutes, attempts at most eight trees across all kinds,
+and samples again after each result. Recovery, an unavailable sample, or stale authority stops the
+pressure pass. Each completed pass has a minimum five-second cooldown; sampler initialization errors
+back off for thirty seconds without renewing ordinary idle deadlines. Sample notifications cannot
+turn rejected execution into a retry or an execution queue.
+
+The runtime generation shares its admission policy with this reclaimer and activates periodic
+sampling while live owner resources exist. Existing active-work, startup, queue, background,
+observation, runtime-binding, identity, and cleanup fences remain authoritative. The existing archive
+reservation is an additional synchronous hold checked through the owner's final commit; a hold does
+not renew idle time. Reclamation uses the existing lifecycle teardown gates, process-tree owner,
+epoch retirement, Windows receipts and terminated-state projection. Failed cleanup is reported and
+keeps the original owner's cleanup responsibility. Logs describe candidate reasons and outcomes;
+they contain no source, variables, credentials or command lines.
+
+Current pressure reclamation is deliberately limited to owner-confirmed native host execution under
+host pressure. A WSL Shell has no host-execution proof, and local cgroup pressure has no certified
+candidate-membership proof in the current owner view; those resources are skipped by the pressure
+branch. Ordinary idle rules and identity-confirmed manual release retain their separate contracts.
+Remote dependency relaxation is also deferred unless an existing owner supplies the required proof.
+These conservative boundaries are not full WSL/container release certification: issue #31 must
+resolve the declared deployment support and supply real platform evidence before publication.
 
 Execution admission (issue #25) is a main-process capability owned by each
 `NotebookRuntimeService` generation. Direct service construction lazily creates the real platform

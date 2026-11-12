@@ -11,6 +11,7 @@ type NotebookApplicationDeps = Pick<
   | 'configRoot'
   | 'admitSessionWork'
   | 'isSessionBusy'
+  | 'isSessionExporting'
   | 'dataRoot'
   | 'repository'
   | 'getPackageMirror'
