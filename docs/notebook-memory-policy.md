@@ -126,8 +126,8 @@ published and the catalog/signature gate was not weakened.
 
 ## Candidate operator guidance
 
-These notes describe the phase-1 candidate, not a released version. Compute release (#29), export
-coordination (#30), and final acceptance (#31) still require integration and verification.
+These notes describe the unreleased phase-1 candidate. Final verification and real platform,
+Provider, native-artifact, and CI-owner acceptance remain open under #31.
 
 Pressure or unavailable sampling ends the current execution request. Dismissing the notice, memory
 recovery, idle reclamation, or manual release never retries it. An explicit terminal retry reads the
@@ -137,10 +137,11 @@ to establish a new interpreter. Agent continuation requires an explicit human ac
 visible guidance message. Ordinary chat, automated continuation, or another tool-call identifier
 cannot reopen the refused intent. Reads and explanation remain available.
 
-Compute's candidate stop/release action applies to the confirmed session's local Notebook resources,
-including all listed languages, environments, lanes, and active, idle, starting, and unstarted work.
-It remains available when memory is healthy or sampling is unavailable. Confirmation loses variables,
-connections, and unsaved in-memory objects; history, outputs, files, and environment installations
+Open Compute for the current project and use **Stop and release Notebook** in **Notebook resources**.
+Switch projects to manage another project's Notebooks. The action applies to the confirmed session's
+local resources, including all listed languages, environments, lanes, and active, idle, starting, and
+unstarted work. It remains available when memory is healthy or sampling is unavailable. Confirmation
+loses variables, connections, and unsaved in-memory objects; history, outputs, files, and environment installations
 remain. It does not reverse file writes or other external effects. Independent remote Jobs and
 their monitors retain their own lifecycle.
 
@@ -148,9 +149,11 @@ The backend must recheck the original resource set and current caller before sto
 replaced resources require refresh and confirmation; export, update, and migration conflicts must
 not become hidden stop queues. Cleanup results remain per original owner/tree. Whole-tree exit and
 required termination projection are both needed for success; partial failure keeps the original
-cleanup responsibility for retry. Release alone never grants execution or replays old code. An
-explicit continuation must remain available for a blocked session even after its notice is dismissed
-and it has no remaining local resources.
+cleanup responsibility. **View cleanup progress** shows these outcomes; closing it does not cancel
+committed cleanup. **Retry cleanup** retries the retained failed resources using their original
+handles and does not include replacements or new resources. Release alone never grants execution or
+replays old code. **Continue Notebook work** remains available for a blocked session even after its
+notice is dismissed and it has no remaining local resources.
 
 Resource memory figures are diagnostic estimates with a capture time, metric kind, and coverage.
 Missing measurements mean unknown rather than zero, and partial coverage must remain visible. RSS
@@ -205,11 +208,11 @@ identity-confirmed manual cleanup. This preserves the existing [directional comp
 contract](compatibility.md#historical-data-and-upgrade-direction), not arbitrary binary downgrades or
 mixed-version desktop/backend operation.
 
-The candidate export ordering installs the existing archive admission fence, waits for already
-committed Notebook teardown, and only then reserves persistence for the snapshot. Unsafe cleanup or
-failed termination projection must prevent export. Teardown never waits for export. Cancelling an
-export ends its own wait and source fence without cancelling an earlier cleanup; existing checksums
-and final source-revision checks remain required.
+Package export and fork install the existing archive admission fence, wait for already committed
+Notebook teardown, and only then reserve persistence for the snapshot. Conversation export shares
+this ordering. Unsafe cleanup or failed termination projection prevents export. Teardown never waits
+for export. Package-export cancellation ends its own wait and source fence without cancelling earlier
+cleanup; existing checksums and final source-revision checks remain required.
 
 ## Release acceptance and rollback
 
@@ -232,11 +235,17 @@ is no force-run bypass.
 
 The changed native fingerprint requires all five matching artifacts, macOS/Windows signatures,
 immutable publication, catalog update, and fresh actual downloads under the [native-component
-workflow](native-components.md#update-the-binaries). At integration `7ff30f0bf`, the repository
-permission API returned `enabled: true`, but `native-components.yml` dispatch with `dry_run=true`
-still failed with HTTP 422, `Actions has been disabled for this repository.` No run was created and no
+workflow](native-components.md#update-the-binaries). During verification on 2026-11-12, the repository
+permission API returned `enabled: true` and workflow state was `active`, but `native-components.yml`
+dispatch with `dry_run=true` still failed with HTTP 422, `Actions has been disabled for this repository.`
+No run was created and no
 signing, publication, or catalog update occurred. Keep the PR draft and #31 open until these gates
 and the real acceptance above are resolved; do not weaken fingerprint or signature checks.
+
+The protected native runtime-consumer declarations in `scripts/ci/module-runtime-consumers.json` and
+Windows exact-path routing in `scripts/ci/change-impact.json` also require independent CI-owner
+approval under the [CI control-plane rules](ci.md#ci-control-plane-approval). Local registration checks
+and agent review do not supply that approval.
 
 For rollback:
 
