@@ -46,6 +46,8 @@ export type NotebookResourceRelease = {
     id: string
     group: NotebookResource['group']
     kind?: string
+    laneKey?: string
+    environment?: string
     status: 'pending' | 'released' | 'incomplete'
     processesTerminated?: boolean
     networkClosed?: boolean

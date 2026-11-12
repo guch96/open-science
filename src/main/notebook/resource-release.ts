@@ -34,7 +34,7 @@ type Dependencies = {
   block: (scope: Scope) => readonly NotebookExecutionContinuation[]
   decisions: (projectId: string) => readonly NotebookExecutionContinuation[]
   changed: () => void
-  blockedReason: (scope: Scope) => string | undefined
+  blockedReason: (scope: Scope, scopeHeld?: boolean) => string | undefined
   logger: Pick<RuntimeDiagnosticLogger, 'info' | 'error'>
 }
 
@@ -93,6 +93,21 @@ export class NotebookResourceReleaseOwner {
     }
   }
 
+  private view(release: Release): NotebookResourceRelease {
+    return structuredClone({
+      ...release.view,
+      continuations: release.view.continuations.filter((continuation) =>
+        this.dependencies
+          .decisions(continuation.projectId)
+          .some(
+            (current) =>
+              current.sessionId === continuation.sessionId &&
+              current.refusalId === continuation.refusalId
+          )
+      )
+    })
+  }
+
   async project(projectId: string): Promise<NotebookProjectResources> {
     await this.sampleMemory(this.dependencies.resources({ projectId }))
     const grouped = new Map<string, { scope: Scope; resources: NotebookOwnedResource[] }>()
@@ -104,6 +119,10 @@ export class NotebookResourceReleaseOwner {
       if (!group.resources.some((entry) => sameResource(entry, resource)))
         group.resources.push(resource)
       grouped.set(key, group)
+    }
+    for (const key of this.confirmations.keys()) {
+      const [confirmedProject] = JSON.parse(key) as [string, string]
+      if (confirmedProject === projectId && !grouped.has(key)) this.confirmations.delete(key)
     }
     return {
       groups: [...grouped.entries()].map(([key, { scope, resources }]) => {
@@ -128,7 +147,7 @@ export class NotebookResourceReleaseOwner {
       pendingDecisions: [...this.dependencies.decisions(projectId)],
       releases: [...this.releases.values()]
         .filter(({ view }) => view.projectId === projectId)
-        .map(({ view }) => structuredClone(view))
+        .map((release) => this.view(release))
     }
   }
 
@@ -203,7 +222,7 @@ export class NotebookResourceReleaseOwner {
     const existing = [...this.releases.values()].find(
       ({ view }) => keyFor(view) === keyFor(request) && view.revision === request.revision
     )
-    if (existing) return structuredClone(existing.view)
+    if (existing) return this.view(existing)
     const confirmation = this.confirmations.get(keyFor(request))
     if (!confirmation || confirmation.revision !== request.revision)
       throw new Error('Notebook resources changed. Refresh and confirm the current resource set.')
@@ -212,7 +231,7 @@ export class NotebookResourceReleaseOwner {
 
   get(request: NotebookResourceReleaseRequest): NotebookResourceRelease {
     const release = this.find(request)
-    return structuredClone(release.view)
+    return this.view(release)
   }
 
   retry(
@@ -221,7 +240,7 @@ export class NotebookResourceReleaseOwner {
   ): NotebookResourceRelease {
     assertCurrent()
     const release = this.find(request)
-    if (release.view.status !== 'partial') return structuredClone(release.view)
+    if (release.view.status !== 'partial') return this.view(release)
     const resources = release.resources.filter((resource) => {
       const result = release.results.get(resource.identity)
       return !result?.reaped || result.projection === 'failed'
@@ -249,11 +268,11 @@ export class NotebookResourceReleaseOwner {
       if (!retry && !sameSet(resources, this.dependencies.resources(scope)))
         throw new Error('Notebook resources changed. Refresh and confirm the current resource set.')
       assertCurrent()
-      const reason = this.dependencies.blockedReason(scope)
+      const reason = this.dependencies.blockedReason(scope, true)
       if (reason) throw new Error(`Notebook resources cannot be released: ${reason}`)
       releaseWriter = acquireDataRootWriter()
       for (const resource of resources) resource.retainForRelease?.()
-      const continuations = [...this.dependencies.block(scope)]
+      const continuations = retry ? retry.view.continuations : [...this.dependencies.block(scope)]
       const release: Release = retry ?? {
         view: {
           operationId: randomUUID(),
@@ -265,6 +284,8 @@ export class NotebookResourceReleaseOwner {
             id: this.id(resource),
             group: resource.group,
             kind: resource.kind,
+            laneKey: resource.laneKey,
+            environment: resource.environment,
             status: 'pending'
           })),
           continuations
@@ -358,7 +379,7 @@ export class NotebookResourceReleaseOwner {
       release.settled = operation
       this.dependencies.observe(scope, operation)
       this.dependencies.changed()
-      return { view: structuredClone(release.view) }
+      return { view: this.view(release) }
     } catch (error) {
       releaseWriter?.()
       releaseHold()

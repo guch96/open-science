@@ -129,6 +129,21 @@ class NotebookSessionLifecycleOwner {
     { projectId: string; sessionId: string; operation: Promise<void> }
   >()
 
+  resourceReleaseBlockedReason(scope: {
+    projectId: string
+    sessionId: string
+  }): string | undefined {
+    if (this.terminal || this.shutdownAllPromise) return 'application-stopping'
+    if (
+      this.deletingProjectIds.has(scope.projectId) ||
+      this.deletingSessionIds.has(scope.sessionId)
+    )
+      return 'session-unavailable'
+    if (this.retainedReleaseHolds.has(JSON.stringify([scope.projectId, scope.sessionId])))
+      return 'release-in-progress'
+    return this.idleTeardowns.has(scope.sessionId) ? 'cleanup-in-progress' : undefined
+  }
+
   holdSessionResources(scope: { projectId: string; sessionId: string }): () => void {
     const key = JSON.stringify([scope.projectId, scope.sessionId])
     this.assertScopeAvailable(scope.projectId, scope.sessionId)
@@ -338,7 +353,7 @@ class NotebookSessionLifecycleOwner {
     }
     const controller = new AbortController()
     const assertCreationAvailable = (): void => {
-      this.assertScopeAvailable(projectId, request.sessionId)
+      this.assertDeletionAvailable(projectId, request.sessionId)
       if (controller.signal.aborted)
         throw new Error('Notebook session initialization was cancelled.')
     }
