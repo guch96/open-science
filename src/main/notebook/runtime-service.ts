@@ -500,7 +500,7 @@ class NotebookRuntimeService {
     return this.executionIntents.create(scope)
   }
 
-  currentExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
+  currentExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent | undefined {
     return this.executionIntents.current(scope)
   }
 

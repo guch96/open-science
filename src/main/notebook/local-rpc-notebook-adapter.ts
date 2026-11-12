@@ -228,7 +228,7 @@ type NotebookRuntimeBindingRequest = NotebookSessionRequest & {
 
 type NotebookLocalRpcCapability = {
   createExecutionIntent?(scope: NotebookExecutionIntentScope): NotebookExecutionIntent
-  currentExecutionIntent?(scope: NotebookExecutionIntentScope): NotebookExecutionIntent
+  currentExecutionIntent?(scope: NotebookExecutionIntentScope): NotebookExecutionIntent | undefined
   bindExecutionIntent?(scope: NotebookExecutionIntentScope, intent: NotebookExecutionIntent): void
   adoptExecutionIntentScope?(scope: NotebookExecutionIntentScope, sessionId: string): void
   rememberExecutionIntent?(

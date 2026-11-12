@@ -27622,6 +27622,7 @@ describe('ACP runtime session management', () => {
           projectId: 'project-1',
           mcpEntryPath: '/app/index.js',
           createExecutionIntent: (scope) => notebookService.createExecutionIntent(scope),
+          currentExecutionIntent: (scope) => notebookService.currentExecutionIntent(scope),
           rememberExecutionIntent: (scope, promptId, intent) =>
             notebookService.rememberExecutionIntent(scope, promptId, intent),
           resolveExecutionIntent: (scope, promptId) =>
@@ -33547,6 +33548,123 @@ it('connects the optional built-in harness through the host runtime and releases
   }
 })
 
+it.each(['new', 'resume'] as const)(
+  'keeps Notebook %s bootstrap read-only until a trusted user prompt creates execution authority',
+  async (entry) => {
+    const root = await mkdtemp(join(tmpdir(), 'acp-notebook-bootstrap-'))
+    const child = new FakeAgentProcess()
+    const scope = { projectId: 'project', sessionId: 'restored-notebook-provider' }
+    const execute = vi.fn(async () => ({
+      status: 'completed' as const,
+      stdout: 'trusted-result',
+      stderr: '',
+      traceback: '',
+      cwdAfter: root,
+      outputs: [],
+      kernelDispatched: true
+    }))
+    const service = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: scope.projectId,
+      memoryPolicy: healthyNotebookMemoryPolicy(),
+      executorFactory: () => ({ execute, shutdown: async () => ({ reaped: true }) })
+    })
+    const rpc = new NotebookLocalRpcServer(service, { transport: 'tcp' })
+    let connection: Awaited<ReturnType<typeof rpc.issueSessionConnection>> | undefined
+    const call = async (method: string): Promise<string> => {
+      const response = await fetchLocalRpc(
+        connection!,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${connection!.token}`,
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({
+            method,
+            params: {
+              sessionId: scope.sessionId,
+              workspaceCwd: root,
+              ...(method === 'state' ? {} : { code: '1' })
+            }
+          })
+        },
+        'ACP Notebook bootstrap authorization'
+      )
+      return response.text()
+    }
+    const beforePrompt: string[] = []
+    const bootstrap = async (): Promise<void> => {
+      beforePrompt.push(await call('state'), await call('executeControl'))
+    }
+    let promptResult: string | undefined
+    const agent = startFakeAgent(child, [scope.sessionId], {
+      supportsResume: true,
+      onNewSession: bootstrap,
+      onResumeRequest: bootstrap,
+      onPrompt: async () => {
+        promptResult = await call('executeControl')
+      }
+    })
+    const runtime = new AcpRuntime({
+      appVersion: 'test',
+      defaultCwd: root,
+      resolveBackend: () => ({
+        framework: { ...claudeCodeFramework, spawn: () => asAgentProcess(child) },
+        executablePath: '/agent',
+        env: {}
+      }),
+      notebook: {
+        projectId: scope.projectId,
+        mcpEntryPath: '/app/main.js',
+        createExecutionIntent: (value) => service.createExecutionIntent(value),
+        currentExecutionIntent: (value) => service.currentExecutionIntent(value),
+        registerSessionAlias: (alias, sessionId) => rpc.registerSessionAlias(alias, sessionId),
+        releaseSessionCapabilities: (sessionId, tokens) =>
+          rpc.releaseSessionCapabilitiesIfOwned(sessionId, tokens),
+        getRpcConnection: async ({ sessionId, projectId, memoryTools, executionIntent }) => {
+          connection = await rpc.issueSessionConnection(
+            sessionId,
+            projectId,
+            `root-frame-${sessionId}`,
+            memoryTools,
+            executionIntent
+          )
+          return connection
+        }
+      }
+    })
+    try {
+      if (entry === 'resume') await runtime.resumeSession({ ...scope, cwd: root })
+      else await runtime.createSession({ projectId: scope.projectId, cwd: root })
+      expect(beforePrompt[0]).toContain('"runs":[]')
+      expect(beforePrompt[1]).toContain('Execution was not started')
+      expect(execute).not.toHaveBeenCalled()
+      expect(service.currentExecutionIntent(scope)).toBeUndefined()
+
+      await runtime.sendPrompt(
+        withNotebookUserOperation(
+          { sessionId: scope.sessionId, text: 'Execute the current Notebook.' },
+          { projectId: scope.projectId, assertCurrent: () => undefined }
+        )
+      )
+      expect(agent.prompts).toHaveLength(1)
+      expect(promptResult).toContain('"status":"completed"')
+      expect(execute).toHaveBeenCalledOnce()
+      expect(service.currentExecutionIntent(scope)?.refusalId).toBeUndefined()
+    } finally {
+      await runtime.shutdownForQuit()
+      await rpc.close()
+      await service.dispose()
+      child.stdin.destroy()
+      child.stdout.destroy()
+      child.stderr.destroy()
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
 it('pins each trusted Notebook user intent before provider dispatch and keeps rejected automatic work blocked', async () => {
   const root = await mkdtemp(join(tmpdir(), 'acp-notebook-intent-'))
   const child = new FakeAgentProcess()
@@ -33613,6 +33731,7 @@ it('pins each trusted Notebook user intent before provider dispatch and keeps re
       projectId: 'project',
       mcpEntryPath: '/app/main.js',
       createExecutionIntent: (scope) => service.createExecutionIntent(scope),
+      currentExecutionIntent: (scope) => service.currentExecutionIntent(scope),
       rememberExecutionIntent: (scope, promptId, intent) =>
         service.rememberExecutionIntent(scope, promptId, intent),
       resolveExecutionIntent: (scope, promptId) => service.resolveExecutionIntent(scope, promptId),
@@ -33758,6 +33877,25 @@ it('pins each trusted Notebook user intent before provider dispatch and keeps re
     ).rejects.toThrow('Internal error')
     expect(preparedExecution).toContain('Execution was not started')
     expect(agent.prompts).toHaveLength(promptsBeforeFailedRefresh)
+    const failedIntent = service.currentExecutionIntent({
+      projectId: 'project',
+      sessionId: session.sessionId
+    })!
+    expect(failedIntent.refusalId).toBeDefined()
+    await runtime.sendPrompt(
+      withNotebookUserOperation(
+        {
+          sessionId: session.sessionId,
+          text: 'Continue with a new execution after the failed preparation.',
+          provenanceContext: { promptMessageId: 'retry-failed-user-three' }
+        },
+        { projectId: 'project', refusalId: failedIntent.refusalId, assertCurrent }
+      )
+    )
+    // Recovery is immediately usable; neither a reconnect nor the previous credential is needed.
+    pressured = true
+    expect(await run(current!)).toContain('NOTEBOOK_MEMORY_PRESSURE')
+    pressured = false
     // A compatible reconnect must not discover a healthy grant left by the failed preparation.
     await runtime.releaseSessionForTransfer(session.sessionId)
     await runtime.resumeSession({
@@ -33783,7 +33921,7 @@ it('pins each trusted Notebook user intent before provider dispatch and keeps re
             refusalId: service.currentExecutionIntent({
               projectId: 'project',
               sessionId: session.sessionId
-            }).refusalId,
+            })!.refusalId,
             assertCurrent: () => {
               if (!leaseCurrent) throw new Error('Human execution lease expired')
             }
@@ -33891,6 +34029,7 @@ it.each([false, true])(
         projectId: 'project',
         mcpEntryPath: '/app/main.js',
         createExecutionIntent: (scope) => service.createExecutionIntent(scope),
+        currentExecutionIntent: (scope) => service.currentExecutionIntent(scope),
         rememberExecutionIntent: (scope, id, intent) =>
           service.rememberExecutionIntent(scope, id, intent),
         resolveExecutionIntent: (scope, id) => service.resolveExecutionIntent(scope, id),

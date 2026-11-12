@@ -1475,6 +1475,10 @@ class NotebookLocalRpcServer {
     return this.service.createExecutionIntent?.(scope) ?? new NotebookExecutionIntent(scope)
   }
 
+  currentExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent | undefined {
+    return this.service.currentExecutionIntent?.(scope)
+  }
+
   rememberExecutionIntent(
     scope: NotebookExecutionIntentScope,
     promptId: string,
@@ -1513,11 +1517,17 @@ class NotebookLocalRpcServer {
         ? `root-frame-${resolvedSessionId}`
         : agentFrameId
     this.sessionRpcTokens.set(sessionId, token)
-    const intent =
+    let intent =
       executionIntent ??
-      this.service.currentExecutionIntent?.({ projectId, sessionId: resolvedSessionId }) ??
-      new NotebookExecutionIntent({ projectId, sessionId: resolvedSessionId })
-    this.service.bindExecutionIntent?.({ projectId, sessionId: resolvedSessionId }, intent)
+      this.service.currentExecutionIntent?.({ projectId, sessionId: resolvedSessionId })
+    if (intent)
+      this.service.bindExecutionIntent?.({ projectId, sessionId: resolvedSessionId }, intent)
+    else {
+      // Resume and capability discovery grant reads, never another user execution context.
+      // Keep this refusal local to the credential so the first trusted user prompt can mint.
+      intent = new NotebookExecutionIntent({ projectId, sessionId: resolvedSessionId })
+      intent.block('originating-execution-context-unavailable')
+    }
     const binding: NotebookRpcSessionBinding = {
       sessionId: resolvedSessionId,
       projectId,

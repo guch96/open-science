@@ -813,7 +813,10 @@ const createAcpRuntime = ({
             ? {
                 createExecutionIntent: (
                   scope: import('../notebook/execution-intent').NotebookExecutionIntentScope
-                ) => notebookRpcServer.createExecutionIntent(scope)
+                ) => notebookRpcServer.createExecutionIntent(scope),
+                currentExecutionIntent: (
+                  scope: import('../notebook/execution-intent').NotebookExecutionIntentScope
+                ) => notebookRpcServer.currentExecutionIntent(scope)
               }
             : {}),
           rememberExecutionIntent: (scope, promptId, intent) =>

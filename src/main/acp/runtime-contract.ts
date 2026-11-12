@@ -364,6 +364,9 @@ export type AcpRuntimeUploadOptions = {
 
 export type AcpRuntimeNotebookOptions = {
   createExecutionIntent?: (scope: NotebookExecutionIntentScope) => NotebookExecutionIntent
+  currentExecutionIntent?: (
+    scope: NotebookExecutionIntentScope
+  ) => NotebookExecutionIntent | undefined
   rememberExecutionIntent?: (
     scope: NotebookExecutionIntentScope,
     promptId: string,

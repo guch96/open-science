@@ -174,11 +174,8 @@ export class NotebookExecutionIntentOwner {
     this.currentIntents.delete(previousKey)
   }
 
-  current(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
-    return (
-      this.currentIntents.get(JSON.stringify([scope.projectId, scope.sessionId])) ??
-      this.create(scope)
-    )
+  current(scope: NotebookExecutionIntentScope): NotebookExecutionIntent | undefined {
+    return this.currentIntents.get(JSON.stringify([scope.projectId, scope.sessionId]))
   }
 
   register(scope: NotebookExecutionIntentScope, intent: NotebookExecutionIntent): void {

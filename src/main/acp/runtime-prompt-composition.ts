@@ -440,7 +440,9 @@ const composeAcpRuntimePromptOwners = (
         const notebook = options.notebook
         if (!notebook) return
         const scope = { projectId: projectId(request.sessionId), sessionId: request.sessionId }
-        const current = base.sessionCapabilities.notebookExecutionIntentFor(request.sessionId)
+        const current = notebook.currentExecutionIntent
+          ? notebook.currentExecutionIntent(scope)
+          : base.sessionCapabilities.notebookExecutionIntentFor(request.sessionId)
         // Lightweight runtime adapters without a Notebook authority port keep their existing
         // presentation-only contract. Production root and child capabilities always carry one.
         if (!notebook.createExecutionIntent && !current && !notebookExecutionIntent(request)) return
