@@ -429,6 +429,7 @@ type NotebookRpcSessionBinding = {
   >
   executionCwd?: string
   isControl?: true
+  executionReady?: boolean
   executionIntent?: NotebookExecutionIntent
   delegatedNotebook?: {
     viewImageBackend?: HostViewImageBackend
@@ -1517,19 +1518,28 @@ class NotebookLocalRpcServer {
       this.service.currentExecutionIntent?.({ projectId, sessionId: resolvedSessionId }) ??
       new NotebookExecutionIntent({ projectId, sessionId: resolvedSessionId })
     this.service.bindExecutionIntent?.({ projectId, sessionId: resolvedSessionId }, intent)
-    this.sessionRpcCapabilities.set(token, {
+    const binding: NotebookRpcSessionBinding = {
       sessionId: resolvedSessionId,
       projectId,
       agentFrameId: resolvedAgentFrameId,
       memoryTools,
       executionIntent: intent,
       delegatedWorkRole: 'main'
-    })
+    }
+    this.sessionRpcCapabilities.set(token, binding)
     return withNotebookExecutionIntent(
       {
         endpoint: connection.endpoint,
         socketPath: connection.socketPath,
         token,
+        deferExecution: () => {
+          binding.executionReady = false
+          return () => {
+            if (this.sessionRpcCapabilities.get(token) !== binding)
+              throw new Error('Notebook execution capability was superseded.')
+            binding.executionReady = true
+          }
+        },
         release: () => {
           // A stale startup may release after a same-ID successor has rotated the current token. Revoke
           // only this concrete capability and clear the owner projection only while it still points here.
@@ -2266,6 +2276,7 @@ class NotebookLocalRpcServer {
       // A session capability can outlive its turn. Snapshot before reading the body so a
       // slow request cannot acquire a later turn's authority after cleanup has returned.
       const initialSessionBinding = this.sessionRpcCapabilities.get(bearerToken)
+      const executionReady = initialSessionBinding?.executionReady !== false
       const controlNonce = request.headers['x-open-science-control-invocation']
       const controlAuthority =
         typeof controlNonce === 'string'
@@ -2309,6 +2320,12 @@ class NotebookLocalRpcServer {
         throw new RpcHttpError(400, 'Notebook RPC params must be an object.')
       }
       let params = isRecord(payload.params) ? payload.params : {}
+      if (!executionReady && startsNotebookExecution(method, params)) {
+        throw new RpcHttpError(
+          409,
+          'Notebook execution authority is still being prepared. Execution was not started.'
+        )
+      }
       if (method === 'hostSdkHelp') delete params.view_image_available
       let hostCapabilities: HostCapabilityProjection | undefined
       let delegationAllowed: boolean | undefined

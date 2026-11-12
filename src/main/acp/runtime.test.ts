@@ -33550,7 +33550,22 @@ it('connects the optional built-in harness through the host runtime and releases
 it('pins each trusted Notebook user intent before provider dispatch and keeps rejected automatic work blocked', async () => {
   const root = await mkdtemp(join(tmpdir(), 'acp-notebook-intent-'))
   const child = new FakeAgentProcess()
-  const agent = startFakeAgent(child, ['notebook-provider-session'], { supportsResume: true })
+  let failNotebookRefresh = false
+  let probePreparedExecution: (() => Promise<string>) | undefined
+  let preparedExecution: string | undefined
+  let expireNextLease: (() => void) | undefined
+  const agent = startFakeAgent(child, ['notebook-provider-session'], {
+    supportsResume: true,
+    onResumeRequest: async () => {
+      if (failNotebookRefresh) {
+        failNotebookRefresh = false
+        preparedExecution = await probePreparedExecution?.()
+        throw new Error('Notebook refresh fixture failed')
+      }
+      expireNextLease?.()
+      expireNextLease = undefined
+    }
+  })
   let pressured = false
   let refusalId: string | undefined
   const healthy = healthyNotebookMemoryPolicy()
@@ -33725,6 +33740,66 @@ it('pins each trusted Notebook user intent before provider dispatch and keeps re
     )
     expect(await run(current!)).toContain('NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION')
     expect(agent.newSessions).toHaveLength(1)
+
+    const promptsBeforeFailedRefresh = agent.prompts.length
+    probePreparedExecution = () => run(current!)
+    failNotebookRefresh = true
+    await expect(
+      runtime.sendPrompt(
+        withNotebookUserOperation(
+          {
+            sessionId: session.sessionId,
+            text: 'Start a new execution context.',
+            provenanceContext: { promptMessageId: 'failed-user-three' }
+          },
+          { projectId: 'project', refusalId: oldIntent.refusalId, assertCurrent }
+        )
+      )
+    ).rejects.toThrow('Internal error')
+    expect(preparedExecution).toContain('Execution was not started')
+    expect(agent.prompts).toHaveLength(promptsBeforeFailedRefresh)
+    // A compatible reconnect must not discover a healthy grant left by the failed preparation.
+    await runtime.releaseSessionForTransfer(session.sessionId)
+    await runtime.resumeSession({
+      sessionId: session.sessionId,
+      cwd: root,
+      projectId: 'project'
+    })
+    expect(await run(current!)).toContain('NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION')
+    let leaseCurrent = true
+    expireNextLease = () => {
+      leaseCurrent = false
+    }
+    await expect(
+      runtime.sendPrompt(
+        withNotebookUserOperation(
+          {
+            sessionId: session.sessionId,
+            text: 'Continue with a current human lease.',
+            provenanceContext: { promptMessageId: 'expired-user-four' }
+          },
+          {
+            projectId: 'project',
+            refusalId: service.currentExecutionIntent({
+              projectId: 'project',
+              sessionId: session.sessionId
+            }).refusalId,
+            assertCurrent: () => {
+              if (!leaseCurrent) throw new Error('Human execution lease expired')
+            }
+          }
+        )
+      )
+    ).rejects.toThrow('Human execution lease expired')
+    await runtime.releaseSessionForTransfer(session.sessionId)
+    await runtime.resumeSession({ sessionId: session.sessionId, cwd: root, projectId: 'project' })
+    expect(await run(current!)).toContain('NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION')
+    const state = await service.state({
+      projectId: 'project',
+      sessionId: session.sessionId,
+      workspaceCwd: root
+    })
+    expect(state.runs).toHaveLength(0)
   } finally {
     await runtime.shutdownForQuit()
     await rpc.close()

@@ -1418,6 +1418,7 @@ export class AcpSessionCapabilityOwner {
     const notebook = this.options.notebook
     if (!old || !routingId || !notebook) throw new Error('Notebook capability is unavailable.')
     let connection: NotebookRpcConnection | undefined
+    let commitExecution: (() => void) | undefined
     const environment = await this.buildNotebookEnvironment(
       routingId,
       cwd,
@@ -1426,6 +1427,7 @@ export class AcpSessionCapabilityOwner {
       this.shellRuntimeBindings.get(appSessionId) ?? defaultShellRuntimeBinding(),
       (value) => {
         connection = value
+        commitExecution = value.deferExecution?.()
       },
       (await this.options.wslSetupSessions?.isBound(appSessionId)) === true,
       executionIntent
@@ -1468,6 +1470,7 @@ export class AcpSessionCapabilityOwner {
         if (finalized) throw new Error('Notebook capability refresh is already finalized.')
         if (this.mcpServers.get(appSessionId) !== previous)
           throw new Error('Notebook capability refresh was superseded.')
+        commitExecution?.()
         const oldToken = this.notebookTokens.get(appSessionId)
         const tokens = this.sessionCapabilityTokens.get(appSessionId) ?? []
         this.sessionCapabilityTokens.set(appSessionId, [

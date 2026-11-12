@@ -6,7 +6,10 @@ import type {
 } from '../../shared/artifact-reproducibility'
 import { createCallerContext, type CallerContext } from '../caller-context'
 import { ApplicationCallerLeaseRegistry } from '../caller-lifecycle'
-import { createApplicationCommandRouter } from '../application-command-router'
+import {
+  createApplicationCommandRouter,
+  type ApplicationInvocation
+} from '../application-command-router'
 import {
   dataContentApplicationCommands,
   registerDataContentApplicationCommands,
@@ -69,13 +72,15 @@ function setup(
     reproducibility: commands
   } as DataContentApplicationCommandDependencies)
   const leases = new ApplicationCallerLeaseRegistry()
-  // eslint-disable-next-line @typescript-eslint/explicit-function-return-type
   const caller = (
     surface: 'electron' | 'web' = 'electron',
     authority: Partial<
       Pick<CallerContext, 'principalKind' | 'actionOrigin' | 'isAuthorizationCurrent'>
     > = {}
-  ) => {
+  ): ReturnType<ApplicationCallerLeaseRegistry['acquire']> & {
+    clientId: string
+    invocation: ApplicationInvocation<readonly [ArtifactReproducibilityCheckRequest]>
+  } => {
     const clientId = randomUUID()
     const context = createCallerContext({
       clientId,

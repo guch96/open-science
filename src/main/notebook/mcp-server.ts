@@ -76,6 +76,8 @@ type NotebookRpcConnection = LocalRpcTransport & {
   // Optional owner-scoped cleanup for provisional startup connections. Releasing an older connection
   // must not revoke a newer token issued under the same stable app Session id.
   release?: () => void
+  // Main-only preparation fence. The returned owner callback activates only this concrete token.
+  deferExecution?: () => () => void
 }
 
 type NotebookMcpEnvironment = NotebookRpcConnection &

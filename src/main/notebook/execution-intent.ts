@@ -10,6 +10,7 @@ export type NotebookExecutionContinuation = NotebookExecutionIntentScope &
 // Concrete transports and derived Attempts retain the same immutable reference.
 export class NotebookExecutionIntent {
   private refusal?: Readonly<{ id: string; reason: string }>
+  private userPreparationPending = false
   private readonly branches = new Map<
     string,
     { onViolation?: () => void; providerStopRequested: boolean; cancellation: AbortController }
@@ -24,6 +25,20 @@ export class NotebookExecutionIntent {
   block(reason: string): string {
     this.refusal ??= Object.freeze({ id: randomUUID(), reason })
     return this.refusal.id
+  }
+
+  prepareUserExecution(): void {
+    this.userPreparationPending = true
+  }
+
+  commitUserExecution(): void {
+    this.userPreparationPending = false
+  }
+
+  abandonUserExecution(): void {
+    if (!this.userPreparationPending) return
+    this.userPreparationPending = false
+    this.block('user-execution-preparation-not-committed')
   }
 
   assertExecutable(): void {

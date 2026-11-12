@@ -507,6 +507,7 @@ class AcpPromptTurnWorkflow {
       this.options.registry.select(admittedRequest.sessionId)
       this.options.recordAdmittedPrompt(admittedRequest)
     } catch (error) {
+      notebookExecutionIntent(admittedRequest)?.abandonUserExecution()
       const scope = interaction ?? reservation
       const cancelled = mode.kind === 'app-continuation' && scope.signal.aborted
       skill.close(cancelled ? 'cancelled' : rejectedSkillOutcome)
@@ -571,6 +572,7 @@ class AcpPromptTurnWorkflow {
     let skillStarted = false
     let skillFinalized = false
     let userMessageEmitted = false
+    let notebookProviderDispatched = false
     let sideChatRelay: ReturnType<NonNullable<typeof env.sideChatRelays>['claim']>
     let sideChatRelaySettled = false
     const notebookWorkingFiles = new NotebookWorkingFileObserver()
@@ -765,6 +767,8 @@ class AcpPromptTurnWorkflow {
           },
           onDispatched: () => {
             providerDispatched = true
+            notebookProviderDispatched = true
+            notebookExecutionIntent(request)?.commitUserExecution()
           },
           captureStop: (response) => {
             if (plan.isProviderPaused?.(interaction)) {
@@ -915,6 +919,7 @@ class AcpPromptTurnWorkflow {
     } catch (error) {
       outcome = Object.freeze({ kind: 'failed', error })
     }
+    if (!notebookProviderDispatched) notebookExecutionIntent(request)?.abandonUserExecution()
     if (sideChatRelay && !sideChatRelaySettled) {
       sideChatRelaySettled = true
       sideChatRelay.restore()

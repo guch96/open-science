@@ -242,13 +242,16 @@ const composeAcpRuntimePromptOwners = (
     // A distinct Provider dispatch has its own credential even when it inherits the same stopped
     // intent. A late callback from its predecessor must never stop a newer explanatory branch.
     if (intent) {
-      const refresh = await base.sessionCapabilities.prepareNotebookConnectionRefresh({
-        appSessionId: input.appSessionId,
-        projectId: projectId(input.appSessionId),
-        cwd: input.cwd,
-        executionIntent: intent
-      })
+      let refresh:
+        | Awaited<ReturnType<typeof base.sessionCapabilities.prepareNotebookConnectionRefresh>>
+        | undefined
       try {
+        refresh = await base.sessionCapabilities.prepareNotebookConnectionRefresh({
+          appSessionId: input.appSessionId,
+          projectId: projectId(input.appSessionId),
+          cwd: input.cwd,
+          executionIntent: intent
+        })
         const assertCurrent = (): void => {
           input.signal?.throwIfAborted()
           input.assertCurrent?.()
@@ -272,7 +275,10 @@ const composeAcpRuntimePromptOwners = (
         assertCurrent()
         refresh.commit()
       } catch (error) {
-        refresh.release()
+        // A cancelled/failed preparation must not leave an executable current intent for a
+        // later generic reconnect. Retired credentials are never restored.
+        intent.abandonUserExecution()
+        refresh?.release()
         throw error
       }
       return
@@ -453,10 +459,11 @@ const composeAcpRuntimePromptOwners = (
             throw new Error('The Notebook refusal changed. Refresh it before continuing execution.')
           // Ordinary chat may explain a refusal; only the purpose-owned human command creates
           // another executable context after rejection.
-          intent =
-            current?.refusalId && !operation.refusalId
-              ? current
-              : notebook.createExecutionIntent(scope)
+          if (current?.refusalId && !operation.refusalId) intent = current
+          else {
+            intent = notebook.createExecutionIntent(scope)
+            intent.prepareUserExecution()
+          }
         } else if (!intent) {
           const origin =
             request.provenanceContext?.originMessageId ?? request.provenanceContext?.promptMessageId

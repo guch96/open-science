@@ -797,7 +797,10 @@ describe('repl_loop local RPC transport', () => {
       OPEN_SCIENCE_MCP_RPC_TOKEN: connection.token
     })
     try {
-      const result = await send('await host.submitOutput({})')
+      const result = await send('await host.submitOutput({})', {
+        invocationId: 'tool-1',
+        nonce: endInvocation.nonce
+      })
       expect(result.error).toContain('Structured output does not match the admitted schema.')
       expect(result.error).toContain('structured_output_validation_failed')
       expect(result.error).toContain('/summary')
@@ -1076,14 +1079,16 @@ describe('repl_loop local RPC transport', () => {
     })
     try {
       const admitted = await send(
-        "return await host.delegate([{ name: 'First', task: 'First' }, { name: 'Second', task: 'Second' }], { wait: false })"
+        "return await host.delegate([{ name: 'First', task: 'First' }, { name: 'Second', task: 'Second' }], { wait: false })",
+        { invocationId: 'tool', nonce: endInvocation.nonce }
       )
       expect(admitted.error).toBeNull()
       const handles = JSON.parse(admitted.result!).children
       await expect.poll(() => execution.controls()).toHaveLength(2)
       failedFrame = handles[1].frameId
       const stopped = await send(
-        `await host.stopChild(${JSON.stringify(handles.map(({ frameId }: { frameId: string }) => frameId))})`
+        `await host.stopChild(${JSON.stringify(handles.map(({ frameId }: { frameId: string }) => frameId))})`,
+        { invocationId: 'tool', nonce: endInvocation.nonce }
       )
       expect(stopped.error).not.toContain('private dependency secret')
       const report = JSON.parse(stopped.error!.match(/\{.*\}/)![0])
@@ -1092,7 +1097,8 @@ describe('repl_loop local RPC transport', () => {
         ({ frameId, attemptId }: { frameId: string; attemptId: string }) => ({ frameId, attemptId })
       )
       const observed = await send(
-        `return await host.collect(${JSON.stringify(selectors)}, { timeoutSeconds: 0 })`
+        `return await host.collect(${JSON.stringify(selectors)}, { timeoutSeconds: 0 })`,
+        { invocationId: 'tool', nonce: endInvocation.nonce }
       )
       expect(observed.error).toBeNull()
       expect(JSON.parse(observed.result!).map(({ status }: { status: string }) => status)).toEqual([
@@ -1101,7 +1107,12 @@ describe('repl_loop local RPC transport', () => {
       ])
       failedFrame = ''
       expect(
-        (await send(`await host.stopChild([${JSON.stringify(handles[1].frameId)}])`)).error
+        (
+          await send(`await host.stopChild([${JSON.stringify(handles[1].frameId)}])`, {
+            invocationId: 'tool',
+            nonce: endInvocation.nonce
+          })
+        ).error
       ).toBeNull()
     } finally {
       child.kill()
@@ -1165,7 +1176,10 @@ describe('repl_loop local RPC transport', () => {
     try {
       const workflow =
         "const specialists = await host.agents.list(); const selected = specialists[0]; const byId = await host.delegate({ name: 'Stable id lookup', task: 'By stable id', profile: selected.id }, { wait: false }); const byName = await host.delegate({ name: 'Exact name lookup', task: 'By exact name', profile: selected.name }, { wait: false }); const main = await host.delegate({ name: 'Default Main lookup', task: 'Default Main' }, { wait: false }); return JSON.stringify({ selected: { id: selected.id, name: selected.name }, byId, byName, main })"
-      const response = await send(workflow)
+      const response = await send(workflow, {
+        invocationId: 'tool-call-1',
+        nonce: endInvocation.nonce
+      })
       expect(response.error).toBeNull()
       const result = JSON.parse(response.result ?? '{}')
       expect(result.selected).toEqual({ id: selected.id, name: selected.name })
@@ -1206,7 +1220,10 @@ describe('repl_loop local RPC transport', () => {
         { kind: 'main' }
       ])
 
-      const replay = await send(workflow)
+      const replay = await send(workflow, {
+        invocationId: 'tool-call-1',
+        nonce: endInvocation.nonce
+      })
       expect(replay.error).toBeNull()
       expect(JSON.parse(replay.result ?? '{}')).toEqual(result)
       expect(execution.controls()).toHaveLength(3)
