@@ -29,6 +29,11 @@ const registerNotebookIpcHandlers = (handlers: NotebookCommandWorkflows): void =
   ipcMainHandle('notebook:state', (_event, request: NotebookSessionStateRequest) =>
     handlers.state(request)
   )
+  ipcMainHandle(
+    'notebook:memory-policy-state',
+    (_event, request: import('../../shared/notebook-memory').NotebookMemoryPolicyStateRequest) =>
+      handlers.memoryPolicyState(request)
+  )
   ipcMainHandle('notebook:project-activity', (_event, request: NotebookProjectActivityRequest) =>
     handlers.projectActivity(request)
   )

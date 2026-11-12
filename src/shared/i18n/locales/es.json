@@ -8326,6 +8326,24 @@
     "Source URL": "URL de la fuente",
     "Branch or tag": "Rama o etiqueta",
     "Use a public GitHub repository or branch URL that publishes a Specialist Marketplace catalog.": "Utilice la URL de un repositorio público de GitHub o de una rama que publique un catálogo del mercado de especialistas.",
-    "Installed Skills can change Agent behavior. Only trust sources you recognize.": "Las habilidades instaladas pueden cambiar el comportamiento de los agentes. Confíe únicamente en fuentes que conozca."
+    "Installed Skills can change Agent behavior. Only trust sources you recognize.": "Las habilidades instaladas pueden cambiar el comportamiento de los agentes. Confíe únicamente en fuentes que conozca.",
+    "System memory is under pressure": "La memoria del sistema es insuficiente",
+    "Notebook memory checking is unavailable": "La comprobación de memoria de Notebook no está disponible",
+    "Notebook execution needs your decision.": "La ejecución de Notebook requiere su decisión.",
+    "This code did not run. Choose whether to retry or manage Notebook resources.": "Este código no se ejecutó. Elija entre reintentar o gestionar los recursos de Notebook.",
+    "Recheck and retry": "Volver a comprobar y reintentar",
+    "Manage Notebook resources": "Gestionar recursos de Notebook",
+    "Memory has recovered. Execution still requires your choice.": "La memoria se ha recuperado. La ejecución sigue requiriendo su decisión.",
+    "Notebook resources are active. Manage them in Compute if they are no longer needed.": "Hay recursos de Notebook activos. Gestiónelos en Compute si ya no los necesita.",
+    "The latest memory status could not be read. Retry will check it again.": "No se pudo leer el estado actual de la memoria. Al reintentar se comprobará de nuevo.",
+    "Memory check details": "Detalles de la comprobación de memoria",
+    "The memory checking component is unavailable. Update or repair the installation before retrying.": "El componente de comprobación de memoria no está disponible. Actualice o repare la instalación antes de reintentar.",
+    "Available memory could not be confirmed. Recheck after the sampling cooldown.": "No se pudo confirmar la memoria disponible. Vuelva a comprobarla tras el intervalo de muestreo.",
+    "Return to the same active Notebook terminal to retry its current contents.": "Vuelva al mismo terminal activo de Notebook para reintentar su contenido actual.",
+    "Open the affected project to retry or manage its Notebook resources.": "Abra el proyecto afectado para reintentar o gestionar sus recursos de Notebook.",
+    "Open reproducibility checks": "Abrir comprobaciones de reproducibilidad",
+    "Recheck memory and reconsider the blocked Notebook work. Keep completed results and ask before repeating completed steps.": "Vuelva a comprobar la memoria y reconsidere el trabajo bloqueado de Notebook. Conserve los resultados completados y pregunte antes de repetir pasos completados.",
+    "Notebook continuation could not be started. The previous request remains stopped.": "No se pudo iniciar la continuación de Notebook. La solicitud anterior permanece detenida.",
+    "Notebook continuation is unavailable. Update the application before retrying.": "La continuación de Notebook no está disponible. Actualice la aplicación antes de reintentar."
   }
 }

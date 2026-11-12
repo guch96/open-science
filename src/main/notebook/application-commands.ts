@@ -43,6 +43,11 @@ const notebookProjectActivityCommand = defineApplicationCommand<
   WorkflowArgs<'projectActivity'>,
   WorkflowResult<'projectActivity'>
 >('notebook:project-activity')
+const notebookMemoryPolicyStateCommand = defineApplicationCommand<
+  'notebook:memory-policy-state',
+  WorkflowArgs<'memoryPolicyState'>,
+  WorkflowResult<'memoryPolicyState'>
+>('notebook:memory-policy-state')
 const notebookInspectNamespaceCommand = defineApplicationCommand<
   'notebook:inspect-namespace',
   WorkflowArgs<'inspectNamespace'>,
@@ -123,6 +128,7 @@ const notebookApplicationCommands = defineApplicationCommandGroup('notebook', [
   notebookRunIndexCommand,
   notebookStateCommand,
   notebookProjectActivityCommand,
+  notebookMemoryPolicyStateCommand,
   notebookInspectNamespaceCommand,
   notebookReferenceCommand,
   notebookBeginCodeCellCommand,
@@ -149,6 +155,8 @@ const installNotebookApplicationCommands = (
     scope.registerGroup(notebookApplicationCommands, {
       'notebook:run-index': (invocation) => dependencies.workflows.runIndex(invocation.args[0]),
       'notebook:state': (invocation) => dependencies.workflows.state(invocation.args[0]),
+      'notebook:memory-policy-state': (invocation) =>
+        dependencies.workflows.memoryPolicyState(invocation.args[0]),
       'notebook:project-activity': (invocation) =>
         dependencies.workflows.projectActivity(invocation.args[0]),
       'notebook:inspect-namespace': (invocation) =>
@@ -202,6 +210,7 @@ export {
   notebookGetBackgroundRunCommand,
   notebookInspectNamespaceCommand,
   notebookProjectActivityCommand,
+  notebookMemoryPolicyStateCommand,
   notebookReadInputPreviewCommand,
   notebookReferenceCommand,
   notebookRestartCommand,

@@ -247,6 +247,8 @@
         "src/main/local-rpc-transport.ts",
         "packages/notebook-code-risk/src/index.ts",
         "src/main/notebook/runtime-service.ts",
+        "src/main/notebook/memory-policy.ts",
+        "src/main/notebook/memory-policy-platform.ts",
         "src/shared/tool-detail-sanitizer.ts",
         "packages/notebook-analysis/src/dependency-analysis-python.ts",
         "packages/notebook-analysis/src/dependency-analysis-repl.ts",

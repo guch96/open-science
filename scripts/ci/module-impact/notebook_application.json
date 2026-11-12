@@ -147,6 +147,8 @@
     "src/main/notebook/authorized-directories.integration.test.ts",
     "src/main/notebook/idle-reclamation.ts",
     "src/main/notebook/idle-reclamation.test.ts",
+    "src/main/notebook/runtime-execution-admission.test.ts",
+    "src/main/notebook/runtime-pressure-reclamation.test.ts",
     "src/main/notebook/owned-resources.test.ts"
   ],
   "interfacePaths": [
@@ -346,6 +348,8 @@
       "src/main/notebook-payload.integration.test.ts",
       "src/main/notebook/source-analysis-worker.test.ts",
       "src/main/notebook/idle-reclamation.test.ts",
+      "src/main/notebook/runtime-execution-admission.test.ts",
+      "src/main/notebook/runtime-pressure-reclamation.test.ts",
       "src/main/notebook/owned-resources.test.ts"
     ],
     "contract": [
@@ -854,9 +858,13 @@
       "src/main/node-entry.test.ts",
       "src/main/desktop-runtime-session-size.integration.test.ts",
       "src/main/web-service/session-payload.integration.test.ts",
-      "src/main/composition/session-packages.test.ts"
+      "src/main/composition/session-packages.test.ts",
+      "src/renderer/src/pages/workspace/NotebookMemoryNoticeBridge.interaction.test.tsx"
     ]
   },
-  "capabilityOverlays": ["notebook_network_sandbox", "windows_sensitive"],
+  "capabilityOverlays": [
+    "notebook_network_sandbox",
+    "windows_sensitive"
+  ],
   "fallbackCapability": "main_runtime"
 }

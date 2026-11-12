@@ -140,6 +140,18 @@
     "src/main/notebook/managed-skill-read-roots.ts",
     "src/main/notebook/managed-skill-read-roots.test.ts",
     "src/main/notebook/managed-skill-read.integration.test.ts",
+    "src/main/notebook/execution-admission.integration.test.ts",
+    "src/main/notebook/execution-admission.ts",
+    "src/main/notebook/memory-policy-config.test.ts",
+    "src/main/notebook/memory-policy-config.ts",
+    "src/main/notebook/memory-policy-linux.test.ts",
+    "src/main/notebook/memory-policy-linux.ts",
+    "src/main/notebook/memory-policy-platform.test.ts",
+    "src/main/notebook/memory-policy-platform.ts",
+    "src/main/notebook/memory-policy.native.integration.test.ts",
+    "src/main/notebook/memory-policy.test-support.ts",
+    "src/main/notebook/memory-policy.test.ts",
+    "src/main/notebook/memory-policy.ts",
     "src/main/notebook/owned-resources.integration.test.ts",
     "src/main/notebook/owned-resources.ts"
   ],
@@ -233,6 +245,12 @@
     "src/main/notebook/shell-process.ts",
     "src/main/notebook/trust-bundle.ts",
     "src/main/notebook/working-file-observer.ts",
+    "src/main/notebook/execution-admission.ts",
+    "src/main/notebook/memory-policy-config.ts",
+    "src/main/notebook/memory-policy-linux.ts",
+    "src/main/notebook/memory-policy-platform.ts",
+    "src/main/notebook/memory-policy.test-support.ts",
+    "src/main/notebook/memory-policy.ts",
     "src/main/notebook/owned-resources.ts"
   ],
   "consumerModules": [],
@@ -287,6 +305,12 @@
       "src/main/notebook/kernel-process-identity.test.ts",
       "src/main/notebook/managed-skill-read-roots.test.ts",
       "src/main/notebook/managed-skill-read.integration.test.ts",
+      "src/main/notebook/execution-admission.integration.test.ts",
+      "src/main/notebook/memory-policy-config.test.ts",
+      "src/main/notebook/memory-policy-linux.test.ts",
+      "src/main/notebook/memory-policy-platform.test.ts",
+      "src/main/notebook/memory-policy.native.integration.test.ts",
+      "src/main/notebook/memory-policy.test.ts",
       "src/main/notebook/owned-resources.integration.test.ts"
     ],
     "contract": [
@@ -849,6 +873,9 @@
       "src/main/web-service/session-payload.integration.test.ts"
     ]
   },
-  "capabilityOverlays": ["notebook_network_sandbox", "windows_sensitive"],
+  "capabilityOverlays": [
+    "notebook_network_sandbox",
+    "windows_sensitive"
+  ],
   "fallbackCapability": "main_runtime"
 }

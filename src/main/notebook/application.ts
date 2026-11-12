@@ -3,7 +3,11 @@ import type { ApplicationModule } from '../application-runtime'
 import type { NotebookEnvironmentLifecycle } from './environment-lifecycle-workflows'
 import type { NotebookLocalRpcCapability } from './local-rpc-notebook-adapter'
 import { createNotebookCommandWorkflows, type NotebookCommandWorkflows } from './notebook-workflows'
-import { NotebookRuntimeService, type NotebookRuntimeServiceOptions } from './runtime-service'
+import {
+  NotebookRuntimeService,
+  projectNotebookMemoryPolicyState,
+  type NotebookRuntimeServiceOptions
+} from './runtime-service'
 import type { ProjectIdScope } from '../../shared/project-scope'
 
 type NotebookApplicationDeps = Pick<
@@ -58,7 +62,17 @@ const createNotebookApplication = (deps: NotebookApplicationDeps): NotebookAppli
     ...runtimeOptions,
     callbacks: {
       onNotebookAvailable: (event) => events.publish('notebook:available', event),
-      onNotebookChanged: (event) => events.publish('notebook:changed', event)
+      onNotebookChanged: (event) => events.publish('notebook:changed', event),
+      onMemoryPolicyRejected: (context, state) =>
+        events.publish('notebook:memory-rejected', {
+          ...context,
+          memory: projectNotebookMemoryPolicyState(state)
+        }),
+      onMemoryPolicyChanged: (state, hasLiveResources) =>
+        events.publish('notebook:memory-policy-changed', {
+          hasLiveResources,
+          memory: projectNotebookMemoryPolicyState(state)
+        })
     }
   })
   const localRpc: NotebookLocalRpcCapability = runtime

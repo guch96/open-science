@@ -466,6 +466,49 @@ describe('Stop before an existing Session prompt reaches Main', () => {
     await saveSessionInOrder(toPersistedSession(useSessionStore.getState().sessions[0]))
   }
 
+  it('sends a fresh visible memory continuation through the dedicated human command without persisting its grant', async () => {
+    const { main, agent } = await existing()
+    const continueNotebookExecution = vi.fn(async () => snapshot)
+    const result = await sendWorkspaceMessage(
+      { ...agent, continueNotebookExecution },
+      {
+        sessionId: 'bound-session',
+        projectId: 'project',
+        cwd: '/workspace',
+        text: 'Recheck memory and reconsider the blocked Notebook work.',
+        requireExistingSession: true,
+        notebookContinuation: { refusalId: 'refusal-1' }
+      },
+      {
+        flushPersistence: async () => {
+          await saveSessionInOrder(toPersistedSession(useSessionStore.getState().sessions[0]))
+        }
+      }
+    )
+    expect(result).toBeDefined()
+    expect(agent.sendPrompt).not.toHaveBeenCalled()
+    expect(continueNotebookExecution).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 'project',
+        sessionId: 'bound-session',
+        refusalId: 'refusal-1',
+        text: 'Recheck memory and reconsider the blocked Notebook work.',
+        provenanceContext: expect.objectContaining({ promptMessageId: result!.messageId })
+      })
+    )
+    expect(
+      useSessionStore
+        .getState()
+        .sessions.find(({ id }) => id === 'bound-session')
+        ?.messages.at(-1)?.content
+    ).toBe('Recheck memory and reconsider the blocked Notebook work.')
+    expect(main.read()?.conversationGraph?.messages.at(-1)?.content).toBe(
+      'Recheck memory and reconsider the blocked Notebook work.'
+    )
+    expect(JSON.stringify(main.read())).not.toContain('refusal-1')
+    expect(JSON.stringify(main.read())).not.toContain('notebookContinuation')
+  })
+
   it.each(['prepare', 'flush'] as const)(
     'rolls back an exact unsent preparation after Stop during %s',
     async (phase) => {

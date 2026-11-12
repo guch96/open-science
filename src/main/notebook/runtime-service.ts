@@ -1,3 +1,7 @@
+import type {
+  NotebookMemoryPolicyState,
+  NotebookMemoryPolicyStateRequest
+} from '../../shared/notebook-memory'
 import { withDataRootWrite } from '../storage/migration-state'
 import type { NotebookOwnedResource } from './owned-resources'
 import type { NotebookDependencyAnalyzer } from '@aipoch/notebook-analysis'
@@ -220,8 +224,14 @@ type NotebookMemoryRejectionContext = Pick<NotebookSessionReference, 'projectId'
   workspaceCwd?: string
   source?: string
   inputKind?: string
+  refusalId?: string
+  terminalTarget?: string
 }
 type NotebookRuntimeServiceCallbacks = NotebookSessionLifecycleCallbacks & {
+  onMemoryPolicyChanged?: (
+    state: import('./memory-policy').MemoryPolicyObservation,
+    hasLiveResources: boolean
+  ) => void
   onMemoryPolicyRejected?: (
     context: NotebookMemoryRejectionContext,
     state: import('./memory-policy').MemoryPolicyObservation
@@ -456,6 +466,25 @@ const resolveDefaultExecutorOptions = (): NotebookKernelExecutorOptions => {
   }
 }
 
+const projectNotebookMemoryPolicyState = (
+  state: import('./memory-policy').MemoryPolicyObservation
+): NotebookMemoryPolicyState => ({
+  status: state.status,
+  reason: state.reason.code,
+  detail: state.reason.detail,
+  source: state.source,
+  executionScope: state.executionScope,
+  checkedAt: Date.now(),
+  sampleAgeMs: state.sampleAgeMs,
+  retryAfterMs: state.reason.retryAfterMs,
+  recoveryRemainingMs: state.reason.recoveryRemainingMs,
+  pressureLevel: state.facts?.pressureLevel,
+  availableBytes: state.facts?.availableBytes,
+  totalBytes: state.facts?.totalBytes,
+  committedBytes: state.facts?.committedBytes,
+  commitLimitBytes: state.facts?.commitLimitBytes
+})
+
 // Coordinates notebook cells, shared interpreters, persisted run history, and UI notifications.
 class NotebookRuntimeService {
   private memoryPolicyPromise?: Promise<NotebookMemoryPolicyPort>
@@ -468,10 +497,25 @@ class NotebookRuntimeService {
         ? Promise.resolve(this.options.memoryPolicy)
         : createNotebookMemoryPolicy(this.options.configRoot, this.options.platform)
     ).then((policy) => {
-      this.memoryPolicyUnsubscribe = policy.subscribe?.(() => this.idleReclamation?.refresh())
+      this.memoryPolicyUnsubscribe = policy.subscribe?.((state) => {
+        this.idleReclamation?.refresh()
+        this.options.callbacks?.onMemoryPolicyChanged?.(state, this.memoryPolicyActive)
+      })
       policy.setActive?.(this.memoryPolicyActive && !this.memoryPolicyDisposed)
       return policy
     }))
+  }
+
+  async getMemoryPolicyState(
+    request: NotebookMemoryPolicyStateRequest
+  ): Promise<NotebookMemoryPolicyState> {
+    const policy = await this.getMemoryPolicy()
+    // UI input cannot create sampler domains or silently substitute a host sample for WSL.
+    const state = await policy.getState()
+    if (request.executionScope && request.executionScope !== state.executionScope) {
+      throw new Error('The visible memory check no longer matches the current execution domain.')
+    }
+    return projectNotebookMemoryPolicyState(state)
   }
 
   private updateMemoryPolicyActivity(active: boolean): void {
@@ -532,6 +576,7 @@ class NotebookRuntimeService {
     if (notebookExecutionAdmission(request)) return request
     // Snapshot the actual host-owned live object before the first await. Historical statuses and
     // caller-provided epochs never authorize an explicit terminal to cold-start a replacement.
+    let terminalTarget: string | undefined
     let assertHostCurrent:
       ((boundary: import('./execution-admission').NotebookExecutionBoundary) => void) | undefined
     if (request.source === 'user' && request.inputKind === 'terminal') {
@@ -543,6 +588,7 @@ class NotebookRuntimeService {
         'python'
       const binding = session?.runtimeBinding(language)
       const key = dataProcessKey(language, binding?.envName)
+      terminalTarget = key
       const identity = session?.idleProcesses().find((proc) => proc.processKey === key)?.identity
       assertHostCurrent = (boundary) => {
         if (
@@ -573,7 +619,8 @@ class NotebookRuntimeService {
             sessionId: request.sessionId,
             workspaceCwd: request.workspaceCwd,
             source: request.source,
-            inputKind: request.inputKind
+            inputKind: request.inputKind,
+            terminalTarget
           },
           state
         )
@@ -3241,7 +3288,12 @@ class NotebookRuntimeService {
 }
 
 export { NotebookControlCompletionCapturedError } from './execution-owner'
-export { NotebookRuntimeService, resolveDefaultExecutorOptions, resolveLoopScriptPaths }
+export {
+  NotebookRuntimeService,
+  projectNotebookMemoryPolicyState,
+  resolveDefaultExecutorOptions,
+  resolveLoopScriptPaths
+}
 export type {
   InspectPackagesRequest,
   InspectPackagesResult,
