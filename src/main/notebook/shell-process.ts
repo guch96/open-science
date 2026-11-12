@@ -1140,6 +1140,9 @@ class NotebookShellProcessAdapter implements NotebookShellProcess {
         sessionId: session.identity.sessionId,
         laneKey: session.identity.laneKey,
         group: 'shell',
+        ...(session.identity.runtimeBinding?.kind === 'wsl2-bash'
+          ? {}
+          : { executionDomain: 'host' as const }),
         lastUsedAt: session.lastUsedAt,
         release: async (stillIdle) => {
           if (!stillIdle() || this.sessions.get(key) !== session) return false

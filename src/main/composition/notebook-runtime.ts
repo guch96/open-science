@@ -105,6 +105,8 @@ export async function composeNotebookRuntime({
         archiveCoordinator.admitSessionWork(projectId, sessionId),
       isSessionBusy: (projectId: string, sessionId: string) =>
         archiveCoordinator.isSessionBusy(projectId, sessionId),
+      isSessionExporting: (projectId: string, sessionId: string) =>
+        archiveCoordinator.isSessionExporting(projectId, sessionId),
       configRoot: resolveConfigRoot(),
       dataRoot: resolveDataRoot(),
       projectId: DEFAULT_ARTIFACT_PROJECT_ID,

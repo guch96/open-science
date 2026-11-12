@@ -137,6 +137,7 @@ class NotebookSessionLifecycleOwner {
     return [...this.options.sessions.values()].flatMap((session) =>
       session.idleProcesses().map((process) => ({
         identity: process.identity,
+        executionDomain: process.executionDomain,
         projectId: session.projectId,
         sessionId: session.sessionId,
         group: process.processKey === 'repl' ? ('repl' as const) : ('data' as const),
