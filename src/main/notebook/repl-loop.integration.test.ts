@@ -228,6 +228,108 @@ it.skipIf(!process.env.OPEN_SCIENCE_TEST_PYTHON)(
 
 describe('repl_loop local RPC transport', () => {
   it('keeps timer and await descendants bound to their originating invocation across REPL runs', async () => {
+    const delegations: Array<{
+      nonce: string | string[] | undefined
+      task: string
+      callId: string
+    }> = []
+    const received: Array<{
+      nonce: string | string[] | undefined
+      method: string
+      invocationId?: string
+    }> = []
+    const server = createServer((request, response) => {
+      let body = ''
+      request.on('data', (chunk) => (body += chunk))
+      request.on('end', () => {
+        const call = JSON.parse(body)
+        if (call.method === 'delegatedWorkCall') {
+          delegations.push({
+            nonce: request.headers['x-open-science-control-invocation'],
+            task: call.params.request.task,
+            callId: call.params.delegation_call_id
+          })
+        } else {
+          received.push({
+            nonce: request.headers['x-open-science-control-invocation'],
+            method: call.params?.method ?? call.method,
+            invocationId: call.params?.control_invocation_id
+          })
+        }
+        response
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ result: [] }))
+      })
+    })
+    const connection = await listenForLocalRpc(server, {
+      name: 'repl-loop-invocation-descendants',
+      transport: 'pipe'
+    })
+    const { child, send } = startLoop({
+      OPEN_SCIENCE_MCP_RPC_ENDPOINT: connection.endpoint,
+      OPEN_SCIENCE_MCP_RPC_SOCKET_PATH: connection.socketPath,
+      OPEN_SCIENCE_MCP_RPC_TOKEN: 'private-rpc-token'
+    })
+    try {
+      const first = await send(
+        `
+        globalThis.saved = 41;
+        await host.delegate({ task: 'immediate-old' });
+        globalThis.nextRun = new Promise(resolve => { globalThis.releaseNextRun = resolve });
+        globalThis.fromTimer = new Promise(resolve => {
+          setTimeout(async () => {
+            await nextRun;
+            await host.agents.list();
+            await host.delegate({ task: 'late-old' });
+            resolve();
+          }, 0);
+        });
+        globalThis.fromAwait = (async () => {
+          await nextRun;
+          await host.mcp('fixture', 'old-await');
+        })();
+        return saved;
+      `,
+        { invocationId: 'invocation-one', nonce: 'nonce-one' }
+      )
+      expect(first.error).toBeNull()
+      expect(first.result).toBe('41')
+      const second = await send(
+        `
+        releaseNextRun();
+        await Promise.all([fromTimer, fromAwait]);
+        await host.agents.list();
+        await host.delegate({ task: 'immediate-new' });
+        console.log(saved + 1);
+        return saved;
+      `,
+        { invocationId: 'invocation-two', nonce: 'nonce-two' }
+      )
+      expect(second.error).toBeNull()
+      expect(second).toMatchObject({ result: '41', stdout: '42\n' })
+      expect(received).toEqual(
+        expect.arrayContaining([
+          { method: 'agentsCall', nonce: 'nonce-one', invocationId: 'invocation-one' },
+          { method: 'old-await', nonce: 'nonce-one', invocationId: undefined },
+          { method: 'agentsCall', nonce: 'nonce-two', invocationId: 'invocation-two' }
+        ])
+      )
+      expect(received).toHaveLength(3)
+      expect(delegations).toEqual([
+        { nonce: 'nonce-one', task: 'immediate-old', callId: '1' },
+        { nonce: 'nonce-one', task: 'late-old', callId: '2' },
+        { nonce: 'nonce-two', task: 'immediate-new', callId: '1' }
+      ])
+      expect(JSON.stringify([first, second])).not.toMatch(/nonce-one|nonce-two|private-rpc-token/)
+    } finally {
+      child.kill()
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      )
+    }
+  })
+
+  it('keeps legacy reads available without lending a later invocation to callbacks outside its context', async () => {
     const received: Array<{
       nonce: string | string[] | undefined
       method: string
@@ -249,7 +351,7 @@ describe('repl_loop local RPC transport', () => {
       })
     })
     const connection = await listenForLocalRpc(server, {
-      name: 'repl-loop-invocation-descendants',
+      name: 'repl-loop-invocation-missing-context',
       transport: 'pipe'
     })
     const { child, send } = startLoop({
@@ -258,53 +360,70 @@ describe('repl_loop local RPC transport', () => {
       OPEN_SCIENCE_MCP_RPC_TOKEN: 'private-rpc-token'
     })
     try {
-      const first = await send(
-        `
-        globalThis.saved = 41;
-        globalThis.nextRun = new Promise(resolve => { globalThis.releaseNextRun = resolve });
-        globalThis.fromTimer = new Promise(resolve => {
-          setTimeout(async () => {
-            await nextRun;
-            await host.agents.list();
-            resolve();
-          }, 0);
+      const legacy = await send(`
+        await host.mcp('fixture', 'legacy-read');
+        globalThis.outsideInvocation = new Promise(resolve => {
+          // stdin's I/O resource was created before any control invocation. Its listener and
+          // descendant timer run outside the context even though registered from this cell.
+          process.stdin.once('data', () => {
+            setTimeout(async () => {
+              await host.agents.attachSkill('fixture', 'skill', { control_invocation_id: 'forged' });
+              resolve();
+            }, 0);
+          });
         });
-        globalThis.fromAwait = (async () => {
-          await nextRun;
-          await host.mcp('fixture', 'old-await');
-        })();
-        return saved;
-      `,
-        { invocationId: 'invocation-one', nonce: 'nonce-one' }
-      )
-      expect(first.error).toBeNull()
-      expect(first.result).toBe('41')
-      const second = await send(
+        return 'legacy-ready';
+      `)
+      expect(legacy.error).toBeNull()
+      const current = await send(
         `
-        releaseNextRun();
-        await Promise.all([fromTimer, fromAwait]);
-        await host.agents.list();
-        console.log(saved + 1);
-        return saved;
+        await outsideInvocation;
+        await host.agents.attachSkill('fixture', 'skill', { control_invocation_id: 'forged' });
       `,
         { invocationId: 'invocation-two', nonce: 'nonce-two' }
       )
-      expect(second.error).toBeNull()
-      expect(second).toMatchObject({ result: '41', stdout: '42\n' })
-      expect(received).toEqual(
-        expect.arrayContaining([
-          { method: 'agentsCall', nonce: 'nonce-one', invocationId: 'invocation-one' },
-          { method: 'old-await', nonce: 'nonce-one', invocationId: undefined },
-          { method: 'agentsCall', nonce: 'nonce-two', invocationId: 'invocation-two' }
-        ])
-      )
-      expect(received).toHaveLength(3)
-      expect(JSON.stringify([first, second])).not.toMatch(/nonce-one|nonce-two|private-rpc-token/)
+      expect(current.error).toBeNull()
+      expect(received).toEqual([
+        { method: 'legacy-read', nonce: undefined, invocationId: undefined },
+        { method: 'agentsCall', nonce: undefined, invocationId: undefined },
+        { method: 'agentsCall', nonce: 'nonce-two', invocationId: 'invocation-two' }
+      ])
     } finally {
       child.kill()
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve()))
       )
+    }
+  })
+
+  it('keeps private invocation context hidden when REPL code replaces async-hooks prototype methods', async () => {
+    const { child, send } = startLoop({})
+    try {
+      const patched = await send(
+        `
+        globalThis.capturedInvocation = null;
+        const { AsyncLocalStorage } = require('node:async_hooks');
+        for (const name of ['getStore', 'enterWith']) {
+          const original = AsyncLocalStorage.prototype[name];
+          AsyncLocalStorage.prototype[name] = function (...args) {
+            capturedInvocation = this;
+            return original.apply(this, args);
+          };
+        }
+        return 'ready';
+      `,
+        { invocationId: 'invocation-one', nonce: 'private-nonce-one' }
+      )
+      expect(patched.error).toBeNull()
+      const next = await send('return capturedInvocation === null', {
+        invocationId: 'invocation-two',
+        nonce: 'private-nonce-two'
+      })
+      expect(next.error).toBeNull()
+      expect(next.result).toBe('true')
+      expect(JSON.stringify([patched, next])).not.toMatch(/private-nonce/)
+    } finally {
+      child.kill()
     }
   })
 
@@ -1802,11 +1921,13 @@ describe('repl_loop local RPC transport', () => {
 
   it('forwards the exact host.viewImage camel-case contract and freezes validated metadata', async () => {
     const requests: Array<{ method?: string; params?: Record<string, unknown> }> = []
+    const nonces: Array<string | string[] | undefined> = []
     const server = createServer((request, response) => {
       let body = ''
       request.on('data', (chunk) => (body += chunk))
       request.on('end', () => {
         requests.push(JSON.parse(body))
+        nonces.push(request.headers['x-open-science-control-invocation'])
         response.writeHead(200, { 'content-type': 'application/json' }).end(
           JSON.stringify({
             result: {
@@ -1860,6 +1981,20 @@ describe('repl_loop local RPC transport', () => {
         }
       ])
 
+      const contextual = await send("await host.viewImage({ path: 'results/image.png' })", {
+        invocationId: 'image-invocation',
+        nonce: 'image-nonce'
+      })
+      expect(contextual.error).toBeNull()
+      expect(requests[1]).toEqual({
+        method: 'viewImageCall',
+        params: {
+          source: { path: 'results/image.png' },
+          control_invocation_id: 'image-invocation'
+        }
+      })
+      expect(nonces).toEqual([undefined, 'image-nonce'])
+
       for (const code of [
         "await host.viewImage({ version_id: 'v1' })",
         "await host.viewImage({ path: 'image.png' }, { max_size: 10 })"
@@ -1869,7 +2004,7 @@ describe('repl_loop local RPC transport', () => {
         )
         expect(invalid.result).toMatch(/unknown option/u)
       }
-      expect(requests).toHaveLength(1)
+      expect(requests).toHaveLength(2)
     } finally {
       child.kill()
       await new Promise<void>((resolve, reject) =>

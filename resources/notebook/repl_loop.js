@@ -111,9 +111,16 @@ delete process.env.OPEN_SCIENCE_NOTEBOOK_WORKSPACE_CWD
 // Capture invocation authority from the trusted frame, including for descendants that outlive a
 // serialized run. Keep both the store and its bound methods private to this module.
 const controlInvocations = new AsyncLocalStorage()
-const currentControlInvocation = controlInvocations.getStore.bind(controlInvocations)
-const withControlInvocation = controlInvocations.run.bind(controlInvocations)
-let DELEGATE_CALL_SEQUENCE = 0
+// run() calls other instance methods internally. Capture those too, so replacing the shared
+// async_hooks prototype from user code cannot intercept this private instance on a later run.
+for (const name of Object.getOwnPropertyNames(AsyncLocalStorage.prototype)) {
+  const method = controlInvocations[name]
+  if (name !== 'constructor' && typeof method === 'function') {
+    Object.defineProperty(controlInvocations, name, { value: method.bind(controlInvocations) })
+  }
+}
+const currentControlInvocation = controlInvocations.getStore
+const withControlInvocation = controlInvocations.run
 
 // Private references to the RPC clients, captured before user code runs. host.mcp MUST use these, not
 // the global `fetch`: a vm sandbox is not a security boundary, so sandbox code can reach the outer
@@ -2995,7 +3002,8 @@ const hostDelegationError = (publicMethod, value) => {
 
 async function delegateRpc(request, options = {}) {
   if (!RPC_ENDPOINT) throw new Error('host.delegate is unavailable: control RPC endpoint not set')
-  const delegationCallId = String(++DELEGATE_CALL_SEQUENCE)
+  const invocation = currentControlInvocation()
+  const delegationCallId = invocation ? String(++invocation.delegationCallSequence) : undefined
   const res = await capturedRpcFetch(RPC_ENDPOINT, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (RPC_TOKEN || '') },
@@ -3787,10 +3795,10 @@ rl.on('line', (line) => {
     withControlInvocation(
       {
         nonce: request.control_invocation_nonce,
-        invocationId: request.control_invocation_id
+        invocationId: request.control_invocation_id,
+        delegationCallSequence: 0
       },
       async () => {
-        DELEGATE_CALL_SEQUENCE = 0
         const resp = await run(request.code || '', request.repl_publisher)
         resp.req_id = request.req_id
         emit(resp)
