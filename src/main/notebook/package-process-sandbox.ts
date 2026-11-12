@@ -349,6 +349,7 @@ export const sandboxedPackageSpawn =
     let endExecution: (() => void) | undefined
     let ended = false
     let processesTerminated = false
+    let spawnError: unknown
     try {
       spawnOptions?.signal?.throwIfAborted()
       endExecution = sandboxed.beginExecution?.()
@@ -381,6 +382,7 @@ export const sandboxedPackageSpawn =
       processesTerminated = result.processesTerminated ?? true
       return { ...result, stderr: sandboxed.annotateStderr(result.stderr) }
     } catch (error) {
+      spawnError = error
       if (packageProcessTreeTerminated(error)) {
         processesTerminated = true
         if (sandboxed.confirmProcessTreeTermination) {
@@ -427,11 +429,18 @@ export const sandboxedPackageSpawn =
       throw error
     } finally {
       if (!ended) endExecution?.()
-      await sandboxed.cleanup(ended ? 'exit' : 'spawn-failed', {
-        processesTerminated,
-        ...(sandboxed.confirmProcessTreeTermination
-          ? { confirmTermination: sandboxed.confirmProcessTreeTermination }
-          : {})
-      })
+      await Promise.resolve()
+        .then(() =>
+          sandboxed.cleanup(ended ? 'exit' : 'spawn-failed', {
+            processesTerminated,
+            ...(sandboxed.confirmProcessTreeTermination
+              ? { confirmTermination: sandboxed.confirmProcessTreeTermination }
+              : {})
+          })
+        )
+        .catch((error: unknown) => {
+          // Retain the original failure and its owned cleanup capability, including CHILD_UNCONFIRMED.
+          if (spawnError === undefined) throw error
+        })
     }
   }

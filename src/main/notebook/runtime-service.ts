@@ -607,30 +607,29 @@ class NotebookRuntimeService {
         }
       }
     }
-    const admission = createNotebookExecutionAdmission({
-      policy: () => this.getMemoryPolicy(),
-      signal,
-      executionScope,
-      assertHostCurrent,
-      onRejected: (state) =>
-        this.notifyMemoryPolicyRejected(
-          {
-            projectId: resolveProjectId(request, this.options.projectId),
-            sessionId: request.sessionId,
-            workspaceCwd: request.workspaceCwd,
-            source: request.source,
-            inputKind: request.inputKind,
-            terminalTarget
-          },
-          state
-        )
-    })
-    const trusted = withNotebookExecutionAdmission(request, admission)
-    await this.sessionLifecycle.runProjectOperation(request, async () => {
+    return this.sessionLifecycle.runProjectOperation(request, async (deletionSignal) => {
+      const admission = createNotebookExecutionAdmission({
+        policy: () => this.getMemoryPolicy(),
+        signal: signal ? AbortSignal.any([signal, deletionSignal]) : deletionSignal,
+        executionScope,
+        assertHostCurrent,
+        onRejected: (state) =>
+          this.notifyMemoryPolicyRejected(
+            {
+              projectId: resolveProjectId(request, this.options.projectId),
+              sessionId: request.sessionId,
+              workspaceCwd: request.workspaceCwd,
+              source: request.source,
+              inputKind: request.inputKind,
+              terminalTarget
+            },
+            state
+          )
+      })
       await admission.prepare('submit')
       admission.assertCurrent('submit')
+      return withNotebookExecutionAdmission(request, admission)
     })
-    return trusted
   }
   private executionApproval: NotebookExecutionApproval | undefined
   private runtimeBindingApproval: NotebookRuntimeBindingApproval | undefined

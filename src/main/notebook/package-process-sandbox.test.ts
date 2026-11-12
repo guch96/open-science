@@ -19,73 +19,86 @@ afterEach(() => {
 })
 
 describe('sandboxedPackageSpawn', () => {
-  it('retains the original installer and sandbox until every cleanup stage is confirmed', async () => {
-    let treeProof = false
-    let sandboxProof = false
-    let terminated = false
-    const terminateTree = vi.fn<typeof terminateProcessTree>(async (child) => {
-      if (!treeProof) return { reaped: false }
-      if (!terminated) terminated = (await terminateProcessTree(child)).reaped
-      return { reaped: terminated }
-    })
-    const cleanup = vi.fn<Awaited<ReturnType<NotebookProcessSandbox['wrap']>>['cleanup']>(
-      async (_reason, outcome) => ({
-        processesTerminated: outcome.processesTerminated,
-        networkClosed: sandboxProof,
-        temporaryResourcesRemoved: sandboxProof
+  it.each(['incomplete', 'rejected'] as const)(
+    'retains the original installer and sandbox after %s cleanup until every stage is confirmed',
+    async (initialCleanup) => {
+      let treeProof = false
+      let sandboxProof = false
+      let terminated = false
+      let rejectInitial = initialCleanup === 'rejected'
+      const terminateTree = vi.fn<typeof terminateProcessTree>(async (child) => {
+        if (!treeProof) return { reaped: false }
+        if (!terminated) terminated = (await terminateProcessTree(child)).reaped
+        return { reaped: terminated }
       })
-    )
-    const processSandbox: NotebookProcessSandbox = {
-      wrap: async (invocation) => ({
-        executable: invocation.executable,
-        args: invocation.args,
-        env: invocation.env,
-        annotateStderr: (stderr) => stderr,
-        cleanup
+      const cleanup = vi.fn<Awaited<ReturnType<NotebookProcessSandbox['wrap']>>['cleanup']>(
+        async (_reason, outcome) => {
+          if (rejectInitial) {
+            rejectInitial = false
+            throw new Error('sandbox cleanup unavailable')
+          }
+          return {
+            processesTerminated: outcome.processesTerminated,
+            networkClosed: sandboxProof,
+            temporaryResourcesRemoved: sandboxProof
+          }
+        }
+      )
+      const processSandbox: NotebookProcessSandbox = {
+        wrap: async (invocation) => ({
+          executable: invocation.executable,
+          args: invocation.args,
+          env: invocation.env,
+          annotateStderr: (stderr) => stderr,
+          cleanup
+        })
+      }
+      const controller = new AbortController()
+      const spawn = sandboxedPackageSpawn({
+        processSandbox,
+        request: { language: 'python', packages: ['example'] },
+        runtimeRoot: process.cwd(),
+        storageRoot: process.cwd(),
+        terminateTree
       })
+      const failure = await spawn(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        process.env,
+        () => controller.abort(),
+        undefined,
+        false,
+        undefined,
+        { signal: controller.signal }
+      ).catch((error: unknown) => error)
+      const retained = environmentChildCleanup(failure)
+      try {
+        expect(failure).toMatchObject({
+          message: expect.stringContaining('RUNTIME_CHILD_UNCONFIRMED')
+        })
+        expect(retained?.identity).toBe(terminateTree.mock.calls[0][0])
+        await expect(retained!.release()).resolves.toMatchObject({ reaped: false })
+        treeProof = true
+        await expect(retained!.release()).resolves.toMatchObject({
+          reaped: false,
+          processesTerminated: true,
+          networkClosed: false
+        })
+        sandboxProof = true
+        await expect(retained!.release()).resolves.toMatchObject({
+          reaped: true,
+          processesTerminated: true,
+          networkClosed: true,
+          temporaryResourcesRemoved: true
+        })
+        expect(terminateTree.mock.calls.every(([child]) => child === retained!.identity)).toBe(true)
+      } finally {
+        treeProof = true
+        sandboxProof = true
+        await terminateTree(terminateTree.mock.calls[0][0])
+      }
     }
-    const controller = new AbortController()
-    const spawn = sandboxedPackageSpawn({
-      processSandbox,
-      request: { language: 'python', packages: ['example'] },
-      runtimeRoot: process.cwd(),
-      storageRoot: process.cwd(),
-      terminateTree
-    })
-    const failure = await spawn(
-      process.execPath,
-      ['-e', 'setInterval(() => {}, 1000)'],
-      process.env,
-      () => controller.abort(),
-      undefined,
-      false,
-      undefined,
-      { signal: controller.signal }
-    ).catch((error: unknown) => error)
-    const retained = environmentChildCleanup(failure)
-    try {
-      expect(retained?.identity).toBe(terminateTree.mock.calls[0][0])
-      await expect(retained!.release()).resolves.toMatchObject({ reaped: false })
-      treeProof = true
-      await expect(retained!.release()).resolves.toMatchObject({
-        reaped: false,
-        processesTerminated: true,
-        networkClosed: false
-      })
-      sandboxProof = true
-      await expect(retained!.release()).resolves.toMatchObject({
-        reaped: true,
-        processesTerminated: true,
-        networkClosed: true,
-        temporaryResourcesRemoved: true
-      })
-      expect(terminateTree.mock.calls.every(([child]) => child === retained!.identity)).toBe(true)
-    } finally {
-      treeProof = true
-      sandboxProof = true
-      await terminateTree(terminateTree.mock.calls[0][0])
-    }
-  })
+  )
 
   it('passes GUI-authorized roots to the package sandbox with their access mode', async () => {
     const storageRoot = mkdtempSync(join(tmpdir(), 'open-science-package-grants-'))
