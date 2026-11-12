@@ -198,14 +198,8 @@ const ProjectComputeInbox = ({ isActive = true }: { isActive?: boolean }): React
     }
   }, [projectId])
 
-  const hasNotebookResources =
-    notebookResources.groups.length > 0 ||
-    notebookResources.pendingDecisions.length > 0 ||
-    notebookResources.releases.some(
-      (release) => release.status !== 'released' || release.continuations.length > 0
-    )
   useEffect(() => {
-    if (!projectId || !isActive || !hasNotebookResources) return
+    if (!projectId || !isActive) return
     let timer: ReturnType<typeof setTimeout> | undefined
     const schedule = (): void => {
       clearTimeout(timer)
@@ -221,7 +215,7 @@ const ProjectComputeInbox = ({ isActive = true }: { isActive?: boolean }): React
       clearTimeout(timer)
       document.removeEventListener('visibilitychange', schedule)
     }
-  }, [projectId, isActive, hasNotebookResources])
+  }, [projectId, isActive])
 
   useEffect(() => {
     if (!projectId) return

@@ -388,6 +388,47 @@ describe('Compute Notebook resource controls', () => {
     expect(getProjectResources).toHaveBeenCalledTimes(4)
   })
 
+  it('discovers a new ready batch and pending decision after opening an empty Compute view', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    view = { groups: [], pendingDecisions: [], releases: [] }
+    await render()
+    expect(container.textContent).toContain('No running Notebooks')
+    expect(getProjectResources).toHaveBeenCalledOnce()
+
+    view = {
+      groups: [
+        {
+          ...group('ready-batch'),
+          resources: [
+            {
+              id: 'batch-created-later',
+              group: 'batch',
+              phase: 'ready',
+              memory: { metric: 'rss', coverage: 'unknown', sampledAt: Date.now() }
+            }
+          ]
+        }
+      ],
+      pendingDecisions: [
+        { projectId: 'project-1', sessionId: 'session-1', refusalId: 'refusal-created-later' }
+      ],
+      releases: []
+    }
+    await act(async () => vi.advanceTimersByTimeAsync(4_999))
+    expect(getProjectResources).toHaveBeenCalledOnce()
+    expect(container.textContent).not.toContain('Reproduction batch')
+    expect(container.textContent).not.toContain('Waiting for your decision')
+
+    await act(async () => vi.advanceTimersByTimeAsync(1))
+    expect(getProjectResources).toHaveBeenCalledTimes(2)
+    expect(container.textContent).toContain('Reproduction batch')
+    expect(container.textContent).toContain('Ready')
+    expect(container.textContent).toContain('Waiting for your decision')
+    expect(button('Continue Notebook work').disabled).toBe(false)
+    expect(sendMessage).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['release-in-progress', 'Notebook cleanup is already in progress.'],
     ['session-exporting', 'This Session is being exported. Wait, then review the resources again.'],
