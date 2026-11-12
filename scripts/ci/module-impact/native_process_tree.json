@@ -23,10 +23,7 @@
   ],
   "consumerModules": [],
   "testFiles": {
-    "owner": [
-      "src/main/windows-process-query.test.ts",
-      "packages/process-tree-native/test/memory-pressure.cjs"
-    ],
+    "owner": ["src/main/windows-process-query.test.ts"],
     "contract": [
       "scripts/native-components.test.ts",
       "src/main/resource-diagnostics/native.integration.test.ts",
@@ -630,9 +627,6 @@
       "src/main/update/installation-preparation.test.ts"
     ]
   },
-  "capabilityOverlays": [
-    "notebook_network_sandbox",
-    "windows_sensitive"
-  ],
+  "capabilityOverlays": ["notebook_network_sandbox", "windows_sensitive"],
   "fallbackCapability": "main_runtime"
 }

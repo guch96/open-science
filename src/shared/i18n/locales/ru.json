@@ -8473,6 +8473,24 @@
     "Source URL": "URL источника",
     "Branch or tag": "Ветка или тег",
     "Use a public GitHub repository or branch URL that publishes a Specialist Marketplace catalog.": "Укажите URL публичного репозитория GitHub или ветки, публикующей каталог маркетплейса специалистов.",
-    "Installed Skills can change Agent behavior. Only trust sources you recognize.": "Установленные навыки могут изменить поведение агентов. Доверяйте только знакомым источникам."
+    "Installed Skills can change Agent behavior. Only trust sources you recognize.": "Установленные навыки могут изменить поведение агентов. Доверяйте только знакомым источникам.",
+    "System memory is under pressure": "Системная память перегружена",
+    "Notebook memory checking is unavailable": "Проверка памяти Notebook недоступна",
+    "Notebook execution needs your decision.": "Для выполнения Notebook требуется ваше решение.",
+    "This code did not run. Choose whether to retry or manage Notebook resources.": "Этот код не был выполнен. Выберите повторную попытку или управление ресурсами Notebook.",
+    "Recheck and retry": "Проверить и повторить",
+    "Manage Notebook resources": "Управление ресурсами Notebook",
+    "Memory has recovered. Execution still requires your choice.": "Память восстановилась. Для выполнения по-прежнему требуется ваше решение.",
+    "Notebook resources are active. Manage them in Compute if they are no longer needed.": "Ресурсы Notebook активны. Управляйте ими в Compute, если они больше не нужны.",
+    "The latest memory status could not be read. Retry will check it again.": "Не удалось получить текущее состояние памяти. При повторной попытке оно будет проверено снова.",
+    "Memory check details": "Сведения о проверке памяти",
+    "The memory checking component is unavailable. Update or repair the installation before retrying.": "Компонент проверки памяти недоступен. Перед повторной попыткой обновите или восстановите установку.",
+    "Available memory could not be confirmed. Recheck after the sampling cooldown.": "Не удалось подтвердить доступную память. Проверьте снова после интервала между измерениями.",
+    "Return to the same active Notebook terminal to retry its current contents.": "Вернитесь в тот же активный терминал Notebook, чтобы повторить выполнение его текущего содержимого.",
+    "Open the affected project to retry or manage its Notebook resources.": "Откройте соответствующий проект для повторной попытки или управления его ресурсами Notebook.",
+    "Open reproducibility checks": "Открыть проверки воспроизводимости",
+    "Recheck memory and reconsider the blocked Notebook work. Keep completed results and ask before repeating completed steps.": "Проверьте память снова и пересмотрите заблокированную работу Notebook. Сохраните завершённые результаты и спросите перед повторением завершённых шагов.",
+    "Notebook continuation could not be started. The previous request remains stopped.": "Не удалось продолжить работу Notebook. Предыдущий запрос остаётся остановленным.",
+    "Notebook continuation is unavailable. Update the application before retrying.": "Продолжение Notebook недоступно. Обновите приложение перед повторной попыткой."
   }
 }

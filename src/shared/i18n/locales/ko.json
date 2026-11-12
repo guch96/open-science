@@ -7984,6 +7984,24 @@
     "Source URL": "소스 URL",
     "Branch or tag": "브랜치 또는 태그",
     "Use a public GitHub repository or branch URL that publishes a Specialist Marketplace catalog.": "스페셜리스트 마켓플레이스 카탈로그를 게시하는 공개 GitHub 저장소 또는 브랜치 URL을 사용하세요.",
-    "Installed Skills can change Agent behavior. Only trust sources you recognize.": "설치한 스킬은 에이전트 동작을 변경할 수 있습니다. 신뢰할 수 있는 소스만 추가하세요."
+    "Installed Skills can change Agent behavior. Only trust sources you recognize.": "설치한 스킬은 에이전트 동작을 변경할 수 있습니다. 신뢰할 수 있는 소스만 추가하세요.",
+    "System memory is under pressure": "시스템 메모리가 부족합니다",
+    "Notebook memory checking is unavailable": "Notebook 메모리 확인을 사용할 수 없습니다",
+    "Notebook execution needs your decision.": "Notebook 실행에 대한 선택이 필요합니다.",
+    "This code did not run. Choose whether to retry or manage Notebook resources.": "이 코드는 실행되지 않았습니다. 재시도하거나 Notebook 리소스를 관리할지 선택하세요.",
+    "Recheck and retry": "다시 확인하고 재시도",
+    "Manage Notebook resources": "Notebook 리소스 관리",
+    "Memory has recovered. Execution still requires your choice.": "메모리가 회복되었습니다. 실행하려면 여전히 선택이 필요합니다.",
+    "Notebook resources are active. Manage them in Compute if they are no longer needed.": "Notebook 리소스가 활성 상태입니다. 더 이상 필요하지 않으면 Compute에서 관리하세요.",
+    "The latest memory status could not be read. Retry will check it again.": "최신 메모리 상태를 읽지 못했습니다. 재시도할 때 다시 확인합니다.",
+    "Memory check details": "메모리 확인 세부 정보",
+    "The memory checking component is unavailable. Update or repair the installation before retrying.": "메모리 확인 구성 요소를 사용할 수 없습니다. 설치를 업데이트하거나 복구한 후 재시도하세요.",
+    "Available memory could not be confirmed. Recheck after the sampling cooldown.": "사용 가능한 메모리를 확인하지 못했습니다. 샘플링 대기 시간이 지난 후 다시 확인하세요.",
+    "Return to the same active Notebook terminal to retry its current contents.": "동일한 활성 Notebook 터미널로 돌아가 현재 내용을 재시도하세요.",
+    "Open the affected project to retry or manage its Notebook resources.": "해당 프로젝트를 열어 재시도하거나 Notebook 리소스를 관리하세요.",
+    "Open reproducibility checks": "재현성 확인 열기",
+    "Recheck memory and reconsider the blocked Notebook work. Keep completed results and ask before repeating completed steps.": "메모리를 다시 확인하고 차단된 Notebook 작업을 재검토하세요. 완료된 결과를 유지하고 완료된 단계를 반복하기 전에 물어보세요.",
+    "Notebook continuation could not be started. The previous request remains stopped.": "Notebook 작업 계속을 시작하지 못했습니다. 이전 요청은 중지된 상태로 유지됩니다.",
+    "Notebook continuation is unavailable. Update the application before retrying.": "Notebook 작업 계속을 사용할 수 없습니다. 앱을 업데이트한 후 재시도하세요."
   }
 }

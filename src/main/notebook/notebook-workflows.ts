@@ -1,3 +1,7 @@
+import type {
+  NotebookMemoryPolicyState,
+  NotebookMemoryPolicyStateRequest
+} from '../../shared/notebook-memory'
 import type { ReplayRunIndex } from '../../shared/replay'
 import type {
   AppendNotebookCodeCellRequest,
@@ -52,6 +56,9 @@ type NotebookShutdownResult = { sessionId: string; status: 'shutdown' }
 type NotebookCommandRuntime = {
   runIndex(request: NotebookSessionRequest): Promise<ReplayRunIndex[]>
   state(request: NotebookSessionStateRequest): Promise<NotebookSessionState>
+  getMemoryPolicyState(
+    request: NotebookMemoryPolicyStateRequest
+  ): Promise<NotebookMemoryPolicyState>
   getProjectActivity(request: NotebookProjectActivityRequest): NotebookProjectActivity
   inspectNamespace(request: NotebookNamespaceRequest): Promise<NotebookNamespaceSnapshot>
   getSessionReference(request: NotebookSessionRequest): Promise<NotebookSessionReference | null>
@@ -76,6 +83,7 @@ type NotebookCommandRuntime = {
 type NotebookCommandWorkflows = {
   runIndex(request: NotebookSessionRequest): Promise<ReplayRunIndex[]>
   state(request: NotebookSessionStateRequest): Promise<NotebookSessionState>
+  memoryPolicyState(request: NotebookMemoryPolicyStateRequest): Promise<NotebookMemoryPolicyState>
   projectActivity(request: NotebookProjectActivityRequest): Promise<NotebookProjectActivity>
   inspectNamespace(request: NotebookNamespaceRequest): Promise<NotebookNamespaceSnapshot>
   reference(request: NotebookSessionRequest): Promise<NotebookSessionReference | null>
@@ -127,6 +135,7 @@ const createNotebookCommandWorkflows = (
   // so they share the same data-root admission as explicit mutation commands.
   runIndex: (request) => runtime.runIndex(request),
   state: (request) => withDataRootWrite(() => runtime.state(request)),
+  memoryPolicyState: (request) => runtime.getMemoryPolicyState(request),
   projectActivity: async (request) => runtime.getProjectActivity(request),
   inspectNamespace: (request) =>
     withDataRootWrite(() => runtime.inspectNamespace(withoutTrustedTurnContext(request))),
