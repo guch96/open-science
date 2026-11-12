@@ -300,6 +300,11 @@ export const createApplicationModules = async (
     ...sessionFoundation,
     getDetectSessionExportBlockingSessions: () =>
       projectLifecycle.detectSessionExportBlockingSessions,
+    getSessionExportOwners: () => ({
+      archiveCoordinator: projectLifecycle.archiveCoordinator,
+      sessionPersistenceCoordinator: sessionAuthority.sessionPersistenceCoordinator,
+      notebookService: notebookRuntime.notebookService
+    }),
     modules
   })
   const managedFiles = composeManagedFiles({
