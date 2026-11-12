@@ -14,6 +14,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { randomUUID } = require('node:crypto')
 const { fileURLToPath } = require('node:url')
+const { AsyncLocalStorage } = require('node:async_hooks')
 
 // Protocol output line. console is captured into strings during a run (see run()), so writing the
 // JSON here via process.stdout.write cannot be corrupted by user console output.
@@ -107,10 +108,11 @@ delete process.env.OPEN_SCIENCE_NOTEBOOK_PROJECT_ID
 delete process.env.OPEN_SCIENCE_NOTEBOOK_PROJECT_NAME
 delete process.env.OPEN_SCIENCE_NOTEBOOK_WORKSPACE_CWD
 
-// Updated only by the trusted kernel request frame while one serialized control invocation is
-// running. It is never exposed to sandbox code; host.agents forwards it as server context so an
-// approved switch can capture only this invocation's outer completion.
-let ACTIVE_CONTROL_INVOCATION_ID
+// Capture invocation authority from the trusted frame, including for descendants that outlive a
+// serialized run. Keep both the store and its bound methods private to this module.
+const controlInvocations = new AsyncLocalStorage()
+const currentControlInvocation = controlInvocations.getStore.bind(controlInvocations)
+const withControlInvocation = controlInvocations.run.bind(controlInvocations)
 let DELEGATE_CALL_SEQUENCE = 0
 
 // Private references to the RPC clients, captured before user code runs. host.mcp MUST use these, not
@@ -122,6 +124,14 @@ let DELEGATE_CALL_SEQUENCE = 0
 const capturedFetch = fetch
 const capturedHttpRequest = require('node:http').request
 const capturedRpcFetch = (input, init = {}) => {
+  const invocation = currentControlInvocation()
+  init = {
+    ...init,
+    headers: {
+      ...init.headers,
+      ...(invocation?.nonce ? { 'x-open-science-control-invocation': invocation.nonce } : {})
+    }
+  }
   if (!RPC_SOCKET_PATH && !RPC_PROXY_URL) return capturedFetch(input, init)
 
   const url = new URL(input)
@@ -1458,7 +1468,8 @@ async function hostViewImage(source, options = undefined) {
       method: 'viewImageCall',
       params: {
         source: normalizedSource,
-        ...(normalizedOptions === undefined ? {} : { options: normalizedOptions })
+        ...(normalizedOptions === undefined ? {} : { options: normalizedOptions }),
+        control_invocation_id: currentControlInvocation()?.invocationId
       }
     })
   })
@@ -2903,10 +2914,8 @@ async function agentsRpc(op, params = {}, sessionId = COMPUTE_SESSION_ID) {
       params: {
         op,
         ...(sessionId ? { session_id: sessionId } : {}),
-        ...(ACTIVE_CONTROL_INVOCATION_ID
-          ? { control_invocation_id: ACTIVE_CONTROL_INVOCATION_ID }
-          : {}),
-        ...(params || {})
+        ...(params || {}),
+        control_invocation_id: currentControlInvocation()?.invocationId
       }
     })
   })
@@ -3774,15 +3783,18 @@ rl.on('line', (line) => {
   } catch {
     return
   }
-  chain = chain.then(async () => {
-    ACTIVE_CONTROL_INVOCATION_ID = request.control_invocation_id
-    DELEGATE_CALL_SEQUENCE = 0
-    try {
-      const resp = await run(request.code || '', request.repl_publisher)
-      resp.req_id = request.req_id
-      emit(resp)
-    } finally {
-      ACTIVE_CONTROL_INVOCATION_ID = undefined
-    }
-  })
+  chain = chain.then(() =>
+    withControlInvocation(
+      {
+        nonce: request.control_invocation_nonce,
+        invocationId: request.control_invocation_id
+      },
+      async () => {
+        DELEGATE_CALL_SEQUENCE = 0
+        const resp = await run(request.code || '', request.repl_publisher)
+        resp.req_id = request.req_id
+        emit(resp)
+      }
+    )
+  )
 })

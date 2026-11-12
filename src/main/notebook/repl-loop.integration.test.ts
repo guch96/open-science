@@ -46,7 +46,10 @@ const startLoop = (
   inheritedRpcToken?: string
 ): {
   child: ChildProcessWithoutNullStreams
-  send: (code: string) => Promise<KernelLoopResponse>
+  send: (
+    code: string,
+    control?: { invocationId?: string; nonce?: string }
+  ) => Promise<KernelLoopResponse>
 } => {
   const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [LOOP], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...env },
@@ -68,21 +71,26 @@ const startLoop = (
       w(msg)
     }
   })
-  const send = async (code: string): Promise<KernelLoopResponse> => {
+  const send = async (
+    code: string,
+    control?: { invocationId?: string; nonce?: string }
+  ): Promise<KernelLoopResponse> => {
     const prepared = await prepareReplCellBindings(code)
     return new Promise((resolve) => {
       const reqId = randomUUID()
       waiters.set(reqId, resolve)
-      child.stdin.write(
+      const request = JSON.parse(
         framePythonRequest(
           reqId,
           prepared.source,
-          undefined,
+          control?.invocationId,
           undefined,
           undefined,
           prepared.publisher
         )
       )
+      if (control?.nonce !== undefined) request.control_invocation_nonce = control.nonce
+      child.stdin.write(JSON.stringify(request) + '\n')
     })
   }
   return { child, send }
@@ -219,6 +227,87 @@ it.skipIf(!process.env.OPEN_SCIENCE_TEST_PYTHON)(
 )
 
 describe('repl_loop local RPC transport', () => {
+  it('keeps timer and await descendants bound to their originating invocation across REPL runs', async () => {
+    const received: Array<{
+      nonce: string | string[] | undefined
+      method: string
+      invocationId?: string
+    }> = []
+    const server = createServer((request, response) => {
+      let body = ''
+      request.on('data', (chunk) => (body += chunk))
+      request.on('end', () => {
+        const call = JSON.parse(body)
+        received.push({
+          nonce: request.headers['x-open-science-control-invocation'],
+          method: call.params?.method ?? call.method,
+          invocationId: call.params?.control_invocation_id
+        })
+        response
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ result: [] }))
+      })
+    })
+    const connection = await listenForLocalRpc(server, {
+      name: 'repl-loop-invocation-descendants',
+      transport: 'pipe'
+    })
+    const { child, send } = startLoop({
+      OPEN_SCIENCE_MCP_RPC_ENDPOINT: connection.endpoint,
+      OPEN_SCIENCE_MCP_RPC_SOCKET_PATH: connection.socketPath,
+      OPEN_SCIENCE_MCP_RPC_TOKEN: 'private-rpc-token'
+    })
+    try {
+      const first = await send(
+        `
+        globalThis.saved = 41;
+        globalThis.nextRun = new Promise(resolve => { globalThis.releaseNextRun = resolve });
+        globalThis.fromTimer = new Promise(resolve => {
+          setTimeout(async () => {
+            await nextRun;
+            await host.agents.list();
+            resolve();
+          }, 0);
+        });
+        globalThis.fromAwait = (async () => {
+          await nextRun;
+          await host.mcp('fixture', 'old-await');
+        })();
+        return saved;
+      `,
+        { invocationId: 'invocation-one', nonce: 'nonce-one' }
+      )
+      expect(first.error).toBeNull()
+      expect(first.result).toBe('41')
+      const second = await send(
+        `
+        releaseNextRun();
+        await Promise.all([fromTimer, fromAwait]);
+        await host.agents.list();
+        console.log(saved + 1);
+        return saved;
+      `,
+        { invocationId: 'invocation-two', nonce: 'nonce-two' }
+      )
+      expect(second.error).toBeNull()
+      expect(second).toMatchObject({ result: '41', stdout: '42\n' })
+      expect(received).toEqual(
+        expect.arrayContaining([
+          { method: 'agentsCall', nonce: 'nonce-one', invocationId: 'invocation-one' },
+          { method: 'old-await', nonce: 'nonce-one', invocationId: undefined },
+          { method: 'agentsCall', nonce: 'nonce-two', invocationId: 'invocation-two' }
+        ])
+      )
+      expect(received).toHaveLength(3)
+      expect(JSON.stringify([first, second])).not.toMatch(/nonce-one|nonce-two|private-rpc-token/)
+    } finally {
+      child.kill()
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      )
+    }
+  })
+
   it('exposes only the camelCase public method names', async () => {
     const { child, send } = startLoop({})
     try {
