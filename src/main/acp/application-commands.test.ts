@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AcpStateSnapshot } from '../../shared/acp'
 import { toAcpStateCommandResponse } from '../../shared/acp'
 import { SessionSizeLimitError } from '../../shared/session-persistence'
+import { ApplicationCallerLeaseRegistry } from '../caller-lifecycle'
+import { notebookUserOperation } from '../notebook/execution-intent'
 import {
   createApplicationCommandRouter,
   type ApplicationCallerLease,
@@ -328,6 +330,44 @@ describe('ACP application commands', () => {
     ).resolves.toEqual(commandResponse)
     expect(dependencies.workflows.sendPrompt).toHaveBeenCalledOnce()
   })
+
+  it.each(['sendPrompt', 'continueNotebookExecution'] as const)(
+    'expires %s execution authority when its document lease ends during prompt preparation',
+    async (command) => {
+      const dependencies = createDependencies()
+      let prepare!: () => void
+      const prepared = new Promise<void>((resolve) => (prepare = resolve))
+      vi.mocked(dependencies.workflows.sendPrompt).mockImplementation(async (request) => {
+        await prepared
+        notebookUserOperation(request)!.assertCurrent()
+        return snapshot
+      })
+      const router = createApplicationCommandRouter()
+      registerAcpCommands(router.registrar, dependencies)
+      const context = createWebCallerContext('notebook-human')
+      const leases = new ApplicationCallerLeaseRegistry()
+      const caller = leases.acquire(context)
+      const pending = router.dispatcher.invoke(acpCommands[command], {
+        callerContext: context,
+        callerLease: caller.lease,
+        args: [
+          {
+            projectId: 'project-1',
+            sessionId: 'session-1',
+            refusalId: 'refusal',
+            text: 'Continue execution after checking memory.'
+          }
+        ]
+      })
+      await vi.waitFor(() => expect(dependencies.workflows.sendPrompt).toHaveBeenCalledOnce())
+      const rejected = expect(pending).rejects.toThrow(/expired|current human caller/)
+      caller.release()
+      prepare()
+      await rejected
+      router.dispose()
+      leases.dispose()
+    }
+  )
 
   it.each([
     createElectronCallerContext(7),

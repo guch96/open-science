@@ -25,6 +25,7 @@ import {
 } from '../notebook/execution-intent'
 import type { AcpProviderSessionResumer } from './provider-session-resumer'
 import { shellRuntimeAgentContract } from '../notebook/shell-runtime'
+import { requestPlanReviewProviderStop } from './plan-review-provider-stop'
 
 type AcpRuntimePromptReloadHost = Readonly<{
   prepareContinuationReplay: AcpPromptTurnWorkflowOptions['prepareContinuationReplay']
@@ -238,10 +239,9 @@ const composeAcpRuntimePromptOwners = (
   }): Promise<void> => {
     session.sessionUpdateProjector.clearAssistantOutput(input.appSessionId)
     const intent = input.request && notebookExecutionIntent(input.request)
-    if (
-      intent &&
-      intent !== base.sessionCapabilities.notebookExecutionIntentFor(input.appSessionId)
-    ) {
+    // A distinct Provider dispatch has its own credential even when it inherits the same stopped
+    // intent. A late callback from its predecessor must never stop a newer explanatory branch.
+    if (intent) {
       const refresh = await base.sessionCapabilities.prepareNotebookConnectionRefresh({
         appSessionId: input.appSessionId,
         projectId: projectId(input.appSessionId),
@@ -435,6 +435,9 @@ const composeAcpRuntimePromptOwners = (
         if (!notebook) return
         const scope = { projectId: projectId(request.sessionId), sessionId: request.sessionId }
         const current = base.sessionCapabilities.notebookExecutionIntentFor(request.sessionId)
+        // Lightweight runtime adapters without a Notebook authority port keep their existing
+        // presentation-only contract. Production root and child capabilities always carry one.
+        if (!notebook.createExecutionIntent && !current && !notebookExecutionIntent(request)) return
         const operation = notebookUserOperation(request)
         let intent = notebookExecutionIntent(request)
         const humanTurn =
@@ -458,13 +461,6 @@ const composeAcpRuntimePromptOwners = (
           const origin =
             request.provenanceContext?.originMessageId ?? request.provenanceContext?.promptMessageId
           intent = origin ? notebook.resolveExecutionIntent?.(scope, origin) : undefined
-          if (
-            !intent &&
-            mode.kind === 'user' &&
-            !request.continuation &&
-            !request.suppressUserMessage
-          )
-            intent = current
         }
         if (!intent) {
           intent = new NotebookExecutionIntent(scope)
@@ -473,6 +469,66 @@ const composeAcpRuntimePromptOwners = (
         markNotebookExecutionIntent(request, intent)
         const promptId = request.provenanceContext?.promptMessageId
         if (promptId) notebook.rememberExecutionIntent?.(scope, promptId, intent)
+      },
+      observeNotebookExecutionLoop: ({
+        appSessionId,
+        providerSessionId,
+        request,
+        signal,
+        assertCurrent
+      }) => {
+        const intent = notebookExecutionIntent(request)
+        const credential = base.sessionCapabilities.notebookCredentialFor(appSessionId)
+        const connection = base.connectionResources.connection
+        const provider = activeSession(appSessionId)
+        if (!intent || !credential || !connection || provider?.sessionId !== providerSessionId)
+          return () => undefined
+        const isCurrent = (): boolean => {
+          if (
+            signal.aborted ||
+            base.connectionResources.connection !== connection ||
+            activeSession(appSessionId) !== provider
+          )
+            return false
+          try {
+            assertCurrent()
+            return base.sessionCapabilities.notebookCredentialFor(appSessionId) === credential
+          } catch {
+            return false
+          }
+        }
+        let stopObservation: (() => void) | undefined
+        const release = intent.observeViolations(credential, () => {
+          if (!isCurrent()) return
+          log.warn('Notebook Agent repeated a stopped execution', {
+            sessionId: appSessionId,
+            providerSessionId
+          })
+          stopObservation = requestPlanReviewProviderStop({
+            notify: () =>
+              connection.agent.notify(acp.methods.agent.session.cancel, {
+                sessionId: providerSessionId
+              }),
+            isCurrent,
+            onUnconfirmed: (reason) => {
+              session.publication.pushEvent({
+                kind: 'system',
+                level: 'error',
+                sessionId: appSessionId,
+                title: 'Notebook Agent stop was not confirmed',
+                text: `Execution remains blocked (${reason}). Repair the Agent runtime before continuing. Already dispatched Notebook work keeps its original owner.`
+              })
+            }
+          })
+        })
+        const onUserCancellation = (): void => intent.acceptUserCancellation(credential)
+        signal.addEventListener('abort', onUserCancellation, { once: true })
+        return () => {
+          release()
+          stopObservation?.()
+          // The logical interaction can still be draining already dispatched Notebook work.
+          // Its real user cancellation remains effective after the Provider has stopped.
+        }
       }
     },
     artifacts: {

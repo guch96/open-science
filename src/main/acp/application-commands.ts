@@ -401,7 +401,11 @@ const registerAcpCommands = (
             canSatisfyHumanApproval(invocation.callerContext)
               ? withNotebookUserOperation(request, {
                   assertCurrent: () => {
-                    if (!canSatisfyHumanApproval(invocation.callerContext))
+                    if (
+                      !canSatisfyHumanApproval(invocation.callerContext) ||
+                      invocation.callerLease.signal.aborted ||
+                      !invocation.callerLease.isCurrent()
+                    )
                       throw new Error('Notebook user operation expired.')
                   }
                 })
@@ -411,7 +415,11 @@ const registerAcpCommands = (
       },
       'acp:continue-notebook-execution': (invocation) => {
         const assertCurrent = (): void => {
-          if (!canSatisfyHumanApproval(invocation.callerContext))
+          if (
+            !canSatisfyHumanApproval(invocation.callerContext) ||
+            invocation.callerLease.signal.aborted ||
+            !invocation.callerLease.isCurrent()
+          )
             throw new Error('Only a current human caller can continue Notebook execution.')
         }
         assertCurrent()

@@ -32,6 +32,7 @@ import { installAgentShutdownGuard } from './shutdown-guard'
 import { withAgentAuthenticationRecovery } from './prompt-error'
 import { withNotebookUserOperation } from '../notebook/execution-intent'
 import { callerContextForEvent, canSatisfyHumanApproval } from '../caller-context'
+import { callerLeaseForEvent } from '../caller-lifecycle'
 
 type AcpIpcSessionAdmission = {
   withSessionAvailableById<Result>(
@@ -101,6 +102,7 @@ const registerAcpIpcHandlerSet = (
   )
   // Prompt calls wait for the turn to stop, then return the latest snapshot.
   ipcMainHandle('acp:send-prompt', (_event, request: AcpPromptRequest) => {
+    const lease = callerLeaseForEvent(_event)
     // Continuation controls are main-process-owned. Renderer input must never suppress a visible
     // user message, impersonate the handoff path, or disable human interaction.
     const {
@@ -127,7 +129,8 @@ const registerAcpIpcHandlerSet = (
       workflows.sendPrompt(
         withNotebookUserOperation(rendererRequest, {
           assertCurrent: () => {
-            if (_event.sender?.isDestroyed()) throw new Error('Notebook user operation expired.')
+            if (lease.signal.aborted || !lease.isCurrent() || _event.sender?.isDestroyed())
+              throw new Error('Notebook user operation expired.')
           }
         })
       )
@@ -137,8 +140,14 @@ const registerAcpIpcHandlerSet = (
     'acp:continue-notebook-execution',
     (event, input: AcpContinueNotebookExecutionRequest) => {
       const caller = callerContextForEvent(event)
+      const lease = callerLeaseForEvent(event)
       const assertCurrent = (): void => {
-        if (!canSatisfyHumanApproval(caller) || event.sender.isDestroyed())
+        if (
+          !canSatisfyHumanApproval(caller) ||
+          lease.signal.aborted ||
+          !lease.isCurrent() ||
+          event.sender.isDestroyed()
+        )
           throw new Error('Only a current human caller can continue Notebook execution.')
       }
       assertCurrent()

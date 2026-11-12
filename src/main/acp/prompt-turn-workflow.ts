@@ -148,6 +148,13 @@ type AcpPromptTurnEnvironment = Readonly<{
     assertCurrent?: () => void
   }) => Promise<void>
   prepareNotebookIntent?: (request: AcpPromptRequest, mode: AcpPromptTurnMode) => void
+  observeNotebookExecutionLoop?: (input: {
+    appSessionId: string
+    providerSessionId: string
+    request: AcpPromptRequest
+    signal: AbortSignal
+    assertCurrent(): void
+  }) => () => void
 }>
 
 type AcpPromptTurnArtifacts = Readonly<{
@@ -672,6 +679,7 @@ class AcpPromptTurnWorkflow {
       let deliveryClaimed = false
       let providerDispatched = false
       let accumulatedFacts: AcpProviderTurnResult | undefined
+      let releaseNotebookBranch: (() => void) | undefined
       const executeProviderTurn = (): Promise<ProviderPromptOutcome> =>
         executor.execute({
           session,
@@ -736,6 +744,18 @@ class AcpPromptTurnWorkflow {
               deliveryClaimed = true
             }
             const dispatch = await this.checkpoint(interaction)
+            if (dispatch !== 'cancelled') {
+              releaseNotebookBranch = env.observeNotebookExecutionLoop?.({
+                appSessionId: sessionId,
+                providerSessionId: session.sessionId,
+                request,
+                signal: interaction.signal,
+                assertCurrent: () => {
+                  interaction.signal.throwIfAborted()
+                  if (!this.isCurrent(turn)) throw new Error('Notebook Provider dispatch ended.')
+                }
+              })
+            }
             // Mark the boundary before calling the adapter: a synchronous throw from
             // session.prompt cannot prove that no request left the process.
             if (dispatch !== 'cancelled' && turn.mode.kind === 'app-continuation') {
@@ -831,6 +851,8 @@ class AcpPromptTurnWorkflow {
         try {
           outcome = await this.options.serialization.run(framework, executeProviderTurn)
         } finally {
+          releaseNotebookBranch?.()
+          releaseNotebookBranch = undefined
           if (deliveryClaimed && !providerDispatched) await resumeNotDispatched?.()
         }
         if (outcome.kind !== 'stopped') {

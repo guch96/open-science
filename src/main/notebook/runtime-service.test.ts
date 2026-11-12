@@ -3841,6 +3841,7 @@ describe('notebook runtime service', () => {
         attachmentIds: [],
         artifactIds: []
       },
+      undefined,
       undefined
     )
     expect(beginControlInvocation).toHaveBeenNthCalledWith(
@@ -3854,6 +3855,7 @@ describe('notebook runtime service', () => {
         attachmentIds: [],
         artifactIds: []
       },
+      undefined,
       undefined
     )
     expect(releaseInvocation).toHaveBeenCalledTimes(2)
@@ -3938,6 +3940,7 @@ describe('notebook runtime service', () => {
         attachmentIds: [],
         artifactIds: []
       },
+      undefined,
       undefined
     )
     expect(releaseInvocation).not.toHaveBeenCalled()
@@ -4055,6 +4058,7 @@ describe('notebook runtime service', () => {
         originatingTurnId: 'synthetic-message-prompt',
         originatingUserMessageId: 'durable-root-message'
       }),
+      undefined,
       undefined
     )
   })
@@ -4449,6 +4453,7 @@ describe('notebook runtime service', () => {
 
     it('returns a durable background Shell receipt before execution completes and exposes its result', async () => {
       const root = await createStorageRoot()
+      const samplingBefore = resourceActivity.state.sampling
       const executionStarted = createDeferred<void>()
       const releaseExecution = createDeferred<void>()
       const execute = vi.fn<NotebookShellProcess['execute']>(async () => {
@@ -4492,7 +4497,9 @@ describe('notebook runtime service', () => {
 
       releaseExecution.resolve()
       await service.waitForBackgroundRun(receipt.runId)
-      expect(resourceActivity.state.sampling).toBe(false)
+      // Other live Notebook trees may still own diagnostic observation. This run releases its
+      // activity without claiming that the whole application has become idle.
+      expect(resourceActivity.state.sampling).toBe(samplingBefore)
       await expect(
         service.getBackgroundRun({ ...request, submissionIdentity: request.executionInvocationId })
       ).resolves.toMatchObject({

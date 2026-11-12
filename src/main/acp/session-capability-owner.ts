@@ -1399,6 +1399,10 @@ export class AcpSessionCapabilityOwner {
     return this.notebookIntents.get(appSessionId)
   }
 
+  notebookCredentialFor(appSessionId: string): string | undefined {
+    return this.notebookTokens.get(appSessionId)
+  }
+
   async prepareNotebookConnectionRefresh(request: {
     appSessionId: string
     projectId: string

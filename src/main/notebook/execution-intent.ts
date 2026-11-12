@@ -3,11 +3,17 @@ import { randomUUID } from 'node:crypto'
 import { NotebookExecutionAdmissionError } from './execution-admission'
 
 export type NotebookExecutionIntentScope = Readonly<{ projectId: string; sessionId: string }>
+export type NotebookExecutionContinuation = NotebookExecutionIntentScope &
+  Readonly<{ refusalId: string }>
 
 // Main owns this transient authority. A prompt id, tool argument or document cannot create it.
 // Concrete transports and derived Attempts retain the same immutable reference.
 export class NotebookExecutionIntent {
   private refusal?: Readonly<{ id: string; reason: string }>
+  private readonly branches = new Map<
+    string,
+    { onViolation?: () => void; providerStopRequested: boolean; cancellation: AbortController }
+  >()
 
   constructor(readonly scope: NotebookExecutionIntentScope) {}
 
@@ -27,9 +33,51 @@ export class NotebookExecutionIntent {
         'Execution was not started. This user execution context was stopped. Explain the result or inspect existing outputs, then wait for the user to explicitly continue execution. Do not retry, change tools, language, environment or Session, or delegate the rejected work.'
       )
   }
+
+  // Only an authenticated transport entry counts as another execution attempt. Boundary
+  // rechecks of a single admitted request must not turn the first refusal into cancellation.
+  assertDispatch(credential: string | undefined): void {
+    if (this.refusal && credential) {
+      const branch = this.branches.get(credential)
+      if (branch?.onViolation && !branch.providerStopRequested) {
+        branch.providerStopRequested = true
+        branch.onViolation()
+      }
+    }
+    this.assertExecutable()
+  }
+
+  observeViolations(credential: string, onViolation: () => void): () => void {
+    const branch = {
+      onViolation: onViolation as (() => void) | undefined,
+      providerStopRequested: false,
+      cancellation: new AbortController()
+    }
+    this.branches.set(credential, branch)
+    return () => {
+      if (this.branches.get(credential) === branch) branch.onViolation = undefined
+    }
+  }
+
+  providerStopRequested(credential: string): boolean {
+    return this.branches.get(credential)?.providerStopRequested === true
+  }
+
+  acceptUserCancellation(credential: string): void {
+    const branch = this.branches.get(credential)
+    if (branch) {
+      branch.providerStopRequested = false
+      branch.cancellation.abort()
+    }
+  }
+
+  userCancellationSignal(credential: string): AbortSignal | undefined {
+    return this.branches.get(credential)?.cancellation.signal
+  }
 }
 
 const intentKey = Symbol('Notebook host execution intent')
+const credentialKey = Symbol('Notebook host execution credential')
 export const withNotebookExecutionIntent = <T extends object>(
   request: T,
   intent: NotebookExecutionIntent
@@ -40,10 +88,17 @@ export const notebookExecutionIntent = (request: object): NotebookExecutionInten
 
 export const markNotebookExecutionIntent = (
   request: object,
-  intent: NotebookExecutionIntent
+  intent: NotebookExecutionIntent,
+  credential?: string
 ): void => {
-  Object.assign(request, { [intentKey]: intent })
+  Object.assign(request, {
+    [intentKey]: intent,
+    ...(credential ? { [credentialKey]: credential } : {})
+  })
 }
+
+export const notebookExecutionCredential = (request: object): string | undefined =>
+  (request as { [credentialKey]?: string })[credentialKey]
 
 type NotebookUserOperation = Readonly<{
   refusalId?: string
@@ -74,9 +129,29 @@ export class NotebookExecutionIntentOwner {
 
   create(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
     const intent = new NotebookExecutionIntent(Object.freeze({ ...scope }))
+    this.bind(scope, intent)
+    return intent
+  }
+
+  bind(scope: NotebookExecutionIntentScope, intent: NotebookExecutionIntent): void {
     this.register(scope, intent)
     this.currentIntents.set(JSON.stringify([scope.projectId, scope.sessionId]), intent)
-    return intent
+  }
+
+  adopt(scope: NotebookExecutionIntentScope, sessionId: string): void {
+    if (scope.sessionId === sessionId) return
+    const previousKey = JSON.stringify([scope.projectId, scope.sessionId])
+    const canonicalScope = { projectId: scope.projectId, sessionId }
+    const canonicalKey = JSON.stringify([scope.projectId, sessionId])
+    for (const ref of this.live(scope)) {
+      const intent = ref.deref()
+      if (intent) this.register(canonicalScope, intent)
+    }
+    this.scopes.delete(previousKey)
+    const previous = this.currentIntents.get(previousKey)
+    if (previous && !this.currentIntents.has(canonicalKey))
+      this.currentIntents.set(canonicalKey, previous)
+    this.currentIntents.delete(previousKey)
   }
 
   current(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
@@ -107,9 +182,17 @@ export class NotebookExecutionIntentOwner {
     scope: NotebookExecutionIntentScope,
     promptMessageId: string
   ): NotebookExecutionIntent | undefined {
-    return this.origins
-      .get(JSON.stringify([scope.projectId, scope.sessionId, promptMessageId]))
-      ?.deref()
+    const key = JSON.stringify([scope.projectId, scope.sessionId, promptMessageId])
+    const ref = this.origins.get(key)
+    if (!ref) return undefined
+    const intent = ref.deref()
+    if (intent) return intent
+    // A previously known origin must never borrow a newer turn's authority after its old
+    // transport/Attempt has been collected. Missing ephemeral authority stays fail-closed.
+    const expired = new NotebookExecutionIntent(scope)
+    expired.block('originating-execution-context-unavailable')
+    this.origins.set(key, new WeakRef(expired))
+    return expired
   }
 
   refused(
@@ -123,7 +206,24 @@ export class NotebookExecutionIntentOwner {
     return undefined
   }
 
-  block(scope: NotebookExecutionIntentScope, reason: string): void {
-    for (const ref of this.live(scope)) ref.deref()?.block(reason)
+  block(
+    scope: NotebookExecutionIntentScope,
+    reason: string
+  ): readonly NotebookExecutionContinuation[] {
+    const affected = new Set<NotebookExecutionIntent>()
+    for (const ref of this.live(scope)) {
+      const intent = ref.deref()
+      if (intent) {
+        intent.block(reason)
+        affected.add(intent)
+      }
+    }
+    // A resource scope may belong to another originating user Session. Offer continuation only
+    // for that Session's current binding, never an obsolete intent retained by a late callback.
+    return [...this.currentIntents.entries()].flatMap(([key, intent]) => {
+      if (!affected.has(intent) || !intent.refusalId) return []
+      const [projectId, sessionId] = JSON.parse(key) as [string, string]
+      return [{ projectId, sessionId, refusalId: intent.refusalId }]
+    })
   }
 }

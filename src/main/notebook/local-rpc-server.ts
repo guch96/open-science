@@ -422,6 +422,7 @@ type NotebookRpcSessionBinding = {
     {
       readonly identity: TrustedControlInvocationIdentity
       readonly intent?: NotebookExecutionIntent
+      readonly credential?: string
       active: boolean
     }
   >
@@ -492,6 +493,7 @@ type NotebookRpcRequestLifecycle = {
   settled: Promise<void>
   settle(): void
   method?: string
+  preserveProviderStoppedWork?: () => boolean
 }
 
 type NotebookRpcServerLifecycle = {
@@ -575,6 +577,20 @@ const CONTROL_RPC_METHODS = new Set([
   'memoryRemember'
 ])
 const MEMORY_RPC_METHODS = new Set(['memoryListCategories', 'memorySearch', 'memoryRemember'])
+const NOTEBOOK_EXECUTION_METHODS = new Set([
+  'beginCodeCell',
+  'execute',
+  'runCell',
+  'executeControl',
+  'executeShell',
+  'restart',
+  'bindRuntime',
+  'switchRuntime',
+  'managePackages'
+])
+const startsNotebookExecution = (method: string, params: Record<string, unknown>): boolean =>
+  NOTEBOOK_EXECUTION_METHODS.has(method) ||
+  (method === 'manageEnvironments' && params.action !== 'list')
 const DELEGATED_CONTROL_RPC_METHODS = new Set([
   ...[...CONTROL_RPC_METHODS].filter((method) => !MEMORY_RPC_METHODS.has(method)),
   'delegatedOutputCall'
@@ -1032,6 +1048,12 @@ class NotebookLocalRpcServer {
       ) {
         continue
       }
+      if (binding.projectId) {
+        this.service.adoptExecutionIntentScope?.(
+          { projectId: binding.projectId, sessionId: aliasSessionId },
+          sessionId
+        )
+      }
       binding.sessionId = sessionId
       binding.agentFrameId = canonicalRootFrameId
     }
@@ -1085,9 +1107,9 @@ class NotebookLocalRpcServer {
     }
   }
 
-  private revokeSessionCapability(token: string): void {
+  private revokeSessionCapability(token: string, preserveDispatchedWork = false): void {
     const capability = this.sessionRpcCapabilities.get(token)
-    capability?.capabilityLifetime?.abort()
+    if (!preserveDispatchedWork) capability?.capabilityLifetime?.abort()
     if (capability?.agentFrameId) {
       this.releaseRuntimeBindingAdmissions(
         capability.sessionId,
@@ -1095,7 +1117,7 @@ class NotebookLocalRpcServer {
         capability.delegatedNotebook?.attemptId
       )
     }
-    this.codeWriteProducers.get(token)?.controller.abort()
+    if (!preserveDispatchedWork) this.codeWriteProducers.get(token)?.controller.abort()
     this.codeWriteProducers.delete(token)
     this.sessionRpcCapabilities.delete(token)
   }
@@ -1493,6 +1515,7 @@ class NotebookLocalRpcServer {
       executionIntent ??
       this.service.currentExecutionIntent?.({ projectId, sessionId: resolvedSessionId }) ??
       new NotebookExecutionIntent({ projectId, sessionId: resolvedSessionId })
+    this.service.bindExecutionIntent?.({ projectId, sessionId: resolvedSessionId }, intent)
     this.sessionRpcCapabilities.set(token, {
       sessionId: resolvedSessionId,
       projectId,
@@ -1602,6 +1625,7 @@ class NotebookLocalRpcServer {
     const revoke = (): Promise<void> => {
       if (revokePromise) return revokePromise
       delegatedNotebook.revoked = true
+      binding.capabilityLifetime?.abort()
       for (const ownedToken of ownedTokens) this.revokeSessionCapability(ownedToken)
       ownedTokens.clear()
       const drained =
@@ -1640,13 +1664,14 @@ class NotebookLocalRpcServer {
         if (delegatedNotebook.revoked)
           throw new RpcHttpError(403, 'Delegated Notebook execution authority expired.')
         const nextToken = randomUUID()
-        for (const ownedToken of ownedTokens) this.revokeSessionCapability(ownedToken)
+        // Credential retirement closes only future admission. The original Attempt still owns
+        // previously dispatched background work and revokes that shared lifetime at teardown.
+        for (const ownedToken of ownedTokens) this.revokeSessionCapability(ownedToken, true)
         ownedTokens.clear()
         ownedTokens.add(nextToken)
         this.sessionRpcCapabilities.set(nextToken, {
           ...binding,
-          executionIntent: nextIntent,
-          capabilityLifetime: new AbortController()
+          executionIntent: nextIntent
         })
         this.service.rememberExecutionIntent?.(
           { projectId: scope.projectId, sessionId: scope.sessionId },
@@ -1787,7 +1812,8 @@ class NotebookLocalRpcServer {
     NotebookRpcConnection & {
       beginControlInvocation(
         context: TrustedControlInvocationIdentity,
-        intent?: NotebookExecutionIntent
+        intent?: NotebookExecutionIntent,
+        credential?: string
       ): (() => void) & { readonly nonce: string }
       completeControlInvocation(
         controlInvocationId: string,
@@ -1831,11 +1857,11 @@ class NotebookLocalRpcServer {
       endpoint: connection.endpoint,
       socketPath: connection.socketPath,
       token,
-      beginControlInvocation: (context, intent) => {
+      beginControlInvocation: (context, intent, credential) => {
         const nonce = randomUUID()
         const identity = Object.freeze({ ...context })
         binding.controlInvocations ??= new Map()
-        const authority = { identity, intent, active: true }
+        const authority = { identity, intent, credential, active: true }
         binding.controlInvocations.set(nonce, authority)
         binding.activeControlInvocation = context
         ownedControlInvocationIds.add(context.toolInvocationId)
@@ -2162,6 +2188,7 @@ class NotebookLocalRpcServer {
   ): Promise<void> {
     const disconnect = new AbortController()
     let writeProducerSignal: AbortSignal | undefined
+    let removeProducerCancellation: (() => void) | undefined
     let artifactAdmission: ReturnType<PendingRequestBudget['acquire']> | undefined
     let settle!: () => void
     const settled = new Promise<void>((resolve) => {
@@ -2186,9 +2213,12 @@ class NotebookLocalRpcServer {
       }
     }
     lifecycle.activeRequests.add(activeRequest)
-    const abortDisconnectedRequest = (): void => disconnect.abort()
+    const abortDisconnectedRequest = (): void => {
+      if (!activeRequest.preserveProviderStoppedWork?.()) disconnect.abort()
+    }
     const abortDisconnectedResponse = (): void => {
-      if (!response.writableFinished) disconnect.abort()
+      if (!response.writableFinished && !activeRequest.preserveProviderStoppedWork?.())
+        disconnect.abort()
     }
     const closeIdleResponseDuringShutdown = (): void => {
       if (lifecycle.closing) lifecycle.server.closeIdleConnections()
@@ -2584,6 +2614,7 @@ class NotebookLocalRpcServer {
           }
           if (
             CONTROL_RPC_METHODS.has(method) ||
+            startsNotebookExecution(method, params) ||
             SKILL_IMPORT_RPC_METHODS.has(method) ||
             PLAN_RPC_METHODS.has(method) ||
             method === 'delegatedOutputCall'
@@ -2693,18 +2724,16 @@ class NotebookLocalRpcServer {
         )
       }
       writeProducerSignal?.throwIfAborted()
-      const dispatchSignals = [
-        disconnect.signal,
-        ...(writeProducerSignal ? [writeProducerSignal] : []),
-        ...(authenticatedBinding?.capabilityLifetime
-          ? [authenticatedBinding.capabilityLifetime.signal]
-          : [])
-      ]
-      const dispatchSignal =
-        dispatchSignals.length === 1 ? dispatchSignals[0] : AbortSignal.any(dispatchSignals)
       const executionIntent = authenticatedBinding?.isControl
         ? controlAuthority?.intent
         : authenticatedBinding?.executionIntent
+      const executionCredential = authenticatedBinding?.isControl
+        ? controlAuthority?.credential
+        : authenticatedBinding
+          ? bearerToken
+          : undefined
+      const userCancellation =
+        executionCredential && executionIntent?.userCancellationSignal(executionCredential)
       const startsDerivedWork =
         (method === 'agentsCall' && resolvedParams.op === 'switch') ||
         (method === 'delegatedWorkCall' &&
@@ -2714,21 +2743,40 @@ class NotebookLocalRpcServer {
             resolvedParams.op === 'send_message'))
       if (authenticatedBinding?.isControl && startsDerivedWork && !controlAuthority?.active)
         throw new RpcHttpError(403, 'New execution requires an exact trusted control invocation.')
-      if (startsDerivedWork) executionIntent?.assertExecutable()
+      if (startsDerivedWork) executionIntent?.assertDispatch(executionCredential)
       if (executionIntent) {
+        if (startsNotebookExecution(method, resolvedParams))
+          executionIntent.assertDispatch(executionCredential)
+        markNotebookExecutionIntent(resolvedParams, executionIntent, executionCredential)
         if (
-          [
-            'beginCodeCell',
-            'execute',
-            'runCell',
-            'executeControl',
-            'executeShell',
-            'restart'
-          ].includes(method)
+          ['execute', 'runCell', 'executeControl', 'executeShell'].includes(method) &&
+          executionCredential
         )
-          executionIntent.assertExecutable()
-        markNotebookExecutionIntent(resolvedParams, executionIntent)
+          activeRequest.preserveProviderStoppedWork = () =>
+            executionIntent.providerStopRequested(executionCredential)
       }
+      if (writeProducerSignal && activeRequest.preserveProviderStoppedWork) {
+        const producerSignal = writeProducerSignal
+        const executionCancellation = new AbortController()
+        const abortProducer = (): void => {
+          if (!activeRequest.preserveProviderStoppedWork?.())
+            executionCancellation.abort(producerSignal.reason)
+        }
+        producerSignal.addEventListener('abort', abortProducer, { once: true })
+        removeProducerCancellation = () =>
+          producerSignal.removeEventListener('abort', abortProducer)
+        writeProducerSignal = executionCancellation.signal
+      }
+      const dispatchSignals = [
+        disconnect.signal,
+        ...(userCancellation ? [userCancellation] : []),
+        ...(writeProducerSignal ? [writeProducerSignal] : []),
+        ...(authenticatedBinding?.capabilityLifetime
+          ? [authenticatedBinding.capabilityLifetime.signal]
+          : [])
+      ]
+      const dispatchSignal =
+        dispatchSignals.length === 1 ? dispatchSignals[0] : AbortSignal.any(dispatchSignals)
       const result =
         method === 'capabilitiesCall'
           ? hostCapabilities
@@ -2813,6 +2861,7 @@ class NotebookLocalRpcServer {
         { error: serializedError }
       )
     } finally {
+      removeProducerCancellation?.()
       request.off('aborted', abortDisconnectedRequest)
       response.off('close', abortDisconnectedResponse)
       lifecycle.activeRequests.delete(activeRequest)

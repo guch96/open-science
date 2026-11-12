@@ -99,6 +99,17 @@ it('requires a new user intent after rejection and never lends it to an old RPC 
     const next = await call(fresh, 'executeControl')
     expect(next.body).toMatchObject({ result: { status: 'completed' } })
     expect(execute).toHaveBeenCalledTimes(1)
+    // An automatic branch may mount an older stopped intent after another healthy user intent.
+    // Reconnect retains the mounted context; it cannot borrow the most recently minted healthy one.
+    await server.issueSessionConnection('session', 'project', 'root-frame-session', true, intent)
+    const reconnected = await server.issueSessionConnection(
+      'session',
+      'project',
+      'root-frame-session'
+    )
+    expect(JSON.stringify((await call(reconnected, 'executeControl')).body)).toContain(
+      'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION'
+    )
   } finally {
     await server.close()
     await service.dispose()
@@ -172,5 +183,109 @@ it('pins late control callbacks to their original invocation instead of lending 
     old()
     fresh()
     await server.close()
+  }
+})
+
+it('rejects bootstrap execution authority and preserves inherited child authority across credential refresh and target-scope release', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'notebook-child-intent-'))
+  const execute = vi.fn(async () => ({
+    status: 'completed' as const,
+    stdout: 'child-result',
+    stderr: '',
+    traceback: '',
+    cwdAfter: root,
+    outputs: [],
+    kernelDispatched: true
+  }))
+  const { healthyNotebookMemoryPolicy } = await import('./memory-policy.test-support')
+  const service = new NotebookRuntimeService({
+    configRoot: root,
+    dataRoot: root,
+    projectId: 'project',
+    memoryPolicy: healthyNotebookMemoryPolicy(),
+    executorFactory: () => ({ execute, shutdown: async () => ({ reaped: true }) })
+  })
+  const shutdown = vi.spyOn(service, 'shutdown')
+  const server = new NotebookLocalRpcServer(service, { transport: 'tcp' })
+  const call = async (
+    connection: NotebookRpcConnection
+  ): Promise<{ status: number; body: unknown }> => {
+    const response = await fetchLocalRpc(
+      connection,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${connection.token}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          method: 'executeControl',
+          params: { sessionId: 'child-session', workspaceCwd: root, code: '1' }
+        })
+      },
+      'child intent integration'
+    )
+    return { status: response.status, body: await response.json() }
+  }
+  let child: Awaited<ReturnType<typeof server.issueDelegatedNotebookConnection>> | undefined
+  try {
+    expect((await call(await server.ensureStarted())).status).toBe(401)
+    expect(execute).not.toHaveBeenCalled()
+    const original = service.createExecutionIntent({
+      projectId: 'project',
+      sessionId: 'root-session'
+    })
+    await server.issueSessionConnection(
+      'provisional-root',
+      'project',
+      'root-frame-provisional-root',
+      true,
+      original
+    )
+    server.registerSessionAlias('provisional-root', 'root-session')
+    child = await server.issueDelegatedNotebookConnection({
+      projectId: 'project',
+      sessionId: 'child-session',
+      rootFrameId: 'root',
+      agentFrameId: 'child',
+      attemptId: 'attempt',
+      messageBranchId: 'branch',
+      runtimeSegmentId: 'segment',
+      promptMessageId: 'original-user',
+      workspaceCwd: root,
+      isAttemptWritable: () => true,
+      executionIntent: original
+    })
+    expect(
+      service.blockExecutionIntents({ projectId: 'project', sessionId: 'root-session' })
+    ).toEqual([{ projectId: 'project', sessionId: 'root-session', refusalId: original.refusalId }])
+    expect(JSON.stringify((await call(child)).body)).toContain(
+      'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION'
+    )
+    const next = service.createExecutionIntent({ projectId: 'project', sessionId: 'root-session' })
+    const fresh = await child.refreshExecutionIntent(next)
+    expect((await call(child)).status).toBe(401)
+    expect((await call(fresh)).body).toMatchObject({ result: { status: 'completed' } })
+    expect(execute).toHaveBeenCalledOnce()
+    // The actual target Session is an alias of this same root intent, not another grant.
+    const continuations = service.blockExecutionIntents({
+      projectId: 'project',
+      sessionId: 'child-session'
+    })
+    expect(continuations).toEqual([
+      { projectId: 'project', sessionId: 'root-session', refusalId: next.refusalId }
+    ])
+    expect(JSON.stringify((await call(fresh)).body)).toContain(
+      'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION'
+    )
+    expect(next.refusalId).toEqual(expect.any(String))
+    await child.revoke()
+    await child.revoke()
+    expect(shutdown).toHaveBeenCalledOnce()
+  } finally {
+    await child?.revoke()
+    await server.close()
+    await service.dispose()
+    await rm(root, { recursive: true, force: true })
   }
 })

@@ -48,6 +48,7 @@ import {
 import { createNotebookArtifactSourceScopeProvider } from './artifact-source-scope'
 import { NotebookLocalRpcServer } from './local-rpc-server'
 import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
+import { notebookExecutionIntent } from './execution-intent'
 import {
   NotebookControlCompletionCapturedError,
   NotebookRuntimeService,
@@ -385,6 +386,10 @@ describe('notebook local RPC server', () => {
             messageBranchId: 'child-branch',
             runtimeSegmentId: 'child-runtime',
             promptMessageId: 'child-prompt',
+            executionIntent: service.createExecutionIntent({
+              projectId: 'default-project',
+              sessionId: 'session-1'
+            }),
             workspaceCwd: root,
             isAttemptWritable: () => true
           })
@@ -2496,7 +2501,11 @@ describe('notebook local RPC server', () => {
       (method === 'execute' ? { execute } : { executeControl: execute }) as never,
       { transport }
     )
-    const connection = await server.ensureStarted()
+    const connection = await server.issueSessionConnection(
+      'session-1',
+      'default-project',
+      'root-frame-session-1'
+    )
     const disconnect = new AbortController()
 
     try {
@@ -2542,7 +2551,11 @@ describe('notebook local RPC server', () => {
       const server = new NotebookLocalRpcServer({ [method]: operation } as never, {
         transport: 'tcp'
       })
-      const connection = await server.ensureStarted()
+      const connection = await server.issueSessionConnection(
+        'session-1',
+        'default-project',
+        'root-frame-session-1'
+      )
       const disconnect = new AbortController()
 
       try {
@@ -3164,7 +3177,11 @@ describe('notebook local RPC server', () => {
       resolveSpecialistSkillIds
     })
     server.registerSessionSpecialist('session-1', 'specialist-1')
-    const connection = await server.ensureStarted()
+    const connection = await server.issueSessionConnection(
+      'session-1',
+      'default-project',
+      'root-frame-session-1'
+    )
 
     try {
       const unauthorized = await fetch(connection.endpoint, {
@@ -3181,7 +3198,7 @@ describe('notebook local RPC server', () => {
       const authorized = await fetch(connection.endpoint, {
         method: 'POST',
         headers: {
-          authorization: 'Bearer secret-token',
+          authorization: `Bearer ${connection.token}`,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -3310,7 +3327,11 @@ describe('notebook local RPC server', () => {
       transport: 'tcp',
       token: 'secret-token'
     })
-    const connection = await server.ensureStarted()
+    const connection = await server.issueSessionConnection(
+      'notebook-session-1',
+      'default-project',
+      'root-frame-notebook-session-1'
+    )
 
     server.registerSessionAlias('notebook-session-1', 'real-session-1')
 
@@ -3318,7 +3339,7 @@ describe('notebook local RPC server', () => {
       const response = await fetch(connection.endpoint, {
         method: 'POST',
         headers: {
-          authorization: 'Bearer secret-token',
+          authorization: `Bearer ${connection.token}`,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -3747,7 +3768,11 @@ describe('notebook local RPC server', () => {
       } as unknown as NotebookRuntimeService,
       { transport: 'tcp', token: 'secret-token' }
     )
-    const connection = await server.ensureStarted()
+    const connection = await server.issueSessionConnection(
+      'session-1',
+      'default-project',
+      'root-frame-session-1'
+    )
 
     try {
       await expect(
@@ -4056,7 +4081,11 @@ describe('notebook local RPC server', () => {
         clearSession: () => undefined
       }
     })
-    const connection = await server.ensureStarted()
+    const connection = await server.issueSessionConnection(
+      'session-1',
+      'default-project',
+      'root-frame-session-1'
+    )
     rpcEndpoint = connection.endpoint
     rpcToken = connection.token
     server.setArtifactTurnBinding('session-1', {
@@ -4083,7 +4112,7 @@ describe('notebook local RPC server', () => {
       const response = await fetch(connection.endpoint, {
         method: 'POST',
         headers: {
-          authorization: 'Bearer secret-token',
+          authorization: `Bearer ${connection.token}`,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -4482,7 +4511,11 @@ describe('notebook local RPC server', () => {
         clearSession: vi.fn()
       }
     })
-    const connection = await server.ensureStarted()
+    const connection = await server.issueSessionConnection(
+      'session-1',
+      'default-project',
+      'root-frame-session-1'
+    )
     server.setArtifactTurnBinding('session-1', {
       ownerExecutionId: 'execution-1',
       projectId: 'default-project',
@@ -4506,7 +4539,7 @@ describe('notebook local RPC server', () => {
       const response = await fetch(connection.endpoint, {
         method: 'POST',
         headers: {
-          authorization: 'Bearer secret-token',
+          authorization: `Bearer ${connection.token}`,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -4568,7 +4601,11 @@ describe('notebook local RPC server', () => {
           }
         }
       )
-      const connection = await server.ensureStarted()
+      const connection = await server.issueSessionConnection(
+        'session-1',
+        'default-project',
+        'root-frame-session-1'
+      )
       server.setArtifactTurnBinding('session-1', {
         ownerExecutionId: 'execution-1',
         projectId: 'default-project',
@@ -4592,7 +4629,7 @@ describe('notebook local RPC server', () => {
         const response = await fetch(connection.endpoint, {
           method: 'POST',
           headers: {
-            authorization: 'Bearer secret-token',
+            authorization: `Bearer ${connection.token}`,
             'content-type': 'application/json'
           },
           body: JSON.stringify({
@@ -4710,7 +4747,11 @@ describe('notebook local RPC server', () => {
         }
       }
     )
-    const connection = await server.ensureStarted()
+    const connection = await server.issueSessionConnection(
+      'session-shell',
+      'default-project',
+      'root-frame-session-shell'
+    )
     server.setArtifactTurnBinding('session-shell', {
       ownerExecutionId: 'execution-shell',
       projectId: 'default-project',
@@ -4727,7 +4768,7 @@ describe('notebook local RPC server', () => {
       const response = await fetch(connection.endpoint, {
         method: 'POST',
         headers: {
-          authorization: 'Bearer secret-token',
+          authorization: `Bearer ${connection.token}`,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -4921,13 +4962,17 @@ describe('notebook local RPC server', () => {
       transport: 'tcp',
       token: 'secret-token'
     })
-    const connection = await server.ensureStarted()
+    const connection = await server.issueSessionConnection(
+      'session-1',
+      'default-project',
+      'root-frame-session-1'
+    )
 
     try {
       const response = await fetch(connection.endpoint, {
         method: 'POST',
         headers: {
-          authorization: 'Bearer secret-token',
+          authorization: `Bearer ${connection.token}`,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -5716,6 +5761,7 @@ describe('real ACP / RPC / Runtime approval wiring', () => {
         runtimeSegmentId: 'segment',
         promptMessageId: `prompt-${frame}`,
         workspaceCwd: h.root,
+        executionIntent: notebookExecutionIntent(h.connection),
         isAttemptWritable: () => true
       })
     const child = await createChild('child')
@@ -5838,6 +5884,7 @@ describe('real ACP / RPC / Runtime approval wiring', () => {
         runtimeSegmentId: 'segment',
         promptMessageId: 'child-prompt',
         workspaceCwd: h.root,
+        executionIntent: notebookExecutionIntent(h.connection),
         permissionPrompts: 'none',
         isAttemptWritable: () => true
       })
@@ -5869,6 +5916,7 @@ describe('real ACP / RPC / Runtime approval wiring', () => {
       runtimeSegmentId: 'segment',
       promptMessageId: 'child-prompt',
       workspaceCwd: h.root,
+      executionIntent: notebookExecutionIntent(h.connection),
       isAttemptWritable: () => true
     })
     const pending = h.rpc(

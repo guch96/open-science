@@ -15,7 +15,8 @@ import {
   NotebookExecutionIntentOwner,
   notebookExecutionIntent,
   type NotebookExecutionIntent,
-  type NotebookExecutionIntentScope
+  type NotebookExecutionIntentScope,
+  type NotebookExecutionContinuation
 } from './execution-intent'
 import { existsSync, realpathSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
@@ -474,6 +475,14 @@ class NotebookRuntimeService {
     return this.executionIntents.current(scope)
   }
 
+  bindExecutionIntent(scope: NotebookExecutionIntentScope, intent: NotebookExecutionIntent): void {
+    this.executionIntents.bind(scope, intent)
+  }
+
+  adoptExecutionIntentScope(scope: NotebookExecutionIntentScope, sessionId: string): void {
+    this.executionIntents.adopt(scope, sessionId)
+  }
+
   rememberExecutionIntent(
     scope: NotebookExecutionIntentScope,
     promptId: string,
@@ -496,8 +505,11 @@ class NotebookRuntimeService {
     return this.executionIntents.refused(scope, refusalId)
   }
 
-  blockExecutionIntents(scope: NotebookExecutionIntentScope, reason = 'manual-release'): void {
-    this.executionIntents.block(scope, reason)
+  blockExecutionIntents(
+    scope: NotebookExecutionIntentScope,
+    reason = 'manual-release'
+  ): readonly NotebookExecutionContinuation[] {
+    return this.executionIntents.block(scope, reason)
   }
 
   private memoryPolicyPromise?: Promise<NotebookMemoryPolicyPort>

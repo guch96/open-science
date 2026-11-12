@@ -822,7 +822,10 @@ describe('AcpPromptTurnWorkflow', () => {
       framework,
       providerSessionId: 'provider-1',
       cwd: '/session',
-      skillRuntimeAllowlist: ['mcp-pubmed']
+      skillRuntimeAllowlist: ['mcp-pubmed'],
+      request: expect.objectContaining({ sessionId: 's1' }),
+      signal: expect.any(AbortSignal),
+      assertCurrent: expect.any(Function)
     })
     expect(frameworkBeforePromptDispatch).toHaveBeenCalledWith({
       connection: {},

@@ -1,4 +1,4 @@
-import { notebookExecutionIntent } from './execution-intent'
+import { notebookExecutionIntent, notebookExecutionCredential } from './execution-intent'
 import { createHash } from 'node:crypto'
 import { resourceActivity } from '../resource-diagnostics/activity'
 import { existsSync } from 'node:fs'
@@ -1434,7 +1434,8 @@ class NotebookExecutionOwner {
                       ?.filter((input) => input.sourceKind === 'artifact-version')
                       .map((input) => input.sourceFileId) ?? []
                 },
-                notebookExecutionIntent(request)
+                notebookExecutionIntent(request),
+                notebookExecutionCredential(request)
               )
               reachedExecutor = true
               return session

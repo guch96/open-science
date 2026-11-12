@@ -229,7 +229,8 @@ export type NotebookSessionMcpRpcConnection = {
   token: string
   beginControlInvocation?: (
     context: TrustedControlInvocationIdentity,
-    intent?: NotebookExecutionIntent
+    intent?: NotebookExecutionIntent,
+    credential?: string
   ) => (() => void) & { readonly nonce?: string }
   completeControlInvocation?: (
     controlInvocationId: string,
