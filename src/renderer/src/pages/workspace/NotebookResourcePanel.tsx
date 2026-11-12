@@ -149,7 +149,7 @@ const ResourceDetails = ({
   }[resource.phase]
   const bytes = (value: number | undefined): string => formatByteSize(value) ?? t('Unknown')
   return (
-    <li className="space-y-1 rounded-md bg-bg-10 px-3 py-2">
+    <li className="min-w-0 space-y-1 rounded-md bg-bg-10 px-3 py-2 [overflow-wrap:anywhere]">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium">
           {resourceLabel(resource, t)}
@@ -386,6 +386,7 @@ const NotebookResourcePanel = ({
                 type="button"
                 size="sm"
                 variant="outline"
+                className="h-auto max-w-full whitespace-normal text-left"
                 disabled={Boolean(group.releaseBlockedReason)}
                 aria-describedby={
                   group.releaseBlockedReason ? `release-blocked-${group.sessionId}` : undefined
@@ -452,7 +453,9 @@ const NotebookResourcePanel = ({
       >
         <AlertDialog.Portal>
           <AlertDialog.Overlay className={dialogOverlayClassName} />
-          <AlertDialog.Content className={dialogPanelClassName('max-w-lg p-0')}>
+          <AlertDialog.Content
+            className={dialogPanelClassName('w-[min(512px,calc(100vw-2rem))] p-0')}
+          >
             <div className={dialogHeaderClassName}>
               <AlertDialog.Title className={dialogTitleClassName}>
                 {t('Stop and release Notebook for "{{title}}"?', {
@@ -468,17 +471,13 @@ const NotebookResourcePanel = ({
                   <p>{t('History, saved outputs, files, and installed environments are kept.')}</p>
                   <p>{t('Earlier file writes are not undone.')}</p>
                   <p>{t('Independent remote Compute Jobs are not stopped.')}</p>
-                  <ul className="space-y-2">
-                    {confirmation?.resources.map((resource) => (
-                      <ResourceDetails
-                        key={resource.id}
-                        resource={resource}
-                        observedAt={observedAt}
-                      />
-                    ))}
-                  </ul>
                 </div>
               </AlertDialog.Description>
+              <ul className="mt-3 space-y-2 text-xs">
+                {confirmation?.resources.map((resource) => (
+                  <ResourceDetails key={resource.id} resource={resource} observedAt={observedAt} />
+                ))}
+              </ul>
             </div>
             <div className={dialogFooterClassName}>
               <AlertDialog.Cancel asChild>
@@ -507,7 +506,7 @@ const NotebookResourcePanel = ({
       >
         <Dialog.Portal>
           <Dialog.Overlay className={dialogOverlayClassName} />
-          <Dialog.Content className={dialogPanelClassName('max-w-lg p-0')}>
+          <Dialog.Content className={dialogPanelClassName('w-[min(512px,calc(100vw-2rem))] p-0')}>
             <div className={dialogHeaderClassName}>
               <Dialog.Title className={dialogTitleClassName}>
                 {progress ? releaseStatus(progress) : t('Notebook cleanup')}
@@ -552,7 +551,7 @@ const NotebookResourcePanel = ({
                       </p>
                     ) : null}
                     {resource.projection === 'failed' ? (
-                      <p className="text-status-error-foreground">
+                      <p className="text-status-failure-foreground dark:text-status-failure-dark-foreground">
                         {t('Saved Notebook state could not be updated.')}
                       </p>
                     ) : null}
