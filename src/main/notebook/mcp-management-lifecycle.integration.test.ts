@@ -47,7 +47,11 @@ describe('Notebook MCP management lifecycle', () => {
       const rpcServer = new NotebookLocalRpcServer({ [method]: operation } as never, {
         transport: 'tcp'
       })
-      const connection = await rpcServer.ensureStarted()
+      const connection = await rpcServer.issueSessionConnection(
+        'session-1',
+        'default-project',
+        'root-frame-session-1'
+      )
       const mcpServer = createNotebookMcpServer({
         ...connection,
         projectId: 'default-project',

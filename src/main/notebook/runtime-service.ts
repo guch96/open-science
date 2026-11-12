@@ -16,6 +16,13 @@ import {
   type NotebookMemoryPolicyPort,
   type NotebookExecutionAdmission
 } from './execution-admission'
+import {
+  NotebookExecutionIntentOwner,
+  notebookExecutionIntent,
+  type NotebookExecutionIntent,
+  type NotebookExecutionIntentScope,
+  type NotebookExecutionContinuation
+} from './execution-intent'
 import { existsSync, realpathSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -487,6 +494,53 @@ const projectNotebookMemoryPolicyState = (
 
 // Coordinates notebook cells, shared interpreters, persisted run history, and UI notifications.
 class NotebookRuntimeService {
+  private readonly executionIntents = new NotebookExecutionIntentOwner()
+
+  createExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
+    return this.executionIntents.create(scope)
+  }
+
+  currentExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent | undefined {
+    return this.executionIntents.current(scope)
+  }
+
+  bindExecutionIntent(scope: NotebookExecutionIntentScope, intent: NotebookExecutionIntent): void {
+    this.executionIntents.bind(scope, intent)
+  }
+
+  adoptExecutionIntentScope(scope: NotebookExecutionIntentScope, sessionId: string): void {
+    this.executionIntents.adopt(scope, sessionId)
+  }
+
+  rememberExecutionIntent(
+    scope: NotebookExecutionIntentScope,
+    promptId: string,
+    intent: NotebookExecutionIntent
+  ): void {
+    this.executionIntents.remember(scope, promptId, intent)
+  }
+
+  resolveExecutionIntent(
+    scope: NotebookExecutionIntentScope,
+    promptId: string
+  ): NotebookExecutionIntent | undefined {
+    return this.executionIntents.resolve(scope, promptId)
+  }
+
+  refusedExecutionIntent(
+    scope: NotebookExecutionIntentScope,
+    refusalId: string
+  ): NotebookExecutionIntent | undefined {
+    return this.executionIntents.refused(scope, refusalId)
+  }
+
+  blockExecutionIntents(
+    scope: NotebookExecutionIntentScope,
+    reason = 'manual-release'
+  ): readonly NotebookExecutionContinuation[] {
+    return this.executionIntents.block(scope, reason)
+  }
+
   private memoryPolicyPromise?: Promise<NotebookMemoryPolicyPort>
   private memoryPolicyUnsubscribe?: () => void
   private memoryPolicyActive = false
@@ -543,17 +597,22 @@ class NotebookRuntimeService {
   createExecutionAdmission(
     signal?: AbortSignal,
     executionScope?: string,
-    context?: NotebookMemoryRejectionContext
+    context?: NotebookMemoryRejectionContext,
+    intent?: NotebookExecutionIntent
   ): NotebookExecutionAdmission {
     return createNotebookExecutionAdmission({
       policy: () => this.getMemoryPolicy(),
       signal,
       executionScope,
-      ...(context
-        ? {
-            onRejected: (state) => this.notifyMemoryPolicyRejected(context, state)
-          }
-        : {})
+      assertHostCurrent: () => intent?.assertExecutable(),
+      onRejected: (state) => {
+        const refusalId = intent?.block(state.status)
+        if (context)
+          this.notifyMemoryPolicyRejected(
+            { ...context, ...(refusalId ? { refusalId } : {}) },
+            state
+          )
+      }
     })
   }
 
@@ -574,6 +633,16 @@ class NotebookRuntimeService {
     }
   >(request: T, signal?: AbortSignal, executionScope?: string): Promise<T> {
     if (notebookExecutionAdmission(request)) return request
+    const intent = notebookExecutionIntent(request)
+    intent?.assertExecutable()
+    if (intent)
+      this.executionIntents.register(
+        {
+          projectId: resolveProjectId(request, this.options.projectId),
+          sessionId: request.sessionId
+        },
+        intent
+      )
     // Snapshot the actual host-owned live object before the first await. Historical statuses and
     // caller-provided epochs never authorize an explicit terminal to cold-start a replacement.
     let terminalTarget: string | undefined
@@ -612,8 +681,12 @@ class NotebookRuntimeService {
         policy: () => this.getMemoryPolicy(),
         signal: signal ? AbortSignal.any([signal, deletionSignal]) : deletionSignal,
         executionScope,
-        assertHostCurrent,
-        onRejected: (state) =>
+        assertHostCurrent: (boundary) => {
+          intent?.assertExecutable()
+          assertHostCurrent?.(boundary)
+        },
+        onRejected: (state) => {
+          const refusalId = intent?.block(state.status)
           this.notifyMemoryPolicyRejected(
             {
               projectId: resolveProjectId(request, this.options.projectId),
@@ -621,10 +694,12 @@ class NotebookRuntimeService {
               workspaceCwd: request.workspaceCwd,
               source: request.source,
               inputKind: request.inputKind,
-              terminalTarget
+              terminalTarget,
+              ...(refusalId ? { refusalId } : {})
             },
             state
           )
+        }
       })
       await admission.prepare('submit')
       admission.assertCurrent('submit')
