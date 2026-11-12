@@ -1736,7 +1736,8 @@ describe('production delegated-work composition', () => {
         method: 'POST',
         headers: {
           authorization: `Bearer ${connection.token}`,
-          'content-type': 'application/json'
+          'content-type': 'application/json',
+          'x-open-science-control-invocation': endInvocation.nonce
         },
         body: JSON.stringify({ method, params })
       })
@@ -2668,7 +2669,8 @@ describe('production delegated-work composition', () => {
       method: 'POST',
       headers: {
         authorization: `Bearer ${connection.token}`,
-        'content-type': 'application/json'
+        'content-type': 'application/json',
+        'x-open-science-control-invocation': endInvocation.nonce
       },
       body: JSON.stringify({
         method: 'delegatedWorkCall',
