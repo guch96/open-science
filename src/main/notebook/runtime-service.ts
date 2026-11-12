@@ -11,6 +11,12 @@ import {
   type NotebookMemoryPolicyPort,
   type NotebookExecutionAdmission
 } from './execution-admission'
+import {
+  NotebookExecutionIntentOwner,
+  notebookExecutionIntent,
+  type NotebookExecutionIntent,
+  type NotebookExecutionIntentScope
+} from './execution-intent'
 import { existsSync, realpathSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -219,6 +225,7 @@ type NotebookMemoryRejectionContext = Pick<NotebookSessionReference, 'projectId'
   workspaceCwd?: string
   source?: string
   inputKind?: string
+  refusalId?: string
 }
 type NotebookRuntimeServiceCallbacks = NotebookSessionLifecycleCallbacks & {
   onMemoryPolicyRejected?: (
@@ -456,6 +463,23 @@ const resolveDefaultExecutorOptions = (): NotebookKernelExecutorOptions => {
 
 // Coordinates notebook cells, shared interpreters, persisted run history, and UI notifications.
 class NotebookRuntimeService {
+  private readonly executionIntents = new NotebookExecutionIntentOwner()
+
+  createExecutionIntent(scope: NotebookExecutionIntentScope): NotebookExecutionIntent {
+    return this.executionIntents.create(scope)
+  }
+
+  refusedExecutionIntent(
+    scope: NotebookExecutionIntentScope,
+    refusalId: string
+  ): NotebookExecutionIntent | undefined {
+    return this.executionIntents.refused(scope, refusalId)
+  }
+
+  blockExecutionIntents(scope: NotebookExecutionIntentScope, reason = 'manual-release'): void {
+    this.executionIntents.block(scope, reason)
+  }
+
   private memoryPolicyPromise?: Promise<NotebookMemoryPolicyPort>
   getMemoryPolicy(): Promise<NotebookMemoryPolicyPort> {
     return (this.memoryPolicyPromise ??= this.options.memoryPolicy
@@ -466,17 +490,22 @@ class NotebookRuntimeService {
   createExecutionAdmission(
     signal?: AbortSignal,
     executionScope?: string,
-    context?: NotebookMemoryRejectionContext
+    context?: NotebookMemoryRejectionContext,
+    intent?: NotebookExecutionIntent
   ): NotebookExecutionAdmission {
     return createNotebookExecutionAdmission({
       policy: () => this.getMemoryPolicy(),
       signal,
       executionScope,
-      ...(context
-        ? {
-            onRejected: (state) => this.options.callbacks?.onMemoryPolicyRejected?.(context, state)
-          }
-        : {})
+      assertHostCurrent: () => intent?.assertExecutable(),
+      onRejected: (state) => {
+        const refusalId = intent?.block(state.status)
+        if (context)
+          this.options.callbacks?.onMemoryPolicyRejected?.(
+            { ...context, ...(refusalId ? { refusalId } : {}) },
+            state
+          )
+      }
     })
   }
 
@@ -497,6 +526,8 @@ class NotebookRuntimeService {
     }
   >(request: T, signal?: AbortSignal, executionScope?: string): Promise<T> {
     if (notebookExecutionAdmission(request)) return request
+    const intent = notebookExecutionIntent(request)
+    intent?.assertExecutable()
     // Snapshot the actual host-owned live object before the first await. Historical statuses and
     // caller-provided epochs never authorize an explicit terminal to cold-start a replacement.
     let assertHostCurrent:
@@ -532,18 +563,24 @@ class NotebookRuntimeService {
       policy: () => this.getMemoryPolicy(),
       signal,
       executionScope,
-      assertHostCurrent,
-      onRejected: (state) =>
+      assertHostCurrent: (boundary) => {
+        intent?.assertExecutable()
+        assertHostCurrent?.(boundary)
+      },
+      onRejected: (state) => {
+        const refusalId = intent?.block(state.status)
         this.options.callbacks?.onMemoryPolicyRejected?.(
           {
             projectId: resolveProjectId(request, this.options.projectId),
             sessionId: request.sessionId,
             workspaceCwd: request.workspaceCwd,
             source: request.source,
-            inputKind: request.inputKind
+            inputKind: request.inputKind,
+            ...(refusalId ? { refusalId } : {})
           },
           state
         )
+      }
     })
     const trusted = withNotebookExecutionAdmission(request, admission)
     await this.sessionLifecycle.runProjectOperation(request, async () => {

@@ -127,6 +127,7 @@ import {
   type NotebookLocalRpcCapability
 } from './local-rpc-notebook-adapter'
 import type { NotebookRpcConnection } from './mcp-server'
+import { withNotebookExecutionIntent, NotebookExecutionIntent } from './execution-intent'
 
 const log = createLogger('notebook:local-rpc')
 const MAX_COMPLETED_COMPUTE_SUBMISSIONS_PER_SESSION = 100
@@ -412,6 +413,7 @@ type NotebookRpcSessionBinding = {
   activeControlInvocation?: TrustedControlInvocationIdentity
   executionCwd?: string
   isControl?: true
+  executionIntent?: NotebookExecutionIntent
   delegatedNotebook?: {
     viewImageBackend?: HostViewImageBackend
     permissionPrompts?: 'none'
@@ -1433,7 +1435,8 @@ class NotebookLocalRpcServer {
     sessionId: string,
     projectId: string,
     agentFrameId: string,
-    memoryTools = true
+    memoryTools = true,
+    executionIntent?: NotebookExecutionIntent
   ): Promise<NotebookRpcConnection> {
     if (!agentFrameId.trim()) {
       throw new Error('Notebook RPC capabilities require an explicit Agent Frame owner.')
@@ -1456,6 +1459,10 @@ class NotebookLocalRpcServer {
       projectId,
       agentFrameId: resolvedAgentFrameId,
       memoryTools,
+      executionIntent:
+        executionIntent ??
+        this.service.createExecutionIntent?.({ projectId, sessionId: resolvedSessionId }) ??
+        new NotebookExecutionIntent({ projectId, sessionId: resolvedSessionId }),
       delegatedWorkRole: 'main'
     })
     return {
@@ -2576,6 +2583,21 @@ class NotebookLocalRpcServer {
       ]
       const dispatchSignal =
         dispatchSignals.length === 1 ? dispatchSignals[0] : AbortSignal.any(dispatchSignals)
+      const executionIntent = authenticatedBinding?.executionIntent
+      if (executionIntent) {
+        if (
+          [
+            'beginCodeCell',
+            'execute',
+            'runCell',
+            'executeControl',
+            'executeShell',
+            'restart'
+          ].includes(method)
+        )
+          executionIntent.assertExecutable()
+        resolvedParams = withNotebookExecutionIntent(resolvedParams, executionIntent)
+      }
       const result =
         method === 'capabilitiesCall'
           ? hostCapabilities

@@ -23,6 +23,7 @@ import type {
 } from '../../shared/notebook-env'
 import type { NotebookLanguage } from '../../shared/notebook-language-contract'
 import { shellRuntimeBindingSchema } from './shell-runtime'
+import type { NotebookExecutionIntent, NotebookExecutionIntentScope } from './execution-intent'
 
 const provenanceContextSchema = z
   .object({
@@ -226,6 +227,7 @@ type NotebookRuntimeBindingRequest = NotebookSessionRequest & {
 }
 
 type NotebookLocalRpcCapability = {
+  createExecutionIntent?(scope: NotebookExecutionIntentScope): NotebookExecutionIntent
   beginCodeCell(request: BeginNotebookCodeCellRequest, signal?: AbortSignal): Promise<unknown>
   appendCodeCell(request: AppendNotebookCodeCellRequest): Promise<unknown>
   abortCodeCell(request: AbortNotebookCodeCellRequest): Promise<unknown>
