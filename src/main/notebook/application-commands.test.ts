@@ -78,7 +78,7 @@ const invocation = <Args extends readonly unknown[]>(
 })
 
 describe('Notebook application commands', () => {
-  it('owns exactly the 23 renderer-callable Notebook and Environment commands', () => {
+  it('owns exactly the 27 renderer-callable Notebook and Environment commands', () => {
     expect([
       ...notebookApplicationCommands.commands,
       ...notebookEnvironmentApplicationCommands.commands
@@ -86,6 +86,10 @@ describe('Notebook application commands', () => {
       expect.objectContaining({ name: 'notebook:run-index' }),
       expect.objectContaining({ name: 'notebook:state' }),
       expect.objectContaining({ name: 'notebook:project-activity' }),
+      expect.objectContaining({ name: 'notebook:project-resources' }),
+      expect.objectContaining({ name: 'notebook:release-session-resources' }),
+      expect.objectContaining({ name: 'notebook:resource-release' }),
+      expect.objectContaining({ name: 'notebook:retry-resource-release' }),
       expect.objectContaining({ name: 'notebook:memory-policy-state' }),
       expect.objectContaining({ name: 'notebook:inspect-namespace' }),
       expect.objectContaining({ name: 'notebook:reference' }),
@@ -130,7 +134,7 @@ describe('Notebook application commands', () => {
       'shutdown'
     ] as const
     const workflows = Object.fromEntries(
-      workflowMethods.map((method) => [
+      ['configureResourceReleaseGuard', ...workflowMethods].map((method) => [
         method,
         vi.fn(async (request: unknown) => ({ method, request }))
       ])
@@ -253,6 +257,7 @@ describe('Notebook application commands', () => {
     const exportIpynb = vi.fn()
     const exportIpynbAll = vi.fn()
     const workflows = {
+      configureResourceReleaseGuard: vi.fn(),
       exportIpynb,
       exportIpynbAll
     } as unknown as NotebookCommandWorkflows

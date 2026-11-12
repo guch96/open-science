@@ -18,6 +18,15 @@ const binding = (): Binding => {
   return native
 }
 
+export const inspectWindowsChildJobProcessIds = (child: ChildProcess): number[] | undefined => {
+  const handle = nativeProcesses.get(child)
+  if (!handle) return undefined
+  const pids = binding().windowsOwnedJobProcessIds(handle)
+  if (pids.some((pid) => !Number.isSafeInteger(pid) || pid <= 0))
+    throw new Error('Owned Windows process inspection returned invalid identities.')
+  return pids
+}
+
 export const reapWindowsOwnedJob = async (jobName: string): Promise<boolean> => {
   const native = binding()
   const deadline = Date.now() + 4_000
