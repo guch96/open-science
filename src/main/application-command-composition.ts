@@ -552,14 +552,12 @@ const createApplicationCommandComposition = (
       ...dependencies,
       notebook: {
         ...dependencies.notebook,
-        assertReleaseAvailable: () => {
-          if (stopping || updateHolds > 0)
-            throw new ApplicationCommandError(
-              'command-unavailable',
-              'The local service is stopping.'
-            )
-          dependencies.notebook.assertReleaseAvailable?.()
-        }
+        resourceReleaseBlockedReason: () =>
+          stopping
+            ? 'application-stopping'
+            : updateHolds > 0
+              ? 'application-updating'
+              : dependencies.notebook.resourceReleaseBlockedReason?.()
       }
     },
     remoteAccess.owner

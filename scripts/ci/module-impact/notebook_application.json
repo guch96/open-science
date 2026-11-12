@@ -151,7 +151,10 @@
     "src/main/notebook/local-rpc-execution-intent.integration.test.ts",
     "src/main/notebook/runtime-execution-admission.test.ts",
     "src/main/notebook/runtime-pressure-reclamation.test.ts",
-    "src/main/notebook/owned-resources.test.ts"
+    "src/main/notebook/owned-resources.test.ts",
+    "src/main/notebook/resource-release.ts",
+    "src/main/notebook/resource-release.integration.test.ts",
+    "src/main/notebook/resource-release-commands.integration.test.ts"
   ],
   "interfacePaths": [
     "src/main/notebook/harness-mcp-turn.ts",
@@ -245,7 +248,8 @@
     "src/main/notebook/runtime-service.ts",
     "src/main/notebook/runtime-workflows.ts",
     "src/main/notebook/windows-python.test-support.ts",
-    "src/main/notebook/execution-intent.ts"
+    "src/main/notebook/execution-intent.ts",
+    "src/main/notebook/resource-release.ts"
   ],
   "consumerModules": [],
   "testFiles": {
@@ -353,7 +357,9 @@
       "src/main/notebook/idle-reclamation.test.ts",
       "src/main/notebook/runtime-execution-admission.test.ts",
       "src/main/notebook/runtime-pressure-reclamation.test.ts",
-      "src/main/notebook/owned-resources.test.ts"
+      "src/main/notebook/owned-resources.test.ts",
+      "src/main/notebook/resource-release.integration.test.ts",
+      "src/main/notebook/resource-release-commands.integration.test.ts"
     ],
     "contract": [
       "src/preload/index.test.ts",

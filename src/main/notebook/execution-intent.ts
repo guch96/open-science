@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { NotebookExecutionAdmissionError } from './execution-admission'
+import type { notebookExecutionIntentReference } from './execution-model-contract'
 
 export type NotebookExecutionIntentScope = Readonly<{ projectId: string; sessionId: string }>
 export type NotebookExecutionContinuation = NotebookExecutionIntentScope &
@@ -9,6 +10,7 @@ export type NotebookExecutionContinuation = NotebookExecutionIntentScope &
 // Main owns this transient authority. A prompt id, tool argument or document cannot create it.
 // Concrete transports and derived Attempts retain the same immutable reference.
 export class NotebookExecutionIntent {
+  declare readonly [notebookExecutionIntentReference]: true
   private refusal?: Readonly<{ id: string; reason: string }>
   private userPreparationPending = false
   private readonly branches = new Map<

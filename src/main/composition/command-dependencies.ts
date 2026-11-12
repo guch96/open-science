@@ -185,16 +185,12 @@ export function composeCommandDependencies({
     },
     notebook: {
       workflows: notebookRuntime.notebookCommands,
-      assertReleaseAvailable: () => {
-        if (
-          sessionPackages.packageHandoffHeld.current ||
-          isMigrationInProgress() ||
-          isMigrationPending()
-        )
-          throw new Error(
-            'Notebook resources cannot be released during an update or data move. Refresh after it finishes.'
-          )
-      },
+      resourceReleaseBlockedReason: () =>
+        sessionPackages.packageHandoffHeld.current
+          ? 'package-handoff'
+          : isMigrationInProgress() || isMigrationPending()
+            ? 'data-migration'
+            : undefined,
       readInputPreview: (request) => sessionAuthority.notebookInputRegistry.readPreview(request)
     },
     notebookEnvironment: notebookEnvironmentLifecycle,

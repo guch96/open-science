@@ -1450,16 +1450,9 @@ class NotebookRuntimeService {
           releases.push(this.executionOwner.fenceShellRuns(scope))
           if (options.holdExternalNotebookStarts)
             releases.push(options.holdExternalNotebookStarts(scope))
-          const lanes = [
-            ...Array.from(this.sessions.values())
-              .filter(
-                (session) =>
-                  session.projectId === scope.projectId && session.sessionId === scope.sessionId
-              )
-              .map((session) => notebookLaneKey(session.lane)),
-            ...resources.flatMap((resource) => (resource.laneKey ? [resource.laneKey] : []))
-          ]
-          releases.push(this.runtimeBindingOwner.tryHoldSessionTeardown(lanes))
+          releases.push(
+            this.runtimeBindingOwner.tryHoldSessionTeardown(this.resourceLaneKeys(scope, resources))
+          )
           return () => {
             for (const release of releases.reverse()) release()
           }
@@ -1471,13 +1464,37 @@ class NotebookRuntimeService {
       observe: (scope, operation) => this.sessionLifecycle.observeSessionRelease(scope, operation),
       block: (scope) => this.blockExecutionIntents(scope),
       decisions: (projectId) => this.executionIntents.blockedContinuations(projectId),
-      blockedReason: (scope) =>
-        options.isSessionExporting?.(scope.projectId, scope.sessionId)
-          ? 'session-exporting'
-          : undefined,
+      blockedReason: (scope, scopeHeld) => {
+        if (options.isSessionExporting?.(scope.projectId, scope.sessionId))
+          return 'session-exporting'
+        if (scopeHeld) return undefined
+        return (
+          this.sessionLifecycle.resourceReleaseBlockedReason(scope) ??
+          (this.runtimeBindingOwner.hasSessionTeardownConflict(
+            this.resourceLaneKeys(scope, this.ownedResources(scope))
+          )
+            ? 'runtime-binding-changing'
+            : undefined)
+        )
+      },
       changed: () => this.refreshResourceActivity(),
       logger: this.runtimeLogger
     })
+  }
+
+  private resourceLaneKeys(
+    scope: NotebookExecutionIntentScope,
+    resources: readonly NotebookOwnedResource[]
+  ): string[] {
+    return [
+      ...Array.from(this.sessions.values())
+        .filter(
+          (session) =>
+            session.projectId === scope.projectId && session.sessionId === scope.sessionId
+        )
+        .map((session) => notebookLaneKey(session.lane)),
+      ...resources.flatMap((resource) => (resource.laneKey ? [resource.laneKey] : []))
+    ]
   }
 
   refreshResourceActivity(): void {
