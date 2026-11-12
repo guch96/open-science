@@ -109,7 +109,8 @@ Linux source references: [namespace inode](https://github.com/torvalds/linux/blo
 [filesystem magic](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/magic.h), and
 [cgroup v2 controller and root semantics](https://docs.kernel.org/admin-guide/cgroup-v2.html).
 
-Validation on 2026-11-12: macOS 26.5 arm64, Node 24.22.2. The source native package built with
+Policy-only validation recorded on 2026-11-12: macOS 26.5 arm64, Node 24.22.2. These scoped results
+precede final phase-1 integration and are not release acceptance. The source native package built with
 `node node_modules/node-gyp/bin/node-gyp.js rebuild --directory packages/process-tree-native`.
 All native CJS tests passed where applicable (6 passed, 12 Windows-only skipped). The focused
 memory policy/config/native and resource-recorder Vitest suites passed (58 passed, 1 Linux-only
@@ -122,3 +123,142 @@ and signed/sandboxed distributions, and exact desktop/standalone/container packa
 source fingerprint changed; all five matching signed/published catalog records and fresh-download
 verification remain required by `docs/native-components.md` before a release merge. No artifact was
 published and the catalog/signature gate was not weakened.
+
+## Candidate operator guidance
+
+These notes describe the unreleased phase-1 candidate. Final verification and real platform,
+Provider, native-artifact, and CI-owner acceptance remain open under #31.
+
+Pressure or unavailable sampling ends the current execution request. Dismissing the notice, memory
+recovery, idle reclamation, or manual release never retries it. An explicit terminal retry reads the
+editor's current contents and rechecks the same live interpreter. After that interpreter is released,
+the terminal stays inactive/read-only with history visible; use the trusted Agent or recovery entry
+to establish a new interpreter. Agent continuation requires an explicit human action and a new
+visible guidance message. Ordinary chat, automated continuation, or another tool-call identifier
+cannot reopen the refused intent. Reads and explanation remain available.
+
+Open Compute for the current project and use **Stop and release Notebook** in **Notebook resources**.
+Switch projects to manage another project's Notebooks. The action applies to the confirmed session's
+local resources, including all listed languages, environments, lanes, and active, idle, starting, and
+unstarted work. It remains available when memory is healthy or sampling is unavailable. Confirmation
+loses variables, connections, and unsaved in-memory objects; history, outputs, files, and environment installations
+remain. It does not reverse file writes or other external effects. Independent remote Jobs and
+their monitors retain their own lifecycle.
+
+The backend must recheck the original resource set and current caller before stopping. Added or
+replaced resources require refresh and confirmation; export, update, and migration conflicts must
+not become hidden stop queues. Cleanup results remain per original owner/tree. Whole-tree exit and
+required termination projection are both needed for success; partial failure keeps the original
+cleanup responsibility. **View cleanup progress** shows these outcomes; closing it does not cancel
+committed cleanup. **Retry cleanup** retries the retained failed resources using their original
+handles and does not include replacements or new resources. Release alone never grants execution or
+replays old code. **Continue Notebook work** remains available for a blocked session even after its
+notice is dismissed and it has no remaining local resources.
+
+Resource memory figures are diagnostic estimates with a capture time, metric kind, and coverage.
+Missing measurements mean unknown rather than zero, and partial coverage must remain visible. RSS
+can count shared pages more than once and does not promise the bytes release will reclaim. Only
+original owner and process-birth/epoch identity authorize cleanup; metrics do not supply ownership.
+
+## Threshold configuration
+
+The optional file is `<Config Root>/notebook-memory-policy.json`, outside Notebook documents and
+`.science` packages. Default roots are `~/.open-science` for production and `~/.open-science-project`
+for development. Existing `OPEN_SCIENCE_CONFIG_ROOT` and CLI `--config-root` profile selection apply;
+see [standalone profiles](standalone-runtime.md). There is no settings UI or hot reload. The runtime
+loads the policy lazily once per generation; stop and restart orderly to apply edits.
+
+```json
+{
+  "windowsEnterRatio": 0.1,
+  "windowsExitRatio": 0.2,
+  "linuxEnterRatio": 0.1,
+  "linuxExitRatio": 0.2,
+  "macNormalRecoveryMs": 20000
+}
+```
+
+These are the defaults. Ratio fields accept finite numbers from `0.01` through `0.9`, inclusive;
+each platform's exit ratio must be strictly greater than its enter ratio. Windows/Linux enter
+pressure when any applicable required remaining-memory ratio is at or below the enter ratio.
+Recovery requires all applicable ratios to exceed the exit ratio. Cgroup `memory.high` has its
+separate fixed rule: enter at its limit and recover only with more than 20% remaining. macOS recovery
+accepts integer milliseconds from `5000` through `300000`; after WARN/CRITICAL, trustworthy NORMAL
+observations must cover that interval.
+
+Missing fields use defaults; unknown optional fields are ignored. Malformed JSON, an unreadable file,
+or any invalid recognized value falls back to the complete default set, with one configuration
+diagnostic per policy load. Thresholds cannot disable sampling, required commit/cgroup/domain facts,
+identity or freshness checks, or the final dispatch check. They cannot force execution while sampling
+is unavailable. Defaults still require certification for the actual platform and distribution.
+
+## Stored-data compatibility and export
+
+`run.json` remains version 1 and portable `.science` manifests remain schema 1. Historical documents,
+coarse termination records, and supported older archives retain their existing readers. Imports are
+cold: source-machine processes and live bindings are not recreated. A fork receives a fresh runtime
+identity, and subsequent execution uses current admission. Windows Job receipts remain local and
+outside portable packages. Samples, latches, nonces, execution grants, blocked intents, confirmation
+revisions, and temporary leases are transient; restarting the application cannot replay refused code
+or restore an old execution grant.
+
+Skill files, Specialist packages, Connector definitions, credential storage, and OAuth formats do not
+change. Unavailable memory sampling cannot block historical reads, import/export, cancellation, or
+identity-confirmed manual cleanup. This preserves the existing [directional compatibility
+contract](compatibility.md#historical-data-and-upgrade-direction), not arbitrary binary downgrades or
+mixed-version desktop/backend operation.
+
+Package export and fork install the existing archive admission fence, wait for already committed
+Notebook teardown, and only then reserve persistence for the snapshot. Conversation export shares
+this ordering. Unsafe cleanup or failed termination projection prevents export. Teardown never waits
+for export. Package-export cancellation ends its own wait and source fence without cancelling earlier
+cleanup; existing checksums and final source-revision checks remain required.
+
+## Release acceptance and rollback
+
+Issue [#31](https://github.com/guch96/open-science/issues/31) owns release acceptance. Record the exact
+source/tree, system, architecture, Node version, distribution, commands, results, skips, and limits for
+each run. Local source tests and controlled fixtures cannot certify other systems or signed packages.
+
+| Scope                                             | Available evidence and remaining acceptance                                                                                                                                          |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| macOS 26.5 arm64, Node 24.22.2 source build       | Local native sampling and scoped owner/RPC checks; no machine-wide pressure was generated. This does not certify macOS 12, Intel, or a signed desktop distribution.                  |
+| macOS 12+ arm64/x64 and Windows x64 distributions | Real pressure transitions, full-tree cleanup, failures, signing, and upgrade acceptance remain required. Simulated-platform tests do not replace them.                               |
+| Linux arm64/x64 host and cgroup v1/v2             | Adapter fixtures do not certify actual hierarchy visibility, pressure transitions, or cleanup on the declared distributions.                                                         |
+| Certified containers and WSL                      | Require trustworthy facts from the actual execution domain. The earlier private-container Node 20 refusal probe is negative-path evidence only, not Node 24/container certification. |
+| Standalone npm/CLI                                | Verify the exact supported runtime and packaged native components, not only source execution.                                                                                        |
+| External Providers                                | Controlled ACP/RPC refresh fixtures do not prove that actual supported Providers consume new MCP configuration while preserving history, namespace, and independent work.            |
+
+Every declared environment needs evidence or an explicit reviewed support decision. An environment
+without trustworthy required sampling stops publication; support must not narrow silently and there
+is no force-run bypass.
+
+The changed native fingerprint requires all five matching artifacts, macOS/Windows signatures,
+immutable publication, catalog update, and fresh actual downloads under the [native-component
+workflow](native-components.md#update-the-binaries). During verification on 2026-11-12, the repository
+permission API returned `enabled: true` and workflow state was `active`, but `native-components.yml`
+dispatch with `dry_run=true` still failed with HTTP 422, `Actions has been disabled for this repository.`
+No run was created and no
+signing, publication, or catalog update occurred. Keep the PR draft and #31 open until these gates
+and the real acceptance above are resolved; do not weaken fingerprint or signature checks.
+
+The protected native runtime-consumer declarations in `scripts/ci/module-runtime-consumers.json` and
+Windows exact-path routing in `scripts/ci/change-impact.json` also require independent CI-owner
+approval under the [CI control-plane rules](ci.md#ci-control-plane-approval). Local registration checks
+and agent review do not supply that approval.
+
+For rollback:
+
+1. Use existing shutdown/update handoff to stop new admission. Preserve the selected profile/data
+   backup and record matching application/backend versions.
+2. Drain all original Notebook owners, including failed trees and installer/Attempt/batch work.
+   Require whole-tree exit and required sandbox/termination projection; uncertainty retains cleanup
+   responsibility.
+3. Only after the old runtime has stopped, open the selected previous matching binary and profile
+   backup. Never run two versions against the same live tree or treat binary downgrade as data
+   rollback.
+4. Preserve history, files, and local receipts under their existing contracts. Released variables and
+   connections do not return; never replay rejected or historical code automatically.
+
+Disabling the policy or changing declared support requires a release decision. Threshold
+configuration is not a rollback or force-run switch.
