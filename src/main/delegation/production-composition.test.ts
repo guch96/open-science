@@ -32,6 +32,7 @@ import { createFrameNotebookLane } from '../notebook/lane-identity'
 import { NotebookRunRepository } from '../notebook/repository'
 import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
+import { markNotebookExecutionIntent, notebookExecutionIntent } from '../notebook/execution-intent'
 import {
   SessionPersistenceCoordinator,
   type SessionFileIndex,
@@ -383,6 +384,7 @@ const createFrameworkCompositionHarness = async (
           const branch = graph.branches.find(({ id }) => id === childFrame.activeBranchId)!
           const prompt = graph.messages.find(({ id }) => id === branch.headMessageId)!
           const capability = await server!.issueDelegatedNotebookConnection({
+            executionIntent: notebookExecutionIntent(input),
             projectId: input.session.projectId,
             sessionId: input.session.sessionId,
             rootFrameId: graph.rootFrameId,
@@ -589,6 +591,8 @@ const createFrameworkCompositionHarness = async (
       return { path: immutableInputPath, filename: 'framework-input.txt' }
     }
   )
+  // Model the trusted Main prompt entry; derived Attempts inherit this same intent.
+  markNotebookExecutionIntent(harness.caller, service.createExecutionIntent(harness.caller.session))
   context.harness = harness
   context.composition = harness.composition
   return Object.assign(harness, { controls })
