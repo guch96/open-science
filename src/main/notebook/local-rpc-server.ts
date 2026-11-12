@@ -2762,8 +2762,8 @@ class NotebookLocalRpcServer {
           ['execute', 'runCell', 'executeControl', 'executeShell'].includes(method) &&
           executionCredential
         )
-          activeRequest.preserveProviderStoppedWork = () =>
-            executionIntent.providerStopRequested(executionCredential)
+          activeRequest.preserveProviderStoppedWork =
+            executionIntent.captureProviderStopProof(executionCredential)
       }
       if (writeProducerSignal && activeRequest.preserveProviderStoppedWork) {
         const producerSignal = writeProducerSignal

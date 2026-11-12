@@ -47,28 +47,33 @@ export class NotebookExecutionIntent {
     this.assertExecutable()
   }
 
-  observeViolations(credential: string, onViolation: () => void): () => void {
+  observeViolations(
+    credential: string,
+    onViolation: () => void
+  ): (() => void) & { acceptUserCancellation(): void } {
     const branch = {
       onViolation: onViolation as (() => void) | undefined,
       providerStopRequested: false,
       cancellation: new AbortController()
     }
     this.branches.set(credential, branch)
-    return () => {
-      if (this.branches.get(credential) === branch) branch.onViolation = undefined
-    }
+    return Object.assign(
+      () => {
+        branch.onViolation = undefined
+        if (this.branches.get(credential) === branch) this.branches.delete(credential)
+      },
+      {
+        acceptUserCancellation: () => {
+          branch.providerStopRequested = false
+          branch.cancellation.abort()
+        }
+      }
+    )
   }
 
-  providerStopRequested(credential: string): boolean {
-    return this.branches.get(credential)?.providerStopRequested === true
-  }
-
-  acceptUserCancellation(credential: string): void {
+  captureProviderStopProof(credential: string): (() => boolean) | undefined {
     const branch = this.branches.get(credential)
-    if (branch) {
-      branch.providerStopRequested = false
-      branch.cancellation.abort()
-    }
+    return branch ? () => branch.providerStopRequested : undefined
   }
 
   userCancellationSignal(credential: string): AbortSignal | undefined {

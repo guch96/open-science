@@ -521,7 +521,7 @@ const composeAcpRuntimePromptOwners = (
             }
           })
         })
-        const onUserCancellation = (): void => intent.acceptUserCancellation(credential)
+        const onUserCancellation = (): void => release.acceptUserCancellation()
         signal.addEventListener('abort', onUserCancellation, { once: true })
         return () => {
           release()

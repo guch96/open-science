@@ -33908,8 +33908,14 @@ it.each([false, true])(
       pressured = false
       expect(await call('disobedient()')).toContain('NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION')
       await vi.waitFor(() => expect(agent.cancelledSessions).toEqual(['notebook-loop-provider']))
-      // A provider may cancel MCP fetches when its model branch is stopped. That is not a user
-      // cancellation of independent work already inside the Notebook executor.
+      promptGate.resolve({ stopReason: 'cancelled' })
+      let promptSettled = false
+      void pendingPrompt.finally(() => {
+        promptSettled = true
+      })
+      await drainStarted.promise
+      // The Provider observer has now retired its credential. A later MCP disconnect still
+      // cannot cancel independent work already inside the Notebook executor.
       transportCancellation.abort()
       await expect(sibling).rejects.toThrow()
       let cancellation: Promise<unknown> | undefined
@@ -33917,12 +33923,6 @@ it.each([false, true])(
         cancellation = runtime.cancelPrompt({ sessionId: session.sessionId })
         await vi.waitFor(() => expect(executionSignal?.aborted).toBe(true))
       }
-      promptGate.resolve({ stopReason: 'cancelled' })
-      let promptSettled = false
-      void pendingPrompt.finally(() => {
-        promptSettled = true
-      })
-      await drainStarted.promise
       await new Promise<void>((resolve) => setImmediate(resolve))
       expect(runtime.getSnapshot().promptInFlightSessionIds).toContain(session.sessionId)
       expect(promptSettled).toBe(false)
