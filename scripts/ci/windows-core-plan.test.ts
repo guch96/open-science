@@ -50,6 +50,7 @@ describe('Windows core impact and event selection', () => {
     ['scripts/windows-dev-notebook-host.integration.test.ts', ['windows_runtime']],
     ['src/main/notebook/resource-release.windows.integration.test.ts', ['windows_runtime']],
     ['src/main/notebook/memory-admission.windows.integration.test.ts', ['windows_runtime']],
+    ['src/main/notebook/python-lifecycle.windows.integration.test.ts', ['windows_runtime']],
     ['src/main/composition/session-package-lifecycle.integration.test.ts', ['windows_runtime']],
     ['src/main/notebook/host-mcp.integration.test.ts', ['windows_runtime']],
     ['src/main/notebook/host-compute.integration.test.ts', ['windows_runtime']],
@@ -180,6 +181,7 @@ it('runs the Windows Notebook RPC checks with real kernels enabled', () => {
     expect.arrayContaining([
       'src/main/notebook/resource-release.windows.integration.test.ts',
       'src/main/notebook/memory-admission.windows.integration.test.ts',
+      'src/main/notebook/python-lifecycle.windows.integration.test.ts',
       'src/main/composition/session-package-lifecycle.integration.test.ts',
       'src/main/notebook/host-mcp.integration.test.ts',
       'src/main/notebook/host-compute.integration.test.ts'
