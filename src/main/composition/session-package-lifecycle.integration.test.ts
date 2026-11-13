@@ -302,7 +302,16 @@ it.skipIf(process.platform !== 'win32').each(['complete', 'incomplete', 'cancell
       expect(document.version).toBe(1)
       expect(document.runs).toEqual(persistedBefore.runs)
       expect(document.kernel.terminatedKernelInstances).toContainEqual({ kind: 'repl' })
-      expect(JSON.stringify(document)).not.toContain(receipts[0].windowsJobName)
+      const encodedJobName = JSON.stringify(receipts[0].windowsJobName).slice(1, -1)
+      const assertNoLocalJob = (candidate: unknown): void => {
+        expect(JSON.stringify(candidate)).not.toContain(encodedJobName)
+      }
+      const contaminated = {
+        ...document,
+        kernel: { ...document.kernel, windowsJobName: receipts[0].windowsJobName }
+      }
+      expect(() => assertNoLocalJob(contaminated)).toThrow()
+      assertNoLocalJob(document)
       await expect(
         f.persistence.runSessionMutation(projectId, sessionId, async () => 'released')
       ).resolves.toBe('released')
