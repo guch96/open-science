@@ -142,28 +142,50 @@ describe.skipIf(process.platform !== 'win32')('Windows Python lifecycle (real ow
   })
 
   afterEach(async () => {
+    let disposal: { reaped: boolean } | undefined
+    let ownedJobMembers: number[] | undefined
+    let sandboxDisposed = false
+    let rootRemoved = false
     try {
-      await service?.dispose()
-      expect(inspectOwnedWindowsProcessIds()).toEqual([])
-      expect(
-        cleanups.every(
-          ({ result }) =>
-            result.processesTerminated && result.networkClosed && result.temporaryResourcesRemoved
-        )
-      ).toBe(true)
-    } finally {
-      await sandbox?.dispose()
-      await resetOwnership()
-      vi.restoreAllMocks()
-      vi.unstubAllEnvs()
+      try {
+        disposal = await service?.dispose()
+        expect(disposal).toEqual({ reaped: true })
+        ownedJobMembers = inspectOwnedWindowsProcessIds()
+        expect(ownedJobMembers).toEqual([])
+        expect(
+          cleanups.every(
+            ({ result }) =>
+              result.processesTerminated && result.networkClosed && result.temporaryResourcesRemoved
+          )
+        ).toBe(true)
+      } finally {
+        try {
+          await sandbox?.dispose()
+          sandboxDisposed = true
+        } finally {
+          await resetOwnership()
+        }
+      }
       if (root) {
         const cleanupRoot = await realpath(root)
         expect(dirname(cleanupRoot).toLowerCase()).toBe((await realpath(tmpdir())).toLowerCase())
         expect(basename(cleanupRoot)).toMatch(/^notebook-windows-python-/)
         await rm(cleanupRoot, { recursive: true, force: true })
         await expect(access(cleanupRoot)).rejects.toMatchObject({ code: 'ENOENT' })
-        console.info('Windows Python fixture cleaned', { root: cleanupRoot, ownedJobMembers: [] })
+        rootRemoved = true
+        console.info('Windows Python fixture cleaned', { root: cleanupRoot, ownedJobMembers })
       }
+    } finally {
+      vi.restoreAllMocks()
+      vi.unstubAllEnvs()
+      if (root && !rootRemoved)
+        console.error('Windows Python fixture retained after incomplete cleanup', {
+          root,
+          disposal,
+          ownedJobMembers,
+          sandboxDisposed,
+          cleanups
+        })
     }
   })
 
