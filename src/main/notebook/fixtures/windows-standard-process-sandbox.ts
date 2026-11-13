@@ -26,6 +26,7 @@ export async function createWindowsStandardProcessSandbox(): Promise<{
           cwd: invocation.cwd,
           env: invocation.env,
           superviseProcessTree: invocation.superviseProcessTree,
+          windowsShellControlPipe: invocation.windowsShellControlPipe,
           filesystem: invocation.filesystem,
           onNetworkAccessRequest: async () => false
         })

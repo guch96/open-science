@@ -156,6 +156,7 @@
     "src/main/notebook/resource-release.ts",
     "src/main/notebook/resource-release.integration.test.ts",
     "src/main/notebook/resource-release.windows.integration.test.ts",
+    "src/main/notebook/memory-admission.windows.integration.test.ts",
     "src/main/notebook/resource-release-commands.integration.test.ts"
   ],
   "interfacePaths": [
@@ -363,6 +364,7 @@
       "src/main/notebook/owned-resources.test.ts",
       "src/main/notebook/resource-release.integration.test.ts",
       "src/main/notebook/resource-release.windows.integration.test.ts",
+      "src/main/notebook/memory-admission.windows.integration.test.ts",
       "src/main/notebook/resource-release-commands.integration.test.ts"
     ],
     "contract": [
