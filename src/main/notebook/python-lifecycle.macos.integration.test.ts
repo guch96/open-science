@@ -407,26 +407,38 @@ it.skipIf(process.platform !== 'darwin' || !python)(
         })
       )
     } finally {
+      let disposal: { reaped: boolean } | undefined
+      let ownerDisposed = false
+      let rootRemoved = false
       try {
-        await service.dispose()
-      } finally {
         try {
-          await owner.dispose()
+          disposal = await service.dispose()
+          expect(disposal).toEqual({ reaped: true })
         } finally {
-          await resetOwnership()
-          await rm(root, { recursive: true, force: true })
-          expect(existsSync(root)).toBe(false)
-          for (const original of observedProcesses)
-            expect(native.getDarwinProcess(original.pid)?.uniqueId).not.toBe(original.uniqueId)
-          console.info(
-            'macOS real Python tracer cleanup',
-            JSON.stringify({
-              root,
-              removed: !existsSync(root),
-              originalProcesses: observedProcesses
-            })
-          )
+          try {
+            await owner.dispose()
+            ownerDisposed = true
+          } finally {
+            await resetOwnership()
+          }
         }
+        for (const original of observedProcesses)
+          expect(native.getDarwinProcess(original.pid)?.uniqueId).not.toBe(original.uniqueId)
+        await rm(root, { recursive: true, force: true })
+        expect(existsSync(root)).toBe(false)
+        rootRemoved = true
+        console.info(
+          'macOS real Python tracer cleanup',
+          JSON.stringify({ root, removed: rootRemoved, originalProcesses: observedProcesses })
+        )
+      } finally {
+        if (!rootRemoved)
+          console.error('macOS real Python tracer fixture retained after incomplete cleanup', {
+            root,
+            disposal,
+            ownerDisposed,
+            originalProcesses: observedProcesses
+          })
       }
     }
   },

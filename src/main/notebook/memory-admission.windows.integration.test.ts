@@ -85,15 +85,41 @@ describe.skipIf(process.platform !== 'win32')(
     })
 
     afterEach(async () => {
+      let disposal: { reaped: boolean } | undefined
+      let ownedJobMembers: number[] | undefined
+      let sandboxDisposed = false
+      let rootRemoved = false
       try {
-        await service?.dispose()
-        expect(inspectOwnedWindowsProcessIds()).toEqual([])
+        try {
+          disposal = await service?.dispose()
+          expect(disposal).toEqual({ reaped: true })
+          ownedJobMembers = inspectOwnedWindowsProcessIds()
+          expect(ownedJobMembers).toEqual([])
+        } finally {
+          try {
+            if (sandbox) {
+              await sandbox.dispose()
+              sandboxDisposed = true
+            }
+          } finally {
+            await resetOwnership()
+          }
+        }
+        if (root) {
+          await rm(root, { recursive: true, force: true })
+          await expect(access(root)).rejects.toMatchObject({ code: 'ENOENT' })
+          rootRemoved = true
+        }
       } finally {
-        await sandbox?.dispose()
-        await resetOwnership()
         vi.restoreAllMocks()
         vi.unstubAllEnvs()
-        if (root) await rm(root, { recursive: true, force: true })
+        if (root && !rootRemoved)
+          console.error('Windows admission fixture retained after incomplete cleanup', {
+            root,
+            disposal,
+            ownedJobMembers,
+            sandboxDisposed
+          })
       }
     })
 

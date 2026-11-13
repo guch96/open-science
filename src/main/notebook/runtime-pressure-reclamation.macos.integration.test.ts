@@ -292,21 +292,40 @@ it.skipIf(process.platform !== 'darwin')(
         })
       )
     } finally {
+      let disposal: { reaped: boolean } | undefined
+      let ownerDisposed = false
+      let rootRemoved = false
       try {
-        if (resume) await writeFile(resume, 'cleanup')
-        if (backgroundRunId) await service.waitForBackgroundRun(backgroundRunId)
-      } finally {
         try {
-          await service.dispose()
-          await owner.dispose()
+          if (resume) await writeFile(resume, 'cleanup')
+          if (backgroundRunId) await service.waitForBackgroundRun(backgroundRunId)
         } finally {
-          await resetOwnership()
-          clock.mockRestore()
-          await rm(root, { recursive: true, force: true })
-          expect(existsSync(root)).toBe(false)
-          for (const original of observedProcesses)
-            expect(native.getDarwinProcess(original.pid)?.uniqueId).not.toBe(original.uniqueId)
+          try {
+            disposal = await service.dispose()
+            expect(disposal).toEqual({ reaped: true })
+          } finally {
+            try {
+              await owner.dispose()
+              ownerDisposed = true
+            } finally {
+              await resetOwnership()
+            }
+          }
         }
+        for (const original of observedProcesses)
+          expect(native.getDarwinProcess(original.pid)?.uniqueId).not.toBe(original.uniqueId)
+        await rm(root, { recursive: true, force: true })
+        expect(existsSync(root)).toBe(false)
+        rootRemoved = true
+      } finally {
+        clock.mockRestore()
+        if (!rootRemoved)
+          console.error('macOS pressure tracer fixture retained after incomplete cleanup', {
+            root,
+            disposal,
+            ownerDisposed,
+            originalProcesses: observedProcesses
+          })
       }
     }
   },
