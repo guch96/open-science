@@ -158,6 +158,7 @@
     "src/main/notebook/resource-release.integration.test.ts",
     "src/main/notebook/resource-release.windows.integration.test.ts",
     "src/main/notebook/memory-admission.windows.integration.test.ts",
+    "src/main/notebook/python-lifecycle.macos.integration.test.ts",
     "src/main/notebook/resource-release-commands.integration.test.ts"
   ],
   "interfacePaths": [
@@ -367,6 +368,7 @@
       "src/main/notebook/resource-release.integration.test.ts",
       "src/main/notebook/resource-release.windows.integration.test.ts",
       "src/main/notebook/memory-admission.windows.integration.test.ts",
+      "src/main/notebook/python-lifecycle.macos.integration.test.ts",
       "src/main/notebook/resource-release-commands.integration.test.ts"
     ],
     "contract": [
