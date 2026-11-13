@@ -360,6 +360,232 @@ describe.skipIf(process.platform !== 'win32')(
       }
     }, 30_000)
 
+    it('retries incomplete original cleanup without releasing a same-session Shell successor or another session', async () => {
+      const native: typeof import('@aipoch/process-tree-native') = requireNative(
+        '../../../packages/process-tree-native'
+      )
+      const scope = { projectId: 'project', sessionId: 'cleanup-owner', workspaceCwd: root }
+      const other = { ...scope, sessionId: 'retained' }
+      let cleanupAvailable = false
+      let injected = false
+      const cleanups: Array<{
+        proofPath: string
+        actual: { processesTerminated: boolean; networkClosed: boolean }
+        reported: { processesTerminated: boolean; networkClosed: boolean }
+      }> = []
+      const wrap = port.wrap
+      vi.spyOn(port, 'wrap').mockImplementation(async (invocation) => {
+        const wrapped = await wrap(invocation)
+        if (invocation.runtime !== 'repl' || invocation.sessionId !== scope.sessionId || injected)
+          return wrapped
+        injected = true
+        const proofPath = wrapped.processTreeProof!.path
+        return {
+          ...wrapped,
+          cleanup: async (reason, outcome) => {
+            // Run the real original cleanup first. Withhold only completion of one dependency;
+            // never manufacture successful termination proof or replace the Job owner/killer.
+            const actual = await wrapped.cleanup(reason, outcome)
+            const reported = cleanupAvailable ? actual : { ...actual, networkClosed: false }
+            cleanups.push({ proofPath, actual, reported })
+            return reported
+          }
+        }
+      })
+      try {
+        const initial = await service.executeControl({
+          ...scope,
+          code: `globalThis.kept = 41;
+            globalThis.descendant = require('node:child_process').spawn(process.execPath,
+              ['-e', 'setTimeout(() => process.exit(0), 30000)'],
+              { detached: true, stdio: 'ignore', windowsHide: true });
+            descendant.unref();
+            console.log(JSON.stringify({ pid: process.pid, descendant: descendant.pid }));`
+        })
+        expect(initial.status).toBe('completed')
+        const workload: { pid: number; descendant: number } = JSON.parse(initial.stdout.trim())
+        const originalBirths = [workload.pid, workload.descendant].map((pid) => ({
+          pid,
+          birth: native.getWindowsProcessCreationTime(pid)
+        }))
+        expect(originalBirths.every(({ birth }) => birth !== null)).toBe(true)
+        expect(inspectOwnedWindowsProcessIds()).toEqual(
+          expect.arrayContaining([workload.pid, workload.descendant])
+        )
+        const originalOwner = service.ownedResources(scope)[0]
+        expect(originalOwner).toMatchObject({ group: 'kernel', kind: 'repl', phase: 'idle' })
+        expect(originalOwner.kernelEpochId).toEqual(expect.any(String))
+        const receiptsRoot = join(root, 'runtime', 'kernel-processes')
+        const receipts: Array<{
+          laneKey: string
+          windowsJobName: string
+          kernelEpochId: string
+          windowsProcessTreeProof: { path: string }
+        }> = await Promise.all(
+          (await readdir(receiptsRoot)).map(async (name) =>
+            JSON.parse(await readFile(join(receiptsRoot, name), 'utf8'))
+          )
+        )
+        const receipt = receipts.find(({ laneKey }) => JSON.parse(laneKey)[1] === scope.sessionId)!
+        expect(receipt.windowsJobName).toMatch(/^Local\\OpenScience\.Notebook\./)
+        expect(receipt.kernelEpochId).toBe(originalOwner.kernelEpochId)
+        const group = (await service.getProjectResources(scope)).groups[0]
+        const operation = await service.releaseSessionResources(
+          { ...scope, revision: group.revision },
+          () => undefined
+        )
+        const request = { ...scope, operationId: operation.operationId }
+        await expect(service.waitForSessionTeardown(scope)).rejects.toThrow(/cleanup.*incomplete/i)
+        expect(service.getResourceRelease(request)).toMatchObject({
+          operationId: operation.operationId,
+          status: 'partial',
+          resources: [
+            expect.objectContaining({
+              id: group.resources[0].id,
+              status: 'incomplete',
+              processesTerminated: true,
+              networkClosed: false
+            })
+          ]
+        })
+        const pending = service.ownedResources(scope)[0]
+        expect(pending.identity).toBe(originalOwner.identity)
+        expect(pending.kernelEpochId).toBe(originalOwner.kernelEpochId)
+        expect(pending.laneKey).toBe(originalOwner.laneKey)
+        expect(pending.phase).toBe('cleanup-pending')
+        expect(cleanups).toEqual([
+          expect.objectContaining({
+            proofPath: receipt.windowsProcessTreeProof.path,
+            actual: expect.objectContaining({ processesTerminated: true, networkClosed: true }),
+            reported: expect.objectContaining({ processesTerminated: true, networkClosed: false })
+          })
+        ])
+        for (const { pid, birth } of originalBirths) {
+          expect(native.getWindowsProcessCreationTime(pid)).not.toBe(birth)
+          expect(inspectOwnedWindowsProcessIds()).not.toContain(pid)
+        }
+        // The executor fences the exact process key until its original cleanup completes.
+        await expect(
+          service.executeControl(
+            withNotebookExecutionIntent(
+              { ...scope, code: 'globalThis.mustNotStart = 1' },
+              service.createExecutionIntent(scope)
+            )
+          )
+        ).rejects.toThrow(/process tree.*stopped|cleanup.*incomplete/i)
+        const freshIntent = service.createExecutionIntent(scope)
+        const successor = await service.executeShell(
+          withNotebookExecutionIntent(
+            {
+              ...scope,
+              shellRuntime: { kind: 'powershell', version: '5.1' },
+              command: '$global:kept = 73; [Console]::Write($PID)'
+            },
+            freshIntent
+          )
+        )
+        expect(successor.exitCode, JSON.stringify(successor)).toBe(0)
+        const successorPid = Number(successor.stdout.trim())
+        const successorBirth = native.getWindowsProcessCreationTime(successorPid)
+        expect(successorBirth).not.toBeNull()
+        const successorOwner = service.ownedResources(scope).find(({ group }) => group === 'shell')!
+        expect(successorOwner).toMatchObject({ kind: 'powershell', phase: 'idle' })
+        expect(successorOwner.identity).not.toBe(originalOwner.identity)
+        const retained = await service.executeControl({
+          ...other,
+          code: 'globalThis.kept = 101; console.log(process.pid)'
+        })
+        expect(retained.status).toBe('completed')
+        const retainedPid = Number(retained.stdout.trim())
+        const retainedBirth = native.getWindowsProcessCreationTime(retainedPid)
+        expect(retainedBirth).not.toBeNull()
+        await expect(service.waitForSessionTeardown(scope)).rejects.toThrow(/cleanup.*incomplete/i)
+
+        cleanupAvailable = true
+        await service.retryResourceRelease(request, () => undefined)
+        await service.waitForSessionTeardown(scope)
+        expect(service.getResourceRelease(request)).toMatchObject({
+          operationId: operation.operationId,
+          status: 'released',
+          resources: [
+            expect.objectContaining({
+              id: group.resources[0].id,
+              status: 'released',
+              processesTerminated: true,
+              networkClosed: true,
+              temporaryResourcesRemoved: true,
+              projection: 'complete'
+            })
+          ]
+        })
+        expect(
+          cleanups.every(({ proofPath }) => proofPath === receipt.windowsProcessTreeProof.path)
+        ).toBe(true)
+        expect(service.ownedResources(scope).map(({ identity }) => identity)).toEqual([
+          successorOwner.identity
+        ])
+        expect(native.getWindowsProcessCreationTime(successorPid)).toBe(successorBirth)
+        expect(native.getWindowsProcessCreationTime(retainedPid)).toBe(retainedBirth)
+        await expect(
+          service.executeShell(
+            withNotebookExecutionIntent(
+              { ...scope, command: '$global:kept += 1; [Console]::Write("$global:kept|$PID")' },
+              freshIntent
+            )
+          )
+        ).resolves.toMatchObject({ exitCode: 0, stdout: `74|${successorPid}` })
+        const replacement = await service.executeControl({
+          ...scope,
+          code: 'globalThis.kept = 89; console.log(process.pid)'
+        })
+        expect(replacement.status).toBe('completed')
+        const replacementPid = Number(replacement.stdout.trim())
+        const replacementBirth = native.getWindowsProcessCreationTime(replacementPid)
+        expect(replacementBirth).not.toBeNull()
+        const cleanupCount = cleanups.length
+        expect((await service.retryResourceRelease(request, () => undefined)).status).toBe(
+          'released'
+        )
+        expect(cleanups).toHaveLength(cleanupCount)
+        expect(native.getWindowsProcessCreationTime(successorPid)).toBe(successorBirth)
+        expect(native.getWindowsProcessCreationTime(retainedPid)).toBe(retainedBirth)
+        expect(native.getWindowsProcessCreationTime(replacementPid)).toBe(replacementBirth)
+        await expect(
+          service.executeShell(
+            withNotebookExecutionIntent(
+              { ...scope, command: '$global:kept += 1; [Console]::Write("$global:kept|$PID")' },
+              freshIntent
+            )
+          )
+        ).resolves.toMatchObject({ exitCode: 0, stdout: `75|${successorPid}` })
+        await expect(
+          service.executeControl({ ...scope, code: 'console.log(++kept)' })
+        ).resolves.toMatchObject({
+          status: 'completed',
+          stdout: expect.stringContaining('90')
+        })
+        await expect(
+          service.executeControl({ ...other, code: 'console.log(++kept)' })
+        ).resolves.toMatchObject({
+          status: 'completed',
+          stdout: expect.stringContaining('102')
+        })
+        console.info('Windows failed original cleanup isolation tracer', {
+          originalResource: group.resources[0].id,
+          epoch: originalOwner.kernelEpochId,
+          job: receipt.windowsJobName,
+          operation: operation.operationId,
+          failure: 'injected incomplete network cleanup after real successful Job cleanup',
+          cleanupAttempts: cleanups.length,
+          successorPid,
+          retainedPid,
+          replacementPid
+        })
+      } finally {
+        cleanupAvailable = true
+      }
+    }, 60_000)
+
     it('cancels confirmed active work through its original owner and retains the cancelled history', async () => {
       const scope = { projectId: 'project', sessionId: 'active', workspaceCwd: root }
       const other = { ...scope, sessionId: 'other' }

@@ -874,7 +874,8 @@
       "src/main/desktop-runtime-session-size.integration.test.ts",
       "src/main/web-service/session-payload.integration.test.ts",
       "src/main/notebook/resource-release.integration.test.ts",
-      "src/main/notebook/resource-release.windows.integration.test.ts"
+      "src/main/notebook/resource-release.windows.integration.test.ts",
+      "src/main/notebook/memory-admission.windows.integration.test.ts"
     ]
   },
   "capabilityOverlays": ["notebook_network_sandbox", "windows_sensitive"],

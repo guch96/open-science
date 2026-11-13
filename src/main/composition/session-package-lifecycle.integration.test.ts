@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi, type Mock } from 'vitest'
 import { configureTestRuntimeMetadata } from '../../../test/runtime-metadata'
@@ -8,7 +8,9 @@ import { englishNativeTranslator } from '../locale/main-process-messages'
 import { NotebookKernelExecutor } from '../notebook/kernel-executor'
 import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
+import { createWindowsStandardProcessSandbox } from '../notebook/fixtures/windows-standard-process-sandbox'
 import { terminateProcessTree } from '../process-tree'
+import { inspectOwnedWindowsProcessIds } from '../process-tree-windows'
 import { ProjectRepository } from '../projects/repository'
 import * as projectDatabase from '../projects/prisma-client'
 import { readPackageArchive } from '../session-package/archive'
@@ -32,8 +34,11 @@ vi.mock('../session-package/inspection-worker', async () => {
   return { createPackageInspector: () => inspectSessionPackage }
 })
 
-afterEach(() => vi.restoreAllMocks())
-configureTestRuntimeMetadata()
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllEnvs()
+})
+const resetOwnership = configureTestRuntimeMetadata()
 
 type LifecycleFixture = {
   fixture: Awaited<ReturnType<typeof createProvenanceTestFixture>>
@@ -55,7 +60,7 @@ type LifecycleFixture = {
   dispose: () => Promise<void>
 }
 
-async function createLifecycleFixture(): Promise<LifecycleFixture> {
+async function createLifecycleFixture(realWindowsOwner = false): Promise<LifecycleFixture> {
   vi.clearAllMocks()
   const fixture = await createProvenanceTestFixture()
   const root = fixture.storageRoot
@@ -104,6 +109,24 @@ async function createLifecycleFixture(): Promise<LifecycleFixture> {
   const entered = Promise.withResolvers<void>()
   const cleanup = Promise.withResolvers<void>()
   const reaping = { confirmed: true }
+  const windowsSandbox = realWindowsOwner ? await createWindowsStandardProcessSandbox() : undefined
+  if (windowsSandbox) {
+    vi.stubEnv('OPEN_SCIENCE_E2E_STORAGE_ROOT', root)
+    const wrap = windowsSandbox.port.wrap
+    windowsSandbox.port.wrap = async (invocation) => {
+      const wrapped = await wrap(invocation)
+      return {
+        ...wrapped,
+        cleanup: async (reason, outcome) => {
+          const result = await wrapped.cleanup(reason, outcome)
+          entered.resolve()
+          await cleanup.promise
+          // Real Job proof is unchanged; only dependency completion is controlled.
+          return reaping.confirmed ? result : { ...result, networkClosed: false }
+        }
+      }
+    }
+  }
   const notebook = new NotebookRuntimeService({
     configRoot: root,
     dataRoot: root,
@@ -111,16 +134,19 @@ async function createLifecycleFixture(): Promise<LifecycleFixture> {
     memoryPolicy: healthyNotebookMemoryPolicy(),
     admitSessionWork: (projectId, sessionId) => archive.admitSessionWork(projectId, sessionId),
     isSessionExporting: (projectId, sessionId) => archive.isSessionExporting(projectId, sessionId),
-    executorFactory: () =>
-      new NotebookKernelExecutor({
-        replLoopPath: join(__dirname, '../../../resources/notebook/repl_loop.js'),
-        terminateTree: async (child) => {
-          const result = await terminateProcessTree(child)
-          entered.resolve()
-          await cleanup.promise
-          return { ...result, reaped: result.reaped && reaping.confirmed }
-        }
-      })
+    processSandbox: windowsSandbox?.port,
+    executorFactory: realWindowsOwner
+      ? undefined
+      : () =>
+          new NotebookKernelExecutor({
+            replLoopPath: join(__dirname, '../../../resources/notebook/repl_loop.js'),
+            terminateTree: async (child) => {
+              const result = await terminateProcessTree(child)
+              entered.resolve()
+              await cleanup.promise
+              return { ...result, reaped: result.reaped && reaping.confirmed }
+            }
+          })
   })
   vi.spyOn(storageRoots, 'resolveConfigRoot').mockReturnValue(root)
   vi.spyOn(storageRoots, 'resolveDataRoot').mockReturnValue(root)
@@ -168,10 +194,137 @@ async function createLifecycleFixture(): Promise<LifecycleFixture> {
       await composed.sessionPackageDesktopLifecycle.close()
       await composed.sessionPackageService.close()
       await notebook.dispose()
+      if (windowsSandbox) {
+        expect(inspectOwnedWindowsProcessIds()).toEqual([])
+        await windowsSandbox.dispose()
+        await resetOwnership()
+      }
       await fixture.dispose()
     }
   }
 }
+
+it.skipIf(process.platform !== 'win32').each(['complete', 'incomplete', 'cancelled'] as const)(
+  'Windows owner export coordinates Archive, original cleanup and persistence after %s',
+  async (ending) => {
+    const f = await createLifecycleFixture(true)
+    const { projectId, sessionId } = f.scope
+    const destination = join(f.fixture.storageRoot, 'windows.science')
+    const controller = new AbortController()
+    const reservePersistence = vi.spyOn(f.persistence, 'reserveSessionExport')
+    let pending: Promise<unknown> | undefined
+    try {
+      await expect(
+        f.notebook.executeControl({
+          ...f.scope,
+          code: 'globalThis.kept = 41; console.log(process.pid)'
+        })
+      ).resolves.toMatchObject({ status: 'completed' })
+      const before = await f.notebook.state(f.scope)
+      const persistedBefore = JSON.parse(await readFile(before.runJsonPath, 'utf8'))
+      const receiptDirectory = join(f.fixture.storageRoot, 'runtime', 'kernel-processes')
+      const receipts: Array<{ windowsJobName: string }> = await Promise.all(
+        (await readdir(receiptDirectory)).map(async (name) =>
+          JSON.parse(await readFile(join(receiptDirectory, name), 'utf8'))
+        )
+      )
+      expect(receipts).toHaveLength(1)
+      expect(receipts[0].windowsJobName).toMatch(/^Local\\OpenScience\.Notebook\./)
+      const group = (await f.notebook.getProjectResources(f.scope)).groups[0]
+      const operation = await f.notebook.releaseSessionResources(
+        { ...f.scope, revision: group.revision },
+        () => undefined
+      )
+      const releaseRequest = { ...f.scope, operationId: operation.operationId }
+      await f.entered.promise
+      expect(inspectOwnedWindowsProcessIds()).toEqual([])
+      pending = f.composed.sessionPackageService.exportTo({ projectId, sessionId }, destination, {
+        signal: controller.signal
+      })
+      void pending.catch(() => undefined)
+      await vi.waitFor(() => expect(f.archive.isSessionExporting(projectId, sessionId)).toBe(true))
+      expect(() => f.archive.admitSessionWork(projectId, sessionId)).toThrow(/export/i)
+      expect(reservePersistence).not.toHaveBeenCalled()
+      await expect(
+        f.persistence.runSessionMutation(projectId, sessionId, async () => 'cleanup may persist')
+      ).resolves.toBe('cleanup may persist')
+      await expect(stat(destination)).rejects.toMatchObject({ code: 'ENOENT' })
+      if (ending === 'cancelled') {
+        const reason = new Error('Windows export observer cancelled')
+        controller.abort(reason)
+        await expect(pending).rejects.toBe(reason)
+        expect(f.archive.isSessionExporting(projectId, sessionId)).toBe(false)
+        expect(f.notebook.getResourceRelease(releaseRequest).status).toBe('releasing')
+      }
+      f.reaping.confirmed = ending !== 'incomplete'
+      f.cleanup.resolve()
+      if (ending === 'incomplete') {
+        await expect(f.notebook.waitForSessionTeardown(f.scope)).rejects.toThrow(
+          /cleanup.*incomplete/i
+        )
+        await expect(pending).rejects.toThrow(/cleanup.*incomplete/i)
+        expect(f.archive.isSessionExporting(projectId, sessionId)).toBe(false)
+        expect(reservePersistence).not.toHaveBeenCalled()
+        await expect(stat(destination)).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(
+          f.persistence.runSessionMutation(projectId, sessionId, async () => 'not frozen')
+        ).resolves.toBe('not frozen')
+        f.reaping.confirmed = true
+        await f.notebook.retryResourceRelease(releaseRequest, () => undefined)
+      }
+      await f.notebook.waitForSessionTeardown(f.scope)
+      expect(f.notebook.getResourceRelease(releaseRequest)).toMatchObject({
+        operationId: operation.operationId,
+        status: 'released',
+        resources: [expect.objectContaining({ id: group.resources[0].id, projection: 'complete' })]
+      })
+      if (ending !== 'complete') {
+        await expect(stat(destination)).rejects.toMatchObject({ code: 'ENOENT' })
+        pending = f.composed.sessionPackageService.exportTo({ projectId, sessionId }, destination)
+      }
+      await expect(pending).resolves.toMatchObject({ title: 'Retained research' })
+      expect(reservePersistence).toHaveBeenCalledOnce()
+      expect(f.archive.isSessionExporting(projectId, sessionId)).toBe(false)
+      const expanded = join(f.fixture.storageRoot, 'expanded-windows')
+      await mkdir(expanded)
+      await readPackageArchive(destination, expanded, new AbortController().signal)
+      const manifest = JSON.parse(await readFile(join(expanded, 'manifest.json'), 'utf8'))
+      expect(manifest.schemaVersion).toBe(1)
+      expect(
+        manifest.inventory.some((entry: { storageKey?: string }) =>
+          entry.storageKey?.includes('runtime/kernel-processes')
+        )
+      ).toBe(false)
+      const run = manifest.inventory.find((entry: { storageKey?: string }) =>
+        entry.storageKey?.endsWith('/run.json')
+      )
+      const document = JSON.parse(await readFile(join(expanded, run.path), 'utf8'))
+      expect(document.version).toBe(1)
+      expect(document.runs).toEqual(persistedBefore.runs)
+      expect(document.kernel.terminatedKernelInstances).toContainEqual({ kind: 'repl' })
+      expect(JSON.stringify(document)).not.toContain(receipts[0].windowsJobName)
+      await expect(
+        f.persistence.runSessionMutation(projectId, sessionId, async () => 'released')
+      ).resolves.toBe('released')
+      console.info('Windows original cleanup/export tracer', {
+        ending,
+        node: process.version,
+        platform: process.platform,
+        job: receipts[0].windowsJobName,
+        operation: operation.operationId,
+        runVersion: document.version,
+        packageSchema: manifest.schemaVersion,
+        retainedRuns: document.runs.length
+      })
+    } finally {
+      f.reaping.confirmed = true
+      f.cleanup.resolve()
+      await pending?.catch(() => undefined)
+      await f.dispose()
+    }
+  },
+  30_000
+)
 
 it.skipIf(process.platform === 'win32')(
   'fences direct export before Notebook cleanup, freezes persistence afterwards, and exports its final projection',
