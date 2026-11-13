@@ -105,6 +105,8 @@ describe('Notebook original resource ownership', () => {
       const continuePreparation = Promise.withResolvers<void>()
       const executor = new NotebookKernelExecutor({
         processSandbox: {
+          // This fake cancels before spawn; it does not need the protected Windows runtime.
+          resolveWindowsRuntime: async () => null,
           wrap: async (invocation) => {
             entered.resolve()
             await continuePreparation.promise
@@ -131,7 +133,10 @@ describe('Notebook original resource ownership', () => {
         sessionId: 'session'
       })
       try {
-        await entered.promise
+        // Fail with the actual early result when runtime preparation prevents reaching the seam.
+        expect(await Promise.race([entered.promise.then(() => 'preparing'), execution])).toBe(
+          'preparing'
+        )
         const [starting] = executor.resources()
         expect(starting).toMatchObject({ group: 'kernel', phase: 'starting', kind: 'repl' })
         const released = releaseThrough === 'handle' ? starting.release() : executor.shutdown()
