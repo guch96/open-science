@@ -900,6 +900,7 @@
       "src/main/notebook/resource-release.integration.test.ts",
       "src/main/notebook/resource-release.windows.integration.test.ts",
       "src/main/notebook/memory-admission.windows.integration.test.ts",
+      "src/main/notebook/python-lifecycle.windows.integration.test.ts",
       "src/main/composition/session-package-lifecycle.integration.test.ts"
     ]
   },
