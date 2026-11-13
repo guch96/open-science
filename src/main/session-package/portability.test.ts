@@ -271,7 +271,7 @@ it.each([
         dataRoot: storageRoot,
         projectId: fork.projectId,
         discoverRuntimes: async () => [],
-        getAgentEnvironmentCreationEnabled: () => false,
+        getAgentEnvironmentCreationEnabled: async () => false,
         memoryPolicy: healthyNotebookMemoryPolicy(),
         processSandbox: {
           wrap: async () => {

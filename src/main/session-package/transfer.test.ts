@@ -10,7 +10,7 @@ it('does not retain completed work through a closed transfer with the default ra
   class WorkPayload {
     value = 42
   }
-  const complete = () => {
+  const complete = (): Promise<{ signal: AbortSignal }> => {
     const payload = new WorkPayload()
     return withPackageTransfer(async (transfer) => {
       expect(payload.value).toBe(42)
