@@ -1,4 +1,4 @@
-import { spawnWindowsOwnedProcess } from '../process-tree-windows'
+import { reapWindowsOwnedJob, spawnWindowsOwnedProcess } from '../process-tree-windows'
 import { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
@@ -50,32 +50,43 @@ it.skipIf(process.platform !== 'win32')(
     }
     const complete = async (): Promise<WeakRef<ExitListenerOwner>> => {
       const owner = new ExitListenerOwner()
+      const jobName = `Local\\OpenScience.Notebook.${randomUUID()}`
       const child = spawnWindowsOwnedProcess(
-        `Local\\OpenScience.Notebook.${randomUUID()}`,
+        jobName,
         process.execPath,
         ['-e', 'process.stdout.write("OWNED_CHILD_EXIT")'],
         { cwd: process.cwd(), env: process.env, windowsHide: true, stdio: 'pipe' }
       )
-      expect(child).toBeInstanceOf(ChildProcess)
-      expect(child).toMatchObject({
-        connected: false,
-        killed: false,
-        exitCode: null,
-        signalCode: null
-      })
-      child.on('exit', () => {
-        owner.exited = true
-      })
-      child.stdin.end()
-      child.stdout.resume()
-      child.stderr.resume()
-      const exitCode = await new Promise<number | null>((resolve, reject) => {
-        child.once('error', reject)
-        child.once('close', resolve)
-      })
-      expect(exitCode).toBe(0)
-      expect(owner.exited).toBe(true)
-      return new WeakRef(owner)
+      try {
+        expect(child).toBeInstanceOf(ChildProcess)
+        expect(child).toMatchObject({
+          connected: false,
+          killed: false,
+          exitCode: null,
+          signalCode: null
+        })
+        child.on('exit', () => {
+          owner.exited = true
+        })
+        child.stdin.end()
+        child.stdout.resume()
+        child.stderr.resume()
+        const exitCode = await new Promise<number | null>((resolve, reject) => {
+          child.once('error', reject)
+          child.once('close', resolve)
+        })
+        expect(exitCode).toBe(0)
+        expect(owner.exited).toBe(true)
+        return new WeakRef(owner)
+      } finally {
+        try {
+          expect(await reapWindowsOwnedJob(jobName)).toBe(true)
+        } finally {
+          child.stdin.destroy()
+          child.stdout.destroy()
+          child.stderr.destroy()
+        }
+      }
     }
     const owner = await complete()
     await nextTurn()
