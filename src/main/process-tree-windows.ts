@@ -1,5 +1,6 @@
 /* c8 ignore file */
 import { ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { closeSync, existsSync } from 'node:fs'
 import { Socket } from 'node:net'
 import { win32 } from 'node:path'
@@ -116,7 +117,10 @@ export const spawnWindowsOwnedProcess = (
     cwd,
     verbatim
   )
-  const child = new ChildProcess() as ChildProcessWithoutNullStreams
+  // The native owner already spawned the process. ChildProcess's constructor would allocate an
+  // unspawned libuv Process handle that roots this facade and its listeners after native exit.
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams
+  Object.setPrototypeOf(child, ChildProcess.prototype)
   nativeProcesses.set(child, launched.handle)
   activeJobs.set(jobName, new WeakRef(launched.handle))
   const streams: Socket[] = []
@@ -131,6 +135,10 @@ export const spawnWindowsOwnedProcess = (
     throw error
   }
   Object.assign(child, {
+    connected: false,
+    signalCode: null,
+    exitCode: null,
+    killed: false,
     pid: launched.pid,
     spawnfile: executable,
     spawnargs: [executable, ...argv],
