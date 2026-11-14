@@ -707,9 +707,9 @@ describe.skipIf(process.platform !== 'win32')('file-evidence Windows atomic publ
           activityId: 'long-root-run',
           activityKind: 'notebook-run',
           evidenceId: 'long-root-evidence',
-          receiptName: 'receipt-long-root.json',
+          receiptName: 'receipt-long-root-run.json',
           stagingName: `staging-long-root-${'x'.repeat(180)}`,
-          finalName: 'activity-long-root',
+          finalName: 'activity-long-root-run',
           storageKeyPrefix: 'project/session',
           maxEvidenceBytes: 65536,
           maxActivityBytes: 65536,
@@ -754,9 +754,9 @@ describe.skipIf(process.platform !== 'win32')('file-evidence Windows atomic publ
       activityId: 'resident-run',
       activityKind: 'notebook-run',
       evidenceId: 'resident-evidence',
-      receiptName: 'receipt-resident.json',
+      receiptName: 'receipt-resident-run.json',
       stagingName: 'staging-resident',
-      finalName: 'activity-resident',
+      finalName: 'activity-resident-run',
       storageKeyPrefix: 'execution-file-evidence/project/' + 'lane-'.repeat(30),
       maxEvidenceBytes: 65536,
       maxActivityBytes: 65536,
@@ -817,7 +817,12 @@ describe.skipIf(process.platform !== 'win32')('file-evidence Windows atomic publ
         'resident-run'
       )
       await expect(stat(join(root, request.receiptName))).rejects.toMatchObject({ code: 'ENOENT' })
-      await call({ operation: 'begin', activityId: 'reconcile-run' })
+      const abandoned = {
+        activityId: 'abandoned',
+        receiptName: 'receipt-abandoned.json',
+        finalName: 'activity-abandoned'
+      }
+      await call({ operation: 'begin', ...abandoned })
       await call({
         operation: 'reconcile',
         retained: [],
@@ -825,8 +830,8 @@ describe.skipIf(process.platform !== 'win32')('file-evidence Windows atomic publ
         deferredActivityKinds: []
       })
       await expect(stat(join(root, request.stagingName))).rejects.toMatchObject({ code: 'ENOENT' })
-      await call({ operation: 'begin', activityId: 'cleanup-run' })
-      await call({ operation: 'cleanup', preservePublished: false })
+      await call({ operation: 'begin', ...abandoned })
+      await call({ operation: 'cleanup', preservePublished: false, ...abandoned })
       await expect(stat(join(root, request.stagingName))).rejects.toMatchObject({ code: 'ENOENT' })
       // A rejected request also releases its binding and leaves the worker usable.
       const rejected = new Promise<string>((resolve) => lines.once('line', resolve))

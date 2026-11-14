@@ -1966,7 +1966,7 @@ const finishPublished = (request, receipt, blobPool, generations = []) => {
     if (!receipt.poolAddressed && receipt.phase === 'capturing' && entryExists(CAPTURE_FILE)) {
       const capture = readCapture(receipt)
       const projectPrefix = blobPool.storageKeyPrefix.replace(/\/blobs$/u, '')
-      const lane = dirname(currentDirectory())
+      const lane = realpathSync('..')
       const laneKey = relative(dirname(realpathSync(blobPool.path)), lane)
         .split(sep)
         .join('/')
