@@ -3355,11 +3355,16 @@ describe('startWebHttpServer', () => {
       'notebook:execute',
       'notebook:finish-code-cell',
       'notebook:background-run',
+      'notebook:memory-policy-state',
       'notebook:project-activity',
+      'notebook:project-resources',
       'notebook:reference',
+      'notebook:resource-release',
       'notebook:inspect-namespace',
       'notebook:read-input-preview',
+      'notebook:release-session-resources',
       'notebook:restart',
+      'notebook:retry-resource-release',
       'notebook:run-cell',
       'notebook:run-index',
       'notebook:shutdown',
@@ -3405,7 +3410,7 @@ describe('startWebHttpServer', () => {
       .filter(([path]) => path.startsWith('acp.'))
       .map(([, channel]) => channel)
       .sort()
-    expect(acpChannels).toHaveLength(20)
+    expect(acpChannels).toHaveLength(21)
     const permissionChannels = [
       'permissions:extend-undo',
       'permissions:list',

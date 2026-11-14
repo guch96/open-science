@@ -30,7 +30,9 @@ import { createArtifactHandlers } from '../artifacts/ipc'
 import { createProjectDbClient, migrateApplicationDatabase } from '../projects/prisma-client'
 import { createFrameNotebookLane } from '../notebook/lane-identity'
 import { NotebookRunRepository } from '../notebook/repository'
+import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import { NotebookRuntimeService } from '../notebook/runtime-service'
+import { markNotebookExecutionIntent, notebookExecutionIntent } from '../notebook/execution-intent'
 import {
   SessionPersistenceCoordinator,
   type SessionFileIndex,
@@ -305,6 +307,7 @@ const createFrameworkCompositionHarness = async (
   const immutableInputPath = join(dataRoot, 'framework-input.txt')
   await writeFile(immutableInputPath, 'framework evidence\n', 'utf8')
   const service = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: dataRoot,
     dataRoot,
     projectId: 'project-1',
@@ -381,6 +384,7 @@ const createFrameworkCompositionHarness = async (
           const branch = graph.branches.find(({ id }) => id === childFrame.activeBranchId)!
           const prompt = graph.messages.find(({ id }) => id === branch.headMessageId)!
           const capability = await server!.issueDelegatedNotebookConnection({
+            executionIntent: notebookExecutionIntent(input),
             projectId: input.session.projectId,
             sessionId: input.session.sessionId,
             rootFrameId: graph.rootFrameId,
@@ -587,6 +591,8 @@ const createFrameworkCompositionHarness = async (
       return { path: immutableInputPath, filename: 'framework-input.txt' }
     }
   )
+  // Model the trusted Main prompt entry; derived Attempts inherit this same intent.
+  markNotebookExecutionIntent(harness.caller, service.createExecutionIntent(harness.caller.session))
   context.harness = harness
   context.composition = harness.composition
   return Object.assign(harness, { controls })
@@ -1734,7 +1740,8 @@ describe('production delegated-work composition', () => {
         method: 'POST',
         headers: {
           authorization: `Bearer ${connection.token}`,
-          'content-type': 'application/json'
+          'content-type': 'application/json',
+          'x-open-science-control-invocation': endInvocation.nonce
         },
         body: JSON.stringify({ method, params })
       })
@@ -2666,7 +2673,8 @@ describe('production delegated-work composition', () => {
       method: 'POST',
       headers: {
         authorization: `Bearer ${connection.token}`,
-        'content-type': 'application/json'
+        'content-type': 'application/json',
+        'x-open-science-control-invocation': endInvocation.nonce
       },
       body: JSON.stringify({
         method: 'delegatedWorkCall',

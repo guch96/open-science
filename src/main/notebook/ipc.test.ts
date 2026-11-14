@@ -1,7 +1,13 @@
 import { configureTestElectronHost } from '../../../test/runtime-host'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import type { NotebookRuntimeService } from './runtime-service'
+import { NotebookRuntimeService } from './runtime-service'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
+import { withNotebookExecutionIntent } from './execution-intent'
 
 const { ipcHandlers, log } = vi.hoisted(() => ({
   ipcHandlers: new Map<string, (...args: unknown[]) => unknown>(),
@@ -31,6 +37,60 @@ beforeEach(() => {
 afterEach(() => clearMigrationPending())
 
 describe('notebook IPC handlers', () => {
+  it.skipIf(process.platform === 'win32')(
+    'rejects a legacy release when its native caller is destroyed during Session validation',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'notebook-release-native-lease-'))
+      const service = new NotebookRuntimeService({
+        configRoot: root,
+        dataRoot: root,
+        projectId: 'project',
+        memoryPolicy: healthyNotebookMemoryPolicy()
+      })
+      const entered = Promise.withResolvers<void>()
+      const authority = Promise.withResolvers<void>()
+      const workflows = createNotebookCommandWorkflows(service, {
+        withSessionAvailable: async (_project, _session, operation) => {
+          entered.resolve()
+          await authority.promise
+          return operation()
+        },
+        isSessionResourceReadable: async () => true,
+        assertSessionResourceReleaseAvailable: () => undefined
+      })
+      workflows.configureResourceReleaseGuard(() => undefined)
+      registerNotebookIpcHandlers(workflows)
+      const sender = Object.assign(new EventEmitter(), { id: 321, isDestroyed: () => false })
+      const scope = { projectId: 'project', sessionId: 'session', workspaceCwd: root }
+      const intent = service.createExecutionIntent(scope)
+      try {
+        await service.executeControl(
+          withNotebookExecutionIntent({ ...scope, code: 'globalThis.kept = 41' }, intent)
+        )
+        const group = (await service.getProjectResources(scope)).groups[0]
+        const release = ipcHandlers.get('notebook:release-session-resources')!(
+          { sender },
+          { ...scope, revision: group.revision }
+        )
+        void Promise.resolve(release).catch(() => undefined)
+        await entered.promise
+        sender.emit('destroyed')
+        authority.resolve()
+        await expect(release).rejects.toThrow(/current human|lease/i)
+        expect(intent.refusalId).toBeUndefined()
+        await expect(
+          service.executeControl(
+            withNotebookExecutionIntent({ ...scope, code: 'console.log(kept)' }, intent)
+          )
+        ).resolves.toMatchObject({ status: 'completed', stdout: expect.stringContaining('41') })
+      } finally {
+        authority.resolve()
+        await service.dispose()
+        await rm(root, { recursive: true, force: true })
+      }
+    }
+  )
+
   it('rejects direct renderer execution while a data-root migration is pending', async () => {
     const service = {
       execute: vi.fn().mockResolvedValue({ runId: 'run-1', status: 'completed' })
@@ -136,6 +196,7 @@ describe('notebook IPC handlers', () => {
     const service = {
       runIndex: vi.fn().mockResolvedValue([{ runId: 'recorded-run' }]),
       state: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getMemoryPolicyState: vi.fn().mockResolvedValue({ status: 'healthy' }),
       getProjectActivity: vi.fn().mockReturnValue({ kernels: [], backgroundRuns: [] }),
       inspectNamespace: vi.fn().mockResolvedValue({ status: 'unavailable' }),
       getSessionReference: vi.fn().mockResolvedValue(null),
@@ -153,8 +214,13 @@ describe('notebook IPC handlers', () => {
     registerNotebookIpcHandlers(createNotebookCommandWorkflows(service))
 
     expect([...ipcHandlers.keys()]).toEqual([
+      'notebook:project-resources',
+      'notebook:release-session-resources',
+      'notebook:resource-release',
+      'notebook:retry-resource-release',
       'notebook:run-index',
       'notebook:state',
+      'notebook:memory-policy-state',
       'notebook:project-activity',
       'notebook:inspect-namespace',
       'notebook:reference',
@@ -202,6 +268,12 @@ describe('notebook IPC handlers', () => {
     ])
     expect(service.runIndex).toHaveBeenCalledWith(session)
     await ipcHandlers.get('notebook:state')?.(undefined, session)
+    await expect(
+      ipcHandlers.get('notebook:memory-policy-state')?.(undefined, {
+        executionScope: 'darwin:host'
+      })
+    ).resolves.toEqual({ status: 'healthy' })
+    expect(service.getMemoryPolicyState).toHaveBeenCalledWith({ executionScope: 'darwin:host' })
     await ipcHandlers.get('notebook:project-activity')?.(undefined, project)
     await ipcHandlers.get('notebook:inspect-namespace')?.(undefined, namespace)
     await ipcHandlers.get('notebook:reference')?.(undefined, session)

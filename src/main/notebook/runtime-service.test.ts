@@ -86,6 +86,7 @@ import { projectNotebookDependencies, type AnalyzedNotebookRun } from '@aipoch/n
 import { NotebookRuntimeBindingOwner } from './runtime-binding'
 import type { NotebookEnvironmentManager } from './environment-management'
 import { HostViewImageError } from './host-view-image-service'
+import { healthyNotebookMemoryPolicy } from './memory-policy.test-support'
 
 let storageRoot: string | undefined
 const liveShellServices: NotebookRuntimeService[] = []
@@ -195,6 +196,7 @@ const lifecycleCallbackHarness = (
   const lifecycles: NotebookExecutorLifecycleCallbacks[] = []
   const changedSessions: string[] = []
   const service = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: root,
     dataRoot: root,
     projectId: 'default-project',
@@ -226,6 +228,7 @@ describe('notebook runtime service', () => {
   it('holds session creation behind a folder policy commit and releases admission after failure', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project'
@@ -263,6 +266,7 @@ describe('notebook runtime service', () => {
     const load = vi.spyOn(repository, 'loadOrCreate')
     const executorFactory = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'project-1',
@@ -358,6 +362,7 @@ describe('notebook runtime service', () => {
     }))
     let executorCreations = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -428,6 +433,7 @@ describe('notebook runtime service', () => {
     let terminateKernel!: () => Promise<void>
     const repository = new NotebookRunRepository(root)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -562,6 +568,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const scopes: unknown[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -632,6 +639,7 @@ describe('notebook runtime service', () => {
     }))
     const catalogResolve = vi.fn(async () => undefined)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -685,6 +693,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const executions: NotebookExecutionRequest[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -778,6 +787,7 @@ describe('notebook runtime service', () => {
     const shutdowns = [vi.fn(), vi.fn(), vi.fn()]
     let executorIndex = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -853,6 +863,7 @@ describe('notebook runtime service', () => {
       return load(request)
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -883,6 +894,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const shutdowns: Array<ReturnType<typeof vi.fn>> = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -946,6 +958,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const activityKernelCounts: number[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -997,6 +1010,7 @@ describe('notebook runtime service', () => {
     const shutdown = vi.fn(async () => ({ reaped: true }))
     const shellStarted = createDeferred<void>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1049,6 +1063,7 @@ describe('notebook runtime service', () => {
       executionStarted = resolve
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1092,6 +1107,7 @@ describe('notebook runtime service', () => {
     const restartGate = createDeferred<void>()
     const events: string[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1163,6 +1179,7 @@ describe('notebook runtime service', () => {
     )
     const shutdown = vi.fn(async () => ({ reaped: true }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1204,6 +1221,7 @@ describe('notebook runtime service', () => {
     let controlSignal: AbortSignal | undefined
     let shellSignal: AbortSignal | undefined
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1286,6 +1304,7 @@ describe('notebook runtime service', () => {
     const installGate = createDeferred<InstallResultForTest>()
     const installPackagesImpl = vi.fn(() => installGate.promise)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1333,6 +1352,7 @@ describe('notebook runtime service', () => {
       method: 'pip'
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1368,6 +1388,7 @@ describe('notebook runtime service', () => {
       method: 'pip'
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1690,6 +1711,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const analyzedRuns: AnalyzedNotebookRun[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1779,6 +1801,7 @@ describe('notebook runtime service', () => {
       outputs: []
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1846,6 +1869,7 @@ describe('notebook runtime service', () => {
       outputs: []
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -1902,6 +1926,7 @@ describe('notebook runtime service', () => {
       storagePath: join(root, 'environment-manifest.json')
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2084,6 +2109,7 @@ describe('notebook runtime service', () => {
   it('captures executor failures as failed run summaries instead of throwing', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2126,6 +2152,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const executionStarted = createDeferred<NotebookExecutionRequest>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2194,6 +2221,7 @@ describe('notebook runtime service', () => {
       new Error('transient terminal write failure')
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2396,6 +2424,7 @@ describe('notebook runtime service', () => {
       outputs: []
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2444,6 +2473,7 @@ describe('notebook runtime service', () => {
       outputs: [{ type: 'stream' as const, name: 'stdout' as const, text: 'done\n' }]
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2511,6 +2541,7 @@ describe('notebook runtime service', () => {
     )
     const environmentStateTracker = verifiedPackageMutationTracker()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2568,6 +2599,7 @@ describe('notebook runtime service', () => {
       outputs: []
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2601,6 +2633,7 @@ describe('notebook runtime service', () => {
       outputs: []
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2626,6 +2659,7 @@ describe('notebook runtime service', () => {
   it('retains the exact Environment manifest publication failure reason', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2674,7 +2708,9 @@ describe('notebook runtime service', () => {
 
   it('records terminal submissions in the shared run history', async () => {
     const root = await createStorageRoot()
+    const kernelIdentity = {}
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2688,10 +2724,22 @@ describe('notebook runtime service', () => {
           cwdAfter: request.cwd,
           outputs: []
         }),
+        idleProcesses: () => [
+          {
+            identity: kernelIdentity,
+            processKey: `python:${DEFAULT_PY_ENV}`,
+            release: async () => true
+          }
+        ],
         shutdown: async () => ({ reaped: true })
       })
     })
 
+    await service.execute({
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      code: '# Start the shared interpreter before terminal input.'
+    })
     const summary = await service.execute({
       projectId: 'default-project',
       sessionId: 'session-1',
@@ -2711,19 +2759,20 @@ describe('notebook runtime service', () => {
       inputKind: 'terminal',
       script: 'print(os.getcwd())'
     })
-    expect(state.runs).toHaveLength(1)
-    expect(state.runs[0]).toMatchObject({
+    expect(state.runs).toHaveLength(2)
+    expect(state.runs[1]).toMatchObject({
       source: 'user',
       inputKind: 'terminal',
       script: 'print(os.getcwd())'
     })
-    expect(state.runs[0]).not.toHaveProperty('artifacts')
+    expect(state.runs[1]).not.toHaveProperty('artifacts')
   })
 
   it('announces agent notebook availability once while publishing notebook changes', async () => {
     const root = await createStorageRoot()
     const notifications: string[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2797,6 +2846,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const availableSessions: string[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2832,10 +2882,12 @@ describe('notebook runtime service', () => {
     expect(availableSessions).toEqual(['session-1'])
   })
 
-  it('keeps a runtime session usable when executor shutdown fails', async () => {
+  it('keeps failed executor cleanup fenced until the original owner is retried', async () => {
     const root = await createStorageRoot()
     const shutdownError = new Error('kernel teardown failed')
+    const shutdown = vi.fn(async () => ({ reaped: true })).mockRejectedValueOnce(shutdownError)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2849,7 +2901,7 @@ describe('notebook runtime service', () => {
           cwdAfter: request.cwd,
           outputs: []
         }),
-        shutdown: async () => Promise.reject(shutdownError)
+        shutdown
       })
     })
 
@@ -2870,7 +2922,19 @@ describe('notebook runtime service', () => {
         code: 'after-failed-shutdown',
         language: 'python'
       })
-    ).resolves.toMatchObject({ status: 'completed', script: 'after-failed-shutdown' })
+    ).resolves.toMatchObject({ status: 'failed', script: 'after-failed-shutdown' })
+    await expect(
+      service.shutdown({ sessionId: 'session-1', workspaceCwd: root })
+    ).resolves.toMatchObject({ status: 'shutdown' })
+    expect(shutdown).toHaveBeenCalledTimes(2)
+    await expect(
+      service.execute({
+        sessionId: 'session-1',
+        workspaceCwd: root,
+        code: 'after-verified-cleanup',
+        language: 'python'
+      })
+    ).resolves.toMatchObject({ status: 'completed' })
   })
 
   it.each(['lane', 'session', 'project'] as const)(
@@ -2883,6 +2947,7 @@ describe('notebook runtime service', () => {
         .fn(async () => ({ reaped: true }))
         .mockRejectedValueOnce(cleanupError)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -2936,6 +3001,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const executions: NotebookExecutionRequest[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -2979,6 +3045,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const executions: NotebookExecutionRequest[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3058,6 +3125,7 @@ describe('notebook runtime service', () => {
       announceFirst = resolve
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3140,6 +3208,7 @@ describe('notebook runtime service', () => {
     )
     const repository = new NotebookRunRepository(root)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3184,6 +3253,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const execute = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3213,6 +3283,7 @@ describe('notebook runtime service', () => {
       announceDispatch = resolve
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3264,6 +3335,7 @@ describe('notebook runtime service', () => {
     async (staged) => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -3327,6 +3399,7 @@ describe('notebook runtime service', () => {
       const outputs = [{ type: 'stream' as const, name: 'stdout' as const, text: 'computed 42\n' }]
       const stderr = 'existing diagnostic'.padEnd(stderrLength, '!')
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -3411,6 +3484,7 @@ describe('notebook runtime service', () => {
       })
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3466,6 +3540,7 @@ describe('notebook runtime service', () => {
       })
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3494,6 +3569,7 @@ describe('notebook runtime service', () => {
     vi.spyOn(repository, 'appendOrGetRun').mockRejectedValue(new Error('REPL admission failed'))
     const execute = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3519,6 +3595,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const calls: string[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3632,6 +3709,7 @@ describe('notebook runtime service', () => {
     const executedCodes: string[] = []
     const calls: string[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3714,6 +3792,7 @@ describe('notebook runtime service', () => {
       binding
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3764,22 +3843,34 @@ describe('notebook runtime service', () => {
       'session-token',
       'session-token'
     ])
-    expect(beginControlInvocation).toHaveBeenNthCalledWith(1, {
-      turnId: 'notebook-run-42-1',
-      controlInvocationGeneration: 1,
-      toolInvocationId: 'notebook-run-42-1',
-      executionMode: 'foreground',
-      attachmentIds: [],
-      artifactIds: []
-    })
-    expect(beginControlInvocation).toHaveBeenNthCalledWith(2, {
-      turnId: 'notebook-run-42-2',
-      controlInvocationGeneration: 2,
-      toolInvocationId: 'notebook-run-42-2',
-      executionMode: 'foreground',
-      attachmentIds: [],
-      artifactIds: []
-    })
+    expect(beginControlInvocation).toHaveBeenNthCalledWith(
+      1,
+      {
+        rootExecutionId: undefined,
+        turnId: 'notebook-run-42-1',
+        controlInvocationGeneration: 1,
+        toolInvocationId: 'notebook-run-42-1',
+        executionMode: 'foreground',
+        attachmentIds: [],
+        artifactIds: []
+      },
+      undefined,
+      undefined
+    )
+    expect(beginControlInvocation).toHaveBeenNthCalledWith(
+      2,
+      {
+        rootExecutionId: undefined,
+        turnId: 'notebook-run-42-2',
+        controlInvocationGeneration: 2,
+        toolInvocationId: 'notebook-run-42-2',
+        executionMode: 'foreground',
+        attachmentIds: [],
+        artifactIds: []
+      },
+      undefined,
+      undefined
+    )
     expect(releaseInvocation).toHaveBeenCalledTimes(2)
     expect(completeControlInvocation).toHaveBeenCalledTimes(2)
     expect(discardControlInvocation).not.toHaveBeenCalled()
@@ -3803,6 +3894,7 @@ describe('notebook runtime service', () => {
     const completeControlInvocation = vi.fn(async () => [])
     const completionInterceptor = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3849,16 +3941,21 @@ describe('notebook runtime service', () => {
     })
     await dispatched.promise
 
-    expect(beginControlInvocation).toHaveBeenCalledWith({
-      turnId: receipt.runId,
-      controlInvocationGeneration: expect.any(Number),
-      toolInvocationId: receipt.runId,
-      executionMode: 'background',
-      originatingTurnId: 'prompt-child',
-      originatingUserMessageId: 'prompt-child',
-      attachmentIds: [],
-      artifactIds: []
-    })
+    expect(beginControlInvocation).toHaveBeenCalledWith(
+      {
+        rootExecutionId: undefined,
+        turnId: receipt.runId,
+        controlInvocationGeneration: expect.any(Number),
+        toolInvocationId: receipt.runId,
+        executionMode: 'background',
+        originatingTurnId: 'prompt-child',
+        originatingUserMessageId: 'prompt-child',
+        attachmentIds: [],
+        artifactIds: []
+      },
+      undefined,
+      undefined
+    )
     expect(releaseInvocation).not.toHaveBeenCalled()
     expect(completionInterceptor).not.toHaveBeenCalled()
 
@@ -3883,6 +3980,7 @@ describe('notebook runtime service', () => {
     ])
     const discardControlInvocation = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3902,7 +4000,7 @@ describe('notebook runtime service', () => {
     service.setMcpRpcConnectionResolver(async () => ({
       endpoint: 'http://127.0.0.1:1/x',
       token: 'session-token',
-      beginControlInvocation: () => vi.fn(),
+      beginControlInvocation: () => vi.fn<() => void>(),
       completeControlInvocation,
       discardControlInvocation
     }))
@@ -3930,6 +4028,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const beginControlInvocation = vi.fn(() => vi.fn())
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -3971,7 +4070,9 @@ describe('notebook runtime service', () => {
       expect.objectContaining({
         originatingTurnId: 'synthetic-message-prompt',
         originatingUserMessageId: 'durable-root-message'
-      })
+      }),
+      undefined,
+      undefined
     )
   })
 
@@ -3992,6 +4093,7 @@ describe('notebook runtime service', () => {
       })
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4081,6 +4183,7 @@ describe('notebook runtime service', () => {
       })
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4129,6 +4232,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const execute = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4157,6 +4261,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const executions: NotebookExecutionRequest[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'my-project',
@@ -4195,6 +4300,7 @@ describe('notebook runtime service', () => {
   it('records a failed repl run when the executor throws', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4247,6 +4353,7 @@ describe('notebook runtime service', () => {
       reasonCodes: ['file-reads-not-observed' as const]
     }
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -4317,6 +4424,7 @@ describe('notebook runtime service', () => {
 
     const createShellService = (root: string): NotebookRuntimeService => {
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4358,6 +4466,7 @@ describe('notebook runtime service', () => {
 
     it('returns a durable background Shell receipt before execution completes and exposes its result', async () => {
       const root = await createStorageRoot()
+      const samplingBefore = resourceActivity.state.sampling
       const executionStarted = createDeferred<void>()
       const releaseExecution = createDeferred<void>()
       const execute = vi.fn<NotebookShellProcess['execute']>(async () => {
@@ -4366,6 +4475,7 @@ describe('notebook runtime service', () => {
         return { stdout: 'finished\n', stderr: '', exitCode: 0 }
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4400,7 +4510,9 @@ describe('notebook runtime service', () => {
 
       releaseExecution.resolve()
       await service.waitForBackgroundRun(receipt.runId)
-      expect(resourceActivity.state.sampling).toBe(false)
+      // Other live Notebook trees may still own diagnostic observation. This run releases its
+      // activity without claiming that the whole application has become idle.
+      expect(resourceActivity.state.sampling).toBe(samplingBefore)
       await expect(
         service.getBackgroundRun({ ...request, submissionIdentity: request.executionInvocationId })
       ).resolves.toMatchObject({
@@ -4427,6 +4539,7 @@ describe('notebook runtime service', () => {
           return { stdout: command, stderr: '', exitCode: 0 }
         })
         const service = new NotebookRuntimeService({
+          memoryPolicy: healthyNotebookMemoryPolicy(),
           configRoot: root,
           dataRoot: root,
           projectId: 'default-project',
@@ -4516,6 +4629,7 @@ describe('notebook runtime service', () => {
             })
         )
         const service = new NotebookRuntimeService({
+          memoryPolicy: healthyNotebookMemoryPolicy(),
           configRoot: root,
           dataRoot: root,
           projectId: 'default-project',
@@ -4565,6 +4679,7 @@ describe('notebook runtime service', () => {
       const repository = new NotebookRunRepository(root)
       const started = createDeferred<void>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4610,6 +4725,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       const repository = new NotebookRunRepository(root)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4644,6 +4760,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       const execute = vi.fn<NotebookShellProcess['execute']>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4677,6 +4794,7 @@ describe('notebook runtime service', () => {
       })
       const repository = new NotebookRunRepository(root)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4704,6 +4822,7 @@ describe('notebook runtime service', () => {
         runId: expect.any(String),
         cwd: join(root, 'notebooks', 'default-project', 'session-1', 'data'),
         executionReference: expect.any(String),
+        executionAdmission: { prepare: expect.any(Function), assertCurrent: expect.any(Function) },
         handoffDir: join(root, 'notebooks', 'default-project', 'session-1', 'handoff'),
         notebookSessionRoot: join(root, 'notebooks', 'default-project', 'session-1'),
         inputRoot: getNotebookInputRoot(root, 'default-project', 'session-1'),
@@ -4769,6 +4888,7 @@ describe('notebook runtime service', () => {
         .fn<NotebookShellProcess['execute']>()
         .mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4811,6 +4931,7 @@ describe('notebook runtime service', () => {
       }
       const execute = vi.fn<NotebookShellProcess['execute']>().mockResolvedValue(unavailable)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4836,6 +4957,7 @@ describe('notebook runtime service', () => {
         const execute = vi.fn<NotebookShellProcess['execute']>().mockResolvedValue(result)
         const prepareEnvironment = vi.fn().mockResolvedValue({ PATH: 'verified-runtime' })
         const service = new NotebookRuntimeService({
+          memoryPolicy: healthyNotebookMemoryPolicy(),
           configRoot: root,
           dataRoot: root,
           projectId: 'default-project',
@@ -4889,6 +5011,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       const execute = vi.fn<NotebookShellProcess['execute']>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4915,6 +5038,7 @@ describe('notebook runtime service', () => {
     it('records a selected but unavailable WSL runtime as failed without falling back', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4955,6 +5079,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       const execute = vi.fn<NotebookShellProcess['execute']>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -4997,6 +5122,7 @@ describe('notebook runtime service', () => {
       )
       const repository = new NotebookRunRepository(root)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5079,6 +5205,7 @@ describe('notebook runtime service', () => {
           })
       )
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5153,6 +5280,7 @@ describe('notebook runtime service', () => {
           })
       )
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5246,6 +5374,7 @@ describe('notebook runtime service', () => {
           })
       )
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5325,6 +5454,7 @@ describe('notebook runtime service', () => {
       )
       const shutdownExecutor = vi.fn(async () => ({ reaped: true }))
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5387,6 +5517,7 @@ describe('notebook runtime service', () => {
           })
       )
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5424,6 +5555,7 @@ describe('notebook runtime service', () => {
       let executionSignal: AbortSignal | undefined
       const executionStarted = createDeferred<void>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5473,6 +5605,7 @@ describe('notebook runtime service', () => {
         exitCode: 7
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5512,6 +5645,7 @@ describe('notebook runtime service', () => {
       const repository = new NotebookRunRepository(root)
       const execute = vi.fn<NotebookShellProcess['execute']>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5552,6 +5686,7 @@ describe('notebook runtime service', () => {
       })
       const disposePrepared = vi.fn()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5617,6 +5752,7 @@ describe('notebook runtime service', () => {
         throw new Error('prepared resource cleanup failed')
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5657,6 +5793,7 @@ describe('notebook runtime service', () => {
         .mockRejectedValueOnce(new Error('Shell runtime preparation failed'))
         .mockResolvedValue({ execute: preparedExecute, dispose: vi.fn() })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5702,6 +5839,7 @@ describe('notebook runtime service', () => {
           return { stdout: '', stderr: '', exitCode: 0 }
         })
         const service = new NotebookRuntimeService({
+          memoryPolicy: healthyNotebookMemoryPolicy(),
           configRoot: root,
           dataRoot: root,
           projectId: 'default-project',
@@ -5765,6 +5903,7 @@ describe('notebook runtime service', () => {
         }
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5790,6 +5929,7 @@ describe('notebook runtime service', () => {
       const repository = new NotebookRunRepository(root)
       const execute = vi.fn<NotebookShellProcess['execute']>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5798,11 +5938,13 @@ describe('notebook runtime service', () => {
       })
       const scope = { sessionId: 'session-1', workspaceCwd: root }
       await service.state(scope)
+      const lookupEntered = createDeferred<void>()
       let releaseLookup!: () => void
       const lookupGate = new Promise<void>((resolve) => {
         releaseLookup = resolve
       })
       vi.spyOn(repository, 'findRunBySubmission').mockImplementationOnce(async () => {
+        lookupEntered.resolve()
         await lookupGate
         return undefined
       })
@@ -5811,7 +5953,7 @@ describe('notebook runtime service', () => {
         command: 'must-stay-fenced',
         executionInvocationId: 'fenced-submission-1'
       })
-      await Promise.resolve()
+      await lookupEntered.promise
       const shutdown = service.shutdownSession(scope.sessionId)
       releaseLookup()
 
@@ -5823,6 +5965,7 @@ describe('notebook runtime service', () => {
     it('preserves Shell launch cleanup recovery when cancellation was not requested', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5856,6 +5999,7 @@ describe('notebook runtime service', () => {
       const started = createDeferred<void>()
       const cancellation = new AbortController()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -5909,6 +6053,7 @@ describe('notebook runtime service', () => {
         finishCancellation = resolve
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -6037,6 +6182,7 @@ describe('notebook runtime service', () => {
       // This portable unit test owns runtime-write policy, not OS parsing or process launch.
       const execute = vi.fn<NotebookShellProcess['execute']>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -6089,6 +6235,7 @@ describe('notebook runtime service', () => {
         process.env.OPEN_SCIENCE_TEST_SECRET = 'super-secret-token'
         try {
           const service = new NotebookRuntimeService({
+            memoryPolicy: healthyNotebookMemoryPolicy(),
             configRoot: root,
             dataRoot: root,
             projectId: 'default-project',
@@ -6317,6 +6464,7 @@ describe('notebook runtime service', () => {
   it('returns null when a session has no persisted notebook run history', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6341,6 +6489,7 @@ describe('notebook runtime service', () => {
         const root = await createStorageRoot()
         const makeService = (): NotebookRuntimeService =>
           new NotebookRuntimeService({
+            memoryPolicy: healthyNotebookMemoryPolicy(),
             configRoot: root,
             dataRoot: root,
             projectId: 'project-p',
@@ -6413,6 +6562,7 @@ describe('notebook runtime service', () => {
 
     // Execute against one service instance, then throw it away to simulate an app restart.
     const firstService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6439,6 +6589,7 @@ describe('notebook runtime service', () => {
 
     // A fresh service has no in-memory session, mirroring the state after relaunch.
     const restartedService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6478,6 +6629,7 @@ describe('notebook runtime service', () => {
     })
 
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6493,6 +6645,7 @@ describe('notebook runtime service', () => {
   it('shares one startup recovery attempt across concurrent callers', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6530,6 +6683,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const runtimeRoot = getRuntimeRoot(root)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6555,6 +6709,7 @@ describe('notebook runtime service', () => {
     await writeFile(join(cache, 'r-4.4.tar.zst'), Buffer.from('whole-but-orphaned'))
 
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6579,6 +6734,7 @@ describe('notebook runtime service', () => {
     await writeFile(operationJournalPath(runtimeRoot), 'not-json{{{')
 
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6621,6 +6777,7 @@ describe('notebook runtime service', () => {
 
     // Startup recovery reconciles the stale run before any renderer or caller opens the Session.
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6692,6 +6849,7 @@ describe('notebook runtime service', () => {
     const executorFactory = vi.fn()
     const createService = (): NotebookRuntimeService =>
       new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -6761,6 +6919,7 @@ describe('notebook runtime service', () => {
     })
     const execute = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6792,6 +6951,7 @@ describe('notebook runtime service', () => {
     const executionStarted = createDeferred<void>()
     const releaseExecution = createDeferred<void>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6852,6 +7012,7 @@ describe('notebook runtime service', () => {
   it('keeps root-Frame provenance when renderer state creates the Session owner first', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -6948,6 +7109,7 @@ describe('notebook runtime service', () => {
       )
       const repository = new NotebookRunRepository(root)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -7069,6 +7231,7 @@ describe('notebook runtime service', () => {
     const executedCodes: string[] = []
     const repository = new NotebookRunRepository(root)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7109,8 +7272,7 @@ describe('notebook runtime service', () => {
         sessionId: 'session-1',
         workspaceCwd: '/workspace',
         code,
-        source: 'user',
-        inputKind: 'terminal'
+        source: 'user'
       })
 
     const first = submit("print('a')")
@@ -7187,6 +7349,7 @@ describe('notebook runtime service', () => {
     const executionStarted = createDeferred<void>()
     const releaseExecution = createDeferred<void>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7259,6 +7422,7 @@ describe('notebook runtime service', () => {
     const releaseExecution = createDeferred<void>()
     const onBackgroundRunAdmitted = vi.fn(async () => undefined)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7339,6 +7503,7 @@ describe('notebook runtime service', () => {
     const executionStarted = createDeferred<void>()
     const releaseExecution = createDeferred<void>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7424,6 +7589,7 @@ describe('notebook runtime service', () => {
       }))
       const repository = new NotebookRunRepository(root)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -7488,6 +7654,7 @@ describe('notebook runtime service', () => {
     const dispatched = createDeferred<void>()
     let executions = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7551,6 +7718,7 @@ describe('notebook runtime service', () => {
     const releaseFirst = createDeferred<void>()
     const entered: string[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7635,6 +7803,7 @@ describe('notebook runtime service', () => {
         return appendOrGetRun(request)
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -7684,6 +7853,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const onBackgroundRunObserved = vi.fn(async () => 'suppressed' as const)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7748,6 +7918,7 @@ describe('notebook runtime service', () => {
     const release = createDeferred<void>()
     const onBackgroundRunObserved = vi.fn(async () => 'suppressed' as const)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7798,6 +7969,7 @@ describe('notebook runtime service', () => {
       throw new Error('acknowledgement failed')
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7846,6 +8018,7 @@ describe('notebook runtime service', () => {
     const repository = new NotebookRunRepository(root)
     const readSessionRuns = vi.spyOn(repository, 'readSessionRuns')
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -7928,6 +8101,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const repository = new NotebookRunRepository(root)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8015,6 +8189,7 @@ describe('notebook runtime service', () => {
       exitCode: 0
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8084,6 +8259,7 @@ describe('notebook runtime service', () => {
     )
     const shellExecute = vi.fn<NotebookShellProcess['execute']>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8147,6 +8323,7 @@ describe('notebook runtime service', () => {
     )
     const shellExecute = vi.fn<NotebookShellProcess['execute']>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8205,6 +8382,7 @@ describe('notebook runtime service', () => {
       exitCode: 0
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8255,6 +8433,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     let executions = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8300,6 +8479,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     let executions = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8345,6 +8525,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     let executions = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8396,6 +8577,7 @@ describe('notebook runtime service', () => {
   it('rejects a submission identity reused for different Python code', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8429,6 +8611,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const repository = new NotebookRunRepository(root)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8471,6 +8654,7 @@ describe('notebook runtime service', () => {
     }
     let executions = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8502,6 +8686,7 @@ describe('notebook runtime service', () => {
     let maxConcurrent = 0
     const releases = new Map<string, () => void>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8539,8 +8724,7 @@ describe('notebook runtime service', () => {
         sessionId,
         workspaceCwd: '/workspace',
         code: 'print(1)',
-        source: 'user',
-        inputKind: 'terminal'
+        source: 'user'
       })
 
     const runA = submit('session-a')
@@ -8560,6 +8744,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const executions: NotebookExecutionRequest[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8597,6 +8782,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const executions: NotebookExecutionRequest[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8644,6 +8830,7 @@ describe('notebook runtime service', () => {
       })
       const restart = vi.fn(async () => undefined)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -8683,6 +8870,7 @@ describe('notebook runtime service', () => {
     let restarts = 0
     let shutdowns = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8719,6 +8907,7 @@ describe('notebook runtime service', () => {
     let restarts = 0
     const terminated: Array<['python' | 'r' | 'repl', string]> = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8778,6 +8967,7 @@ describe('notebook runtime service', () => {
       values.delete(kind)
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8836,6 +9026,7 @@ describe('notebook runtime service', () => {
       terminate: async () => undefined
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8846,6 +9037,7 @@ describe('notebook runtime service', () => {
     await expect(service.restart(request)).rejects.toThrow('restart failed')
 
     const reloadedService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8860,6 +9052,7 @@ describe('notebook runtime service', () => {
     expect(restarted.kernelStatus).toBe('idle')
 
     const verifiedService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8874,6 +9067,7 @@ describe('notebook runtime service', () => {
     const request = { sessionId: 'session-1', workspaceCwd: root }
     let lifecycle!: NotebookExecutorLifecycleCallbacks
     const firstService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8901,6 +9095,7 @@ describe('notebook runtime service', () => {
       new Error('could not clear durable termination')
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8929,6 +9124,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const request = { sessionId: 'session-1', workspaceCwd: root }
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8956,6 +9152,7 @@ describe('notebook runtime service', () => {
     expect((await service.state(request)).kernelStatus).toBe('error')
 
     const reloadedService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -8981,6 +9178,7 @@ describe('notebook runtime service', () => {
     const repository = new NotebookRunRepository(root)
     const secondExecutionStarted = createDeferred<void>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9040,6 +9238,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const request = { sessionId: 'session-1', workspaceCwd: root }
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9072,6 +9271,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     let releaseRestart: (() => void) | undefined
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9112,6 +9312,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     const repository = new NotebookRunRepository(root)
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9147,6 +9348,7 @@ describe('notebook runtime service', () => {
     const repository = new NotebookRunRepository(root)
     let lifecycle!: NotebookExecutorLifecycleCallbacks
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9188,6 +9390,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     let releaseRestart: (() => void) | undefined
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9247,6 +9450,7 @@ describe('notebook runtime service', () => {
     const finalizeEpochs = vi.fn(async () => undefined)
     let lifecycle!: NotebookExecutorLifecycleCallbacks
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9324,6 +9528,7 @@ describe('notebook runtime service', () => {
         : []
     )
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9368,6 +9573,7 @@ describe('notebook runtime service', () => {
     const release = vi.fn(() => stopped.promise.then(() => true))
     const dispatch = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9705,6 +9911,7 @@ describe('notebook runtime service', () => {
     const root = await createStorageRoot()
     let lifecycle!: NotebookExecutorLifecycleCallbacks
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9803,6 +10010,7 @@ describe('notebook runtime service', () => {
     }
 
     const firstService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9813,6 +10021,7 @@ describe('notebook runtime service', () => {
     await lifecycle.onIdleShutdown('python', DEFAULT_PY_ENV)
 
     const recoveredService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9822,6 +10031,7 @@ describe('notebook runtime service', () => {
     await recoveredService.execute({ sessionId: 'session-1', workspaceCwd: root, code: '2' })
 
     const reloadedService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9841,6 +10051,7 @@ describe('notebook runtime service', () => {
     const repository = new NotebookRunRepository(root)
     const statusWrite = vi.spyOn(repository, 'updateKernelStatus')
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9897,6 +10108,7 @@ describe('notebook runtime service', () => {
     }
 
     const firstService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9913,6 +10125,7 @@ describe('notebook runtime service', () => {
     await lifecycle.onIdleShutdown('python', DEFAULT_PY_ENV)
 
     const recoveredService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9931,6 +10144,7 @@ describe('notebook runtime service', () => {
       terminatedKernelInstances: [{ kind: 'python', environment: DEFAULT_PY_ENV }]
     })
     const reloadedService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9964,6 +10178,7 @@ describe('notebook runtime service', () => {
     }
 
     const firstService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9974,6 +10189,7 @@ describe('notebook runtime service', () => {
     await lifecycle.onIdleShutdown('repl', undefined)
 
     const recoveredService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -9987,6 +10203,7 @@ describe('notebook runtime service', () => {
     })
 
     const reloadedService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -10015,6 +10232,7 @@ describe('notebook runtime service', () => {
       shutdown: async () => ({ reaped: true })
     })
     const firstService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -10036,6 +10254,7 @@ describe('notebook runtime service', () => {
     })
 
     const recoveredService = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -10069,6 +10288,7 @@ describe('notebook runtime service', () => {
       repository = new NotebookRunRepository(root)
     ): NotebookRuntimeService =>
       new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10270,6 +10490,7 @@ describe('notebook runtime service', () => {
       const runStarted = Promise.withResolvers<void>()
       let releaseRun: (() => void) | undefined
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10333,6 +10554,7 @@ describe('notebook runtime service', () => {
       const events: string[] = []
       let releaseInstall: (() => void) | undefined
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10406,6 +10628,7 @@ describe('notebook runtime service', () => {
       const releaseFirst = createDeferred<void>()
       const executions: string[] = []
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10488,6 +10711,7 @@ describe('notebook runtime service', () => {
         condaEnv: DEFAULT_PY_ENV
       }
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10569,6 +10793,7 @@ describe('notebook runtime service', () => {
       const events: string[] = []
       let releaseInstall: (() => void) | undefined
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10618,6 +10843,7 @@ describe('notebook runtime service', () => {
     it('serializes environment mutations that target the same environment', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10649,6 +10875,7 @@ describe('notebook runtime service', () => {
     it('releases environment mutation admission after a failed operation', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10669,6 +10896,7 @@ describe('notebook runtime service', () => {
     it('allows environment mutations for different environments to proceed concurrently', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10700,6 +10928,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       let lifecycle!: NotebookExecutorLifecycleCallbacks
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10732,6 +10961,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       let lifecycle!: NotebookExecutorLifecycleCallbacks
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10771,6 +11001,7 @@ describe('notebook runtime service', () => {
       let mode: 'crash' | 'ok' = 'crash'
       let lifecycle!: NotebookExecutorLifecycleCallbacks
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10831,6 +11062,7 @@ describe('notebook runtime service', () => {
     let shutdowns = 0
     let factoryCalls = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -10870,6 +11102,7 @@ describe('notebook runtime service', () => {
     const changedCwd = await mkdtemp(join(tmpdir(), 'open-science-notebook-chdir-'))
     const error = vi.fn()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -10926,6 +11159,7 @@ describe('notebook runtime service', () => {
       const installPackagesImpl = vi.fn()
       const provisionPython = vi.fn(async () => undefined)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -10981,6 +11215,7 @@ describe('notebook runtime service', () => {
       const inspectPackages = vi.fn()
       const provisionPython = vi.fn(async () => undefined)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11025,6 +11260,7 @@ describe('notebook runtime service', () => {
         packages: []
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11092,6 +11328,7 @@ describe('notebook runtime service', () => {
     it('returns verified requested package changes alongside related inventory changes', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11173,6 +11410,7 @@ describe('notebook runtime service', () => {
       })
       const terminate = vi.fn(async () => undefined)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11233,6 +11471,7 @@ describe('notebook runtime service', () => {
         .spyOn(RuntimeOperationJournal.prototype, 'update')
         .mockRejectedValueOnce(new Error('journal update denied'))
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11289,6 +11528,7 @@ describe('notebook runtime service', () => {
       })
       const terminate = vi.fn(async () => undefined)
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11354,6 +11594,7 @@ describe('notebook runtime service', () => {
         .fn()
         .mockResolvedValue({ ok: true, needsRestart: false, log: 'ordinary install' })
       const restarted = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11387,6 +11628,7 @@ describe('notebook runtime service', () => {
         throw new Error('a repair-blocked shared prefix must not execute')
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11467,6 +11709,7 @@ describe('notebook runtime service', () => {
       })
       const dirtyFailure = new Error('environment binding is unwritable')
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11503,6 +11746,7 @@ describe('notebook runtime service', () => {
     it('reports failure when the refreshed inventory cannot verify an installed package', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11547,6 +11791,7 @@ describe('notebook runtime service', () => {
       const info = vi.fn()
       const warn = vi.fn()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11591,6 +11836,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       const info = vi.fn()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11643,6 +11889,7 @@ describe('notebook runtime service', () => {
       const processSandbox = { wrap: vi.fn() }
       const scriptedResult: InstallResultForTest = { ok: true, needsRestart: false, log: 'done' }
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11706,6 +11953,7 @@ describe('notebook runtime service', () => {
         throw new Error('probe unreachable (test)')
       })
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11730,6 +11978,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       const calls: Array<Partial<InstallDepsForTest> | undefined> = []
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11769,6 +12018,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       let called = false
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11855,6 +12105,7 @@ describe('notebook runtime service', () => {
     it('creates and shuts down a session through the default executor', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11876,6 +12127,7 @@ describe('notebook runtime service', () => {
       executions: NotebookExecutionRequest[]
     ): NotebookRuntimeService =>
       new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -11988,6 +12240,7 @@ describe('notebook runtime service', () => {
       let releaseInstall: (() => void) | undefined
       const installStarted = Promise.withResolvers<void>()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12059,6 +12312,7 @@ describe('notebook runtime service', () => {
         outputs: []
       }))
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12110,6 +12364,7 @@ describe('notebook runtime service', () => {
       // an installer session bound to a named env vs a runner session on the app-managed default.
       const namedPy = pythonBin(envPrefix(getRuntimeRoot(root), 'my-analysis'))
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12192,6 +12447,7 @@ describe('notebook runtime service', () => {
       const created: Array<{ name: string; language: string; packages?: string[] }> = []
       const removed: string[] = []
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12259,6 +12515,7 @@ describe('notebook runtime service', () => {
       let recoveryDone = false
       const order: string[] = []
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12311,6 +12568,7 @@ describe('notebook runtime service', () => {
       let recoveryDone = false
       const order: string[] = []
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12345,6 +12603,7 @@ describe('notebook runtime service', () => {
       const root = await createStorageRoot()
       const removed: string[] = []
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12439,6 +12698,7 @@ describe('notebook runtime service', () => {
       const created: string[] = []
       const removed: string[] = []
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12506,6 +12766,7 @@ describe('notebook runtime service', () => {
       async (ok) => {
         const root = await createStorageRoot()
         const service = new NotebookRuntimeService({
+          memoryPolicy: healthyNotebookMemoryPolicy(),
           configRoot: root,
           dataRoot: root,
           projectId: 'default-project',
@@ -12557,6 +12818,7 @@ describe('notebook runtime service', () => {
     it('does not flag restartRecommended for a Python install', async () => {
       const root = await createStorageRoot()
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -12717,6 +12979,7 @@ describe('v4 runtime bindings & agent tools', () => {
   ): NotebookRuntimeService => {
     const enablement = options.enablement ?? { enabled: {}, installAuthorized: {} }
     return new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -13216,6 +13479,7 @@ describe('v4 runtime bindings & agent tools', () => {
         })
       )
       const service = new NotebookRuntimeService({
+        memoryPolicy: healthyNotebookMemoryPolicy(),
         configRoot: root,
         dataRoot: root,
         projectId: 'default-project',
@@ -14350,6 +14614,7 @@ describe('v4 runtime bindings & agent tools', () => {
       return persistRuntimeBindings(...args)
     })
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -14812,6 +15077,7 @@ describe('v4 runtime bindings & agent tools', () => {
     const analysis = namedRuntime('analysis')
     const replacement = namedRuntime('replacement')
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -15475,6 +15741,7 @@ describe('v4 runtime bindings & agent tools', () => {
 
     const removed: string[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16107,6 +16374,7 @@ describe('v4 runtime bindings & agent tools', () => {
     const executions: NotebookExecutionRequest[] = []
     let present = true
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16594,6 +16862,7 @@ describe('v4 runtime bindings & agent tools', () => {
       shutdown: async () => ({ reaped: true })
     }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16617,6 +16886,7 @@ describe('v4 runtime bindings & agent tools', () => {
     const executions: string[] = []
     let shutdowns = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16665,6 +16935,7 @@ describe('v4 runtime bindings & agent tools', () => {
     })
     const shutdown = vi.fn(async () => ({ reaped: true }))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16708,6 +16979,7 @@ describe('v4 runtime bindings & agent tools', () => {
   it('closes environment leases before terminal disposal can release queued operations', async () => {
     const root = await createStorageRoot()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16750,6 +17022,7 @@ describe('v4 runtime bindings & agent tools', () => {
     const shutdownError = new Error('kernel teardown failed')
     const shutdown = vi.fn(async () => Promise.reject(shutdownError))
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16799,6 +17072,7 @@ describe('v4 runtime bindings & agent tools', () => {
     const shutdownError = new Error('kernel teardown failed')
     const recoveryError = new Error('recovery disposal failed')
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16916,6 +17190,7 @@ describe('v4 runtime bindings & agent tools', () => {
     const executionStarted = createDeferred<void>()
     const releaseExecution = createDeferred<void>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -16972,6 +17247,7 @@ describe('v4 runtime bindings & agent tools', () => {
     let executionCount = 0
     const executionStarted = createDeferred<void>()
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -17054,6 +17330,7 @@ describe('v4 runtime bindings & agent tools', () => {
     const executionStarted = createDeferred<void>()
     let resolveRun: ((result: NotebookExecutionResult) => void) | undefined
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -17699,6 +17976,7 @@ describe('v4 runtime bindings & agent tools', () => {
     const root = await createStorageRoot()
     const removed: string[] = []
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -17778,6 +18056,7 @@ describe('v4 runtime bindings & agent tools', () => {
         // NO discoverRuntimes injected: the REAL default discovery runs and must consult the manual
         // resolver — the wiring under test. Enablement is wired so the user-own env can be enabled.
         const service = new NotebookRuntimeService({
+          memoryPolicy: healthyNotebookMemoryPolicy(),
           configRoot: root,
           dataRoot: root,
           projectId: 'default-project',
@@ -17876,6 +18155,7 @@ it('retries Notebook lifecycle recovery after a transient repository failure', a
     .mockRejectedValueOnce(new Error('transient EIO'))
     .mockResolvedValue([])
   const service = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     dataRoot: root,
     repository,
     projectId: 'recovery-project',
@@ -17913,6 +18193,7 @@ it('does not let an unverified R receipt in one lane block a new REPL lane', asy
     })}\n`
   )
   const service = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: root,
     dataRoot: root,
     projectId: 'project-a',
@@ -17971,6 +18252,7 @@ it('keeps a failed recovery round joined until its other owners finish', async (
     await originalComplete(id)
   })
   const service = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: root,
     dataRoot: root,
     repository,
@@ -18012,6 +18294,7 @@ it.each(['python', 'r'] as const)(
     const entered = createDeferred<void>()
     let calls = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -18095,6 +18378,7 @@ it.each(['python', 'r'] as const)(
     const entered = createDeferred<void>()
     let calls = 0
     const service = new NotebookRuntimeService({
+      memoryPolicy: healthyNotebookMemoryPolicy(),
       configRoot: root,
       dataRoot: root,
       projectId: 'default-project',
@@ -18166,6 +18450,7 @@ it('AUDIT: removal cannot overtake a managed binding whose durable commit is in 
   const runtimeId = pythonBin(envPrefix(getRuntimeRoot(root), 'analysis'))
   const removeEnvironment = vi.fn()
   const service = new NotebookRuntimeService({
+    memoryPolicy: healthyNotebookMemoryPolicy(),
     configRoot: root,
     dataRoot: root,
     projectId: 'default-project',

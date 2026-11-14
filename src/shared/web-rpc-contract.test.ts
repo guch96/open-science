@@ -175,11 +175,16 @@ describe('Web RPC contract', () => {
       'notebook.exportIpynbAll',
       'notebook.finishCodeCell',
       'notebook.getBackgroundRun',
+      'notebook.getMemoryPolicyState',
       'notebook.getProjectActivity',
+      'notebook.getProjectResources',
       'notebook.getReference',
+      'notebook.getResourceRelease',
       'notebook.inspectNamespace',
       'notebook.readInputPreview',
+      'notebook.releaseSessionResources',
       'notebook.restart',
+      'notebook.retryResourceRelease',
       'notebook.runCell',
       'notebook.runIndex',
       'notebook.shutdown',
@@ -208,7 +213,9 @@ describe('Web RPC contract', () => {
     ])
     expect(eventPaths.filter((path) => path.startsWith('notebook.'))).toEqual([
       'notebook.onAvailable',
-      'notebook.onChanged'
+      'notebook.onChanged',
+      'notebook.onMemoryPolicyChanged',
+      'notebook.onMemoryRejected'
     ])
     // This generated mapping remains dormant for Web: production publishes environment progress
     // directly to Electron BrowserWindows and never adds it to ApplicationEventMap.

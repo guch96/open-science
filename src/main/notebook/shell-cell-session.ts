@@ -1,4 +1,6 @@
 import { compilePowerShellCommand } from './powershell-native-capture'
+import { createNotebookMemorySampler, type NotebookOwnedMemorySample } from './resource-memory'
+import { NotebookExecutionAdmissionError } from './execution-admission'
 import { NOTEBOOK_NETWORK_APPROVAL_RETRY_MESSAGE } from './process-sandbox'
 import { ExecutionDeadline } from './execution-deadline'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -50,13 +52,26 @@ const cancelledResult = (): NotebookShellResult => ({
 // One real interpreter per Notebook lane. Transport state lives only in memory; requests are
 // serialized and never replayed. The existing process adapter still owns native tree cleanup.
 export class ShellCellSession {
+  readonly startedAt = Date.now()
   lastUsedAt = Date.now()
+
+  get resourcePhase(): 'starting' | 'running' | 'idle' | 'cleanup-pending' {
+    if (
+      this.closed ||
+      this.processResult?.ownedTreeReaped === false ||
+      this.processResult?.errorCode === 'shell-cleanup-incomplete'
+    )
+      return 'cleanup-pending'
+    if (!this.child) return 'starting'
+    return this.cell ? 'running' : 'idle'
+  }
 
   get isLive(): boolean {
     return Boolean(this.child && !this.closed && !this.processResult)
   }
   private tail: Promise<unknown> = Promise.resolve()
   private child?: ChildProcessWithoutNullStreams
+  sampleMemory?: (signal: AbortSignal) => Promise<NotebookOwnedMemorySample>
   private controlServer?: Server
   private controlSocket?: Socket
   private completion?: Promise<NotebookShellResult>
@@ -235,6 +250,21 @@ export class ShellCellSession {
   private async run(request: NotebookShellProcessRequest): Promise<NotebookShellResult> {
     if (!(await this.verifyCleanup())) return this.processResult!
     if (this.closed || request.signal?.aborted) return cancelledResult()
+    try {
+      await request.executionAdmission?.prepare('dispatch')
+      request.executionAdmission?.assertCurrent('dispatch')
+    } catch (error) {
+      if (request.signal?.aborted) return cancelledResult()
+      if (!(error instanceof NotebookExecutionAdmissionError)) throw error
+      return {
+        stdout: '',
+        stderr: error.message,
+        exitCode: 1,
+        kernelDispatched: false,
+        executionStarted: false,
+        recovery: error.recovery
+      }
+    }
     const context = JSON.stringify([
       request.cwd,
       request.handoffDir,
@@ -268,6 +298,7 @@ export class ShellCellSession {
     let timer: ExecutionDeadline | undefined
     let connectionTimer: ReturnType<typeof setTimeout> | undefined
     let timedOut = false
+    let waitingForNetwork = false
     if (!this.child) this.lifetime = new AbortController()
     const abort = (): void => {
       this.lifetime.abort()
@@ -299,6 +330,8 @@ export class ShellCellSession {
           (child) => {
             this.launchedProcess = true
             this.child = child
+            if (this.identity.runtimeBinding?.kind !== 'wsl2-bash')
+              this.sampleMemory = createNotebookMemorySampler(child)
             child.stdout.on('data', (chunk: string) => this.accept('stdout', chunk))
             child.stderr.on('data', (chunk: string) => this.accept('stderr', chunk))
             child.stdin.on('error', () => this.lifetime.abort())
@@ -342,16 +375,25 @@ export class ShellCellSession {
         }
       }
       if (!this.child) return await result
-      endExecution = this.beginExecution?.(request, (waiting) => timer?.setPaused(waiting))
+      endExecution = this.beginExecution?.(request, (waiting) => {
+        waitingForNetwork = waiting
+        timer?.setPaused(waiting)
+      })
       if (this.closed || request.signal?.aborted) abort()
       if (!this.lifetime.signal.aborted) {
+        await request.executionAdmission?.prepare('dispatch')
+        request.signal?.throwIfAborted()
         const timeoutMs = request.timeoutMs ?? NOTEBOOK_SHELL_DEFAULT_TIMEOUT_MS
         timer = new ExecutionDeadline(timeoutMs, () => {
           timedOut = true
           abort()
         })
+        timer.setPaused(waitingForNetwork)
         const input = powershell && !this.nativeControl ? this.controlSocket! : this.child.stdin
-        input.write(this.frame(request.command, this.cell!.marker, powershell))
+        const frame = this.frame(request.command, this.cell!.marker, powershell)
+        request.signal?.throwIfAborted()
+        request.executionAdmission?.assertCurrent('dispatch')
+        input.write(frame)
       }
       const completed = await result
       timer?.cancel()
@@ -378,6 +420,17 @@ export class ShellCellSession {
           }
         : { ...completed, cwdBefore: request.cwd }
     } catch (error) {
+      // A trusted refusal happens before stdin.write. Preserve the persistent namespace.
+      if (error instanceof NotebookExecutionAdmissionError) {
+        return {
+          stdout: '',
+          stderr: error.message,
+          exitCode: 1,
+          kernelDispatched: false,
+          executionStarted: false,
+          recovery: error.recovery
+        }
+      }
       this.lifetime.abort()
       await this.completion
       this.closeControl()
@@ -389,7 +442,8 @@ export class ShellCellSession {
       return {
         stdout: '',
         stderr: error instanceof Error ? error.message : String(error),
-        exitCode: null
+        exitCode: null,
+        ...(request.signal?.aborted ? { cancelled: true } : {})
       }
     } finally {
       timer?.cancel()
