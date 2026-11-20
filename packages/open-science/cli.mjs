@@ -1915,13 +1915,19 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!options.project) throw new CliUsageError('--project is required.')
     if (!options.output) throw new CliUsageError('--output is required.')
     const projectId = await resolveCliProjectId(client, options.project)
-    outputValue(
-      await client.exportSessionPackage(projectId, sessionId, resolve(options.output), {
-        timeoutMs: options.timeoutMs
-      }),
-      options,
-      deps
+    const { invokeAgentCapability } = await import('./agent-adapter.mjs')
+    const result = await invokeAgentCapability(
+      'export_session',
+      {
+        projectId,
+        sessionId,
+        destinationPath: resolve(options.output),
+        ...(options.timeoutMs === undefined ? {} : { waitMs: options.timeoutMs })
+      },
+      { exposure: 'cli', configRoot: options.configRoot, connect: async () => client }
     )
+    if (options.json) deps.log(JSON.stringify({ result }))
+    else outputValue(result, options, deps)
     return
   }
   if (command === 'session' && subcommand === 'import') {

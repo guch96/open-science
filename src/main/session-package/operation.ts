@@ -17,6 +17,7 @@ import {
   packageImportPercent
 } from '../../shared/session-package'
 import type {
+  AgentPackageOperationReference,
   BrowserPackageTransfer,
   PackageOperationRequest,
   PackageOperationSnapshot,
@@ -329,6 +330,7 @@ export class SessionPackageOperation {
   respond(request: PackageOperationRequest): PackageOperationSnapshot | null {
     if (request.action === 'snapshot') return this.snapshot
     if (
+      request.action === 'agent-export' ||
       [
         'reveal',
         'retry-cleanup',
@@ -430,6 +432,11 @@ export class SessionPackageOperation {
     this.publish()
   }
 
+  setAgentFailure(failure: NonNullable<PackageOperationSnapshot['agent']>['failure']): void {
+    if (this.current?.agent)
+      this.current = { ...this.current, agent: { ...this.current.agent, failure } }
+  }
+
   async retryCleanup(
     work: (signal: AbortSignal) => Promise<void>
   ): Promise<PackageOperationSnapshot | null> {
@@ -483,7 +490,8 @@ export class SessionPackageOperation {
     importTarget?: PackageOperationSnapshot['importTarget'],
     requiresRecovery?: () => boolean,
     downloadSlug?: string,
-    exportDestination?: PackageOperationSnapshot['exportDestination']
+    exportDestination?: PackageOperationSnapshot['exportDestination'],
+    agent?: AgentPackageOperationReference
   ): Promise<T> {
     if (this.controller) throw new Error('A Session package operation is already in progress.')
     this.selectedUploadTarget = undefined
@@ -494,6 +502,7 @@ export class SessionPackageOperation {
       kind,
       session,
       ...(exportDestination ? { exportDestination } : {}),
+      ...(agent ? { agent } : {}),
       importTarget,
       state: 'running',
       ...(downloadSlug ? { useCaseDownload: { slug: downloadSlug, completedBytes: 0 } } : {}),
