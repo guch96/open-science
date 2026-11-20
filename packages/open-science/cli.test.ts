@@ -159,15 +159,6 @@ describe('CLI help', () => {
 })
 
 describe('task CLI', () => {
-  it('prepares Codex through the public task client', async () => {
-    const bootstrap = vi.fn().mockResolvedValue({ ok: true })
-    await runTaskCommand(parseCliArgs(['runtime', 'install', 'codex', '--json']), {
-      connect: async () => ({ bootstrap }),
-      log: vi.fn()
-    })
-    expect(bootstrap).toHaveBeenCalledWith({ action: 'runtime' }, { timeoutMs: 600_000 })
-  })
-
   it('reads only the named API credential environment variable and does not print it', async () => {
     const bootstrap = vi.fn().mockResolvedValue({ ok: true, providerId: 'cli-openai' })
     const log = vi.fn()

@@ -565,6 +565,8 @@ export class OpenScienceApiError extends Error {
 }
 
 export class OpenScienceClient {
+  /** Configuration root of a service selected by connectToOpenScience. */
+  readonly configRoot?: string
   constructor(options: {
     baseUrl: string
     token: string

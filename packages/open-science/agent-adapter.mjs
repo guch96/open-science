@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { existingMcpCapabilities } from './agent-capabilities.mjs'
 import { connectToOpenScience } from './index.mjs'
@@ -47,6 +48,21 @@ const policies = {
     'deployment',
     'Access denied. Check the selected profile and service authentication.',
     { action: 'check_profile' }
+  ],
+  runtime_unavailable: [
+    'deployment',
+    'The service could not prepare the managed Codex runtime. Check the installation and network in Open-Science Settings, then recheck setup.',
+    { action: 'get_setup_status' }
+  ],
+  configuration_conflict: [
+    'user',
+    'This profile already selects a different runtime or provider. Review it in Open-Science Settings before preparing Codex.',
+    { action: 'get_setup_status' }
+  ],
+  bootstrap_failed: [
+    'service',
+    'Open-Science could not prepare the runtime. Check setup status before repeating the operation.',
+    { action: 'get_setup_status' }
   ],
   state_conflict: [
     'agent',
@@ -150,7 +166,9 @@ export const agentErrorDetails = (error, { capability, configRoot, readOnly, con
       ? 'access_denied'
       : error?.code === 'request_timeout' || error?.name === 'TimeoutError'
         ? 'timeout'
-        : status === 404 && (capability === 'doctor' || error?.code === 'not_found')
+        : status === 404 &&
+            (error?.code === 'not_found' ||
+              ['doctor', 'get_setup_status', 'prepare_runtime'].includes(capability))
           ? 'unsupported_capability'
           : known && !(status >= 500 && error.code === 'daemon_unavailable')
             ? error.code
@@ -165,7 +183,9 @@ export const agentErrorDetails = (error, { capability, configRoot, readOnly, con
       'daemon_unavailable',
       'startup_unconfirmed',
       'access_denied',
-      'unsupported_capability'
+      'unsupported_capability',
+      'runtime_unavailable',
+      'configuration_conflict'
     ].includes(code)
   ) {
     details.requiresUser = true
@@ -290,8 +310,41 @@ const setupCodes = [
   'provider_not_ready'
 ]
 
-async function doctor(_args, { getClient, signal }) {
+const cliPath = fileURLToPath(new URL('./cli.mjs', import.meta.url))
+
+const setupAction = ({ code, argv }, profile) => {
+  const runtime = code.startsWith('runtime_')
+  const prepare = runtime && argv?.[0] === 'runtime' && argv[1] === 'install' && argv[2] === 'codex'
+  const login = !runtime && argv?.[0] === 'codex' && argv[1] === 'login'
+  const action = prepare ? 'prepare_runtime' : login ? 'provider_login' : 'open_settings'
+  const userCommand = login
+    ? ['codex', 'login', ...(argv[2] === '--force' ? ['--force'] : [])]
+    : ['url']
+  return {
+    code,
+    action,
+    owner: prepare ? 'agent' : 'user',
+    requiresUser: !prepare,
+    retryable: false,
+    message: prepare
+      ? 'Prepare the managed Codex runtime through Open-Science.'
+      : login
+        ? 'Ask the user to run the Open-Science Codex login command for this profile.'
+        : `Ask the user to open Open-Science Settings for this profile and check the ${runtime ? 'Agent runtime' : 'model provider'}.`,
+    ...(!prepare
+      ? {
+          executable: process.execPath,
+          argv: [cliPath, ...userCommand, ...(profile ? ['--profile', profile] : [])],
+          ...(profile ? { cwd: profile } : {})
+        }
+      : {}),
+    verify: { capability: 'get_setup_status', ...(profile ? { profile } : {}) }
+  }
+}
+
+async function doctor(_args, { getClient, configRoot, signal }) {
   const client = await getClient()
+  const profile = client.configRoot ?? configRoot
   const report = await client.doctor({ signal })
   const runtime = report?.checks?.runtime
   const provider = report?.checks?.provider
@@ -302,6 +355,7 @@ async function doctor(_args, { getClient, signal }) {
         ? 'blocked'
         : 'unconfirmed'
   return {
+    ...(profile ? { profile } : {}),
     readiness: { service: 'ready', agent, notebook: 'unconfirmed' },
     checks: {
       runtime: {
@@ -314,9 +368,44 @@ async function doctor(_args, { getClient, signal }) {
       }
     },
     next: Array.isArray(report?.next)
-      ? report.next.filter((item) => setupCodes.includes(item?.code)).map(({ code }) => ({ code }))
+      ? report.next
+          .filter((item) => setupCodes.includes(item?.code))
+          .map((item) => setupAction(item, profile))
       : []
   }
+}
+
+const DEFAULT_RUNTIME_TIMEOUT_MS = 600_000
+async function prepareRuntime({ timeoutMs }, context) {
+  const { getClient, signal } = context
+  const client = await getClient()
+  const health = await client.health({ signal })
+  if (!health?.taskCapabilities?.includes('runtime-bootstrap')) {
+    throw new AgentError('unsupported_capability', { requiresUser: true })
+  }
+  const result = await client.bootstrap({ action: 'runtime' }, { signal, timeoutMs })
+  if (!result?.ok) {
+    const code = ['runtime_unavailable', 'configuration_conflict'].includes(result?.code)
+      ? result.code
+      : 'bootstrap_failed'
+    throw new AgentError(code, { requiresUser: code !== 'bootstrap_failed' })
+  }
+  return { ...(await doctor({}, context)), timeoutMs }
+}
+
+const setupStatus = {
+  name: 'doctor',
+  group: 'setup',
+  description:
+    'Check Agent runtime and provider readiness. User actions identify the exact installed CLI and profile.',
+  inputSchema: z.strictObject({}),
+  annotations: readOnly,
+  exposure: { cli: true, mcp: true },
+  serviceCapability: 'doctor',
+  checkSupport: async (client, signal) =>
+    typeof (await client.doctor({ signal }))?.ready === 'boolean',
+  probeOnly: true,
+  handler: doctor
 }
 
 const definitions = [
@@ -347,19 +436,30 @@ const definitions = [
     z.strictObject({}),
     () => agentGuide
   ),
+  setupStatus,
+  { ...setupStatus, name: 'get_setup_status' },
   {
-    name: 'doctor',
+    name: 'prepare_runtime',
     group: 'setup',
     description:
-      'Check basic Agent runtime and provider readiness without starting or configuring the service.',
-    inputSchema: z.strictObject({}),
-    annotations: readOnly,
+      'Prepare the managed Codex runtime without model credentials, then recheck setup for this profile.',
+    inputSchema: z.strictObject({
+      timeoutMs: z
+        .number()
+        .int()
+        .min(1)
+        .max(DEFAULT_RUNTIME_TIMEOUT_MS)
+        .default(DEFAULT_RUNTIME_TIMEOUT_MS)
+    }),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true
+    },
     exposure: { cli: true, mcp: true },
-    serviceCapability: 'doctor',
-    checkSupport: async (client, signal) =>
-      typeof (await client.doctor({ signal }))?.ready === 'boolean',
-    probeOnly: true,
-    handler: doctor
+    serviceCapability: 'runtime-bootstrap',
+    handler: prepareRuntime
   },
   ...existingMcpCapabilities
 ]

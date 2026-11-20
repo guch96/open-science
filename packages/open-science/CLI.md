@@ -234,11 +234,25 @@ Doctor does not establish execution or delivery.
 Codex credential inspection checks supported material in the app-owned `auth.json` without launching
 Codex or validating expiry/revocation remotely; historical provider validation remains a separate gate.
 
-`next` contains setup codes such as `runtime_missing` and `provider_not_ready`. A completed
-inspection exits with code `0`, including when Agent readiness is blocked. If the service is
+`doctor` and `get_setup_status` have the same checks. `profile` identifies the running service's
+configuration root. `next` contains setup actions, with an owner, a user action flag and a
+verification step for the same profile. A completed inspection exits with code `0`, including
+when Agent readiness is blocked. If the service is
 unreachable, the CLI emits `daemon_unavailable` and the startup command for the selected profile
 on stderr, and exits with code `3`. An HTTP authentication rejection stays an `access_denied`
 error.
+
+The shared `prepare_runtime` capability installs or checks the managed Codex runtime using the
+existing bootstrap service. `open-science runtime install codex --json` invokes the same
+capability. Its installation request waits up to 600,000 ms by default, then successful installs
+are checked again in the same profile. After a timeout, check setup before repeating installation.
+
+Keep the service and MCP on the same profile, for example `open-science mcp --profile
+/absolute/path/to/profile`. When a provider action specifies `requiresUser`, give the user the
+returned executable and argument list; it points to this installation of Open-Science. For
+Codex, the user runs Open-Science's `codex login` subcommand. For other provider setups they open
+Open-Science Settings. An action using `url` prints a private sign-in URL for the user. Do not
+request or collect it or credentials in MCP. Recheck `get_setup_status` after the user's action.
 
 ## First-run setup (Codex)
 

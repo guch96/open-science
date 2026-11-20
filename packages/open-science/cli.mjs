@@ -1597,6 +1597,9 @@ const runAgentCommand = async ({ command, subcommand, positionals = [], options 
   if (command === 'doctor') {
     name = 'doctor'
     input = {}
+  } else if (command === 'runtime') {
+    name = 'prepare_runtime'
+    input = { timeoutMs: options.timeoutMs }
   } else if (subcommand === 'list') {
     name = 'list_capabilities'
     input = { group: operand, checkService: options.checkService }
@@ -1629,6 +1632,9 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   const deps = { ...TASK_DEPS, ...dependencies }
   const { command, subcommand, positionals = [], options } = parsed
   if (command === 'doctor' || command === 'tools') return runAgentCommand(parsed, deps)
+  if (command === 'runtime' && subcommand === 'install' && positionals[0] === 'codex') {
+    return runAgentCommand(parsed, deps)
+  }
   const client = await deps.connect({ configRoot: options.configRoot })
   const call = async (name, input = {}) => {
     const { invokeAgentCapability } = await import('./agent-adapter.mjs')
@@ -1671,9 +1677,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
       return key
     }
     let request
-    if (command === 'runtime' && subcommand === 'install' && positionals[0] === 'codex')
-      request = { action: 'runtime' }
-    else if (
+    if (
       command === 'provider' &&
       subcommand === 'add' &&
       options.providerType === 'official' &&
