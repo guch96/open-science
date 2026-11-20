@@ -8,7 +8,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { AcpRuntimeEvent } from '../../shared/acp'
-import type { PersistedChatSession } from '../../shared/session-persistence'
+import {
+  materializeSessionConversationGraph,
+  type PersistedChatMessage,
+  type PersistedChatSession
+} from '../../shared/session-persistence'
+import type { TaskNotebookExecution } from '../../shared/task-api'
 import type { ApplicationCommandByNameDispatcher } from '../application-command-composition'
 import { createTaskCallerContext, type CallerContext } from '../caller-context'
 import {
@@ -355,6 +360,158 @@ describe('HeadlessTaskApi adapter', () => {
       expect(finished.error).toBeUndefined()
       expect(finished).toMatchObject(expected)
       await expect(api.getRun(run.id)).resolves.toMatchObject(expected)
+    } finally {
+      await api.dispose()
+      await notebook.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('observes the current Session prompt even when it inherits an earlier Notebook intent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'task-session-notebook-'))
+    const repository = new NotebookRunRepository(root)
+    const notebook = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: project.id,
+      repository
+    })
+    const owner = { projectId: project.id, sessionId: 'session-1' }
+    const prompt = (id: string): PersistedChatMessage => ({
+      id,
+      role: 'user',
+      content: id,
+      status: 'complete',
+      createdAt: 1
+    })
+    let session = materializeSessionConversationGraph({
+      id: owner.sessionId,
+      projectId: owner.projectId,
+      title: 'Notebook research',
+      cwd: root,
+      status: 'idle',
+      messages: [prompt('original')],
+      createdAt: 1,
+      updatedAt: 1
+    })
+    const frame = session.conversationGraph.frames[0]!
+    const lane = createFrameNotebookLane(owner.projectId, owner.sessionId, frame.id)
+    const scope = { ...owner, messageBranchId: frame.activeBranchId }
+    const imported = materializeSessionConversationGraph({
+      ...session,
+      id: 'imported-session',
+      conversationGraph: undefined,
+      packageOrigin: {
+        importId: 'import-1',
+        sourceProjectId: owner.projectId,
+        sourceSessionId: owner.sessionId,
+        importedAt: 1,
+        manifestChecksum: 'checksum',
+        excludedFiles: []
+      }
+    })
+    const appendCompletedRun = (promptMessageId: string): Promise<unknown> =>
+      repository.appendRun({
+        ...owner,
+        lane,
+        run: {
+          runId: `notebook-${promptMessageId}`,
+          cellId: 'cell-1',
+          source: 'agent',
+          kernelKind: 'python',
+          script: 'print(42)',
+          status: 'completed',
+          kernelDispatched: true,
+          startedAt: 1,
+          messageBranchId: scope.messageBranchId,
+          promptMessageId,
+          text: { stdout: '', stderr: '', traceback: '', plain: [] },
+          outputs: [],
+          workingFiles: []
+        }
+      })
+    const api = new HeadlessTaskApi({
+      commands: commandsFrom(async (channel) => {
+        if (channel === 'sessions:load-all') return { sessions: [session, imported] }
+        throw new Error(`Unexpected Task command: ${channel}`)
+      }),
+      agent: createAgent(),
+      notebook
+    })
+    const inspect = async (): Promise<TaskNotebookExecution | undefined> =>
+      (await api.getSession(owner.sessionId, owner.projectId)).execution
+    try {
+      await repository.loadOrCreate({ ...owner, lane, workspaceCwd: root })
+      const original = notebook.createExecutionIntent({ ...scope, promptMessageId: 'original' })
+      await appendCompletedRun('original')
+      await expect(inspect()).resolves.toMatchObject({
+        status: 'completed',
+        notebookRunId: 'notebook-original',
+        kernelDispatched: true
+      })
+
+      notebook.rememberExecutionIntent(scope, 'follow-up', original)
+      session = materializeSessionConversationGraph({
+        ...session,
+        status: 'running',
+        activeRun: { promptMessageId: 'follow-up', startedAt: 2 },
+        messages: [...session.messages, prompt('follow-up')]
+      })
+      const unconfirmed = {
+        ...scope,
+        promptMessageId: 'follow-up',
+        status: 'unconfirmed',
+        reasonCode: 'notebook_evidence_unavailable'
+      }
+      await expect(inspect()).resolves.toEqual(unconfirmed)
+      session = { ...session, status: 'idle', activeRun: undefined }
+      await expect(inspect()).resolves.toEqual(unconfirmed)
+
+      const refusalId = original.block('memory-pressure')
+      const waiting = {
+        status: 'waiting_for_user',
+        requiresUser: true,
+        refusalId,
+        next: { action: 'continue_notebook_in_app' }
+      }
+      await expect(inspect()).resolves.toMatchObject({ ...waiting, promptMessageId: 'follow-up' })
+      session = materializeSessionConversationGraph({
+        ...session,
+        messages: [...session.messages, prompt('not-yet-bound')]
+      })
+      await expect(inspect()).resolves.toMatchObject({
+        ...waiting,
+        ...scope,
+        promptMessageId: 'original'
+      })
+      await expect(api.getSession(imported.id)).resolves.toMatchObject({
+        readOnly: true,
+        packageOrigin: { importId: 'import-1' },
+        execution: { status: 'unconfirmed', sessionId: imported.id }
+      })
+
+      notebook.createExecutionIntent({
+        ...scope,
+        promptMessageId: 'continued',
+        continuedFromRefusalId: refusalId
+      })
+      session = materializeSessionConversationGraph({
+        ...session,
+        messages: [...session.messages, prompt('continued')]
+      })
+      await expect(inspect()).resolves.toEqual({
+        ...unconfirmed,
+        promptMessageId: 'continued',
+        continuedFromRefusalId: refusalId
+      })
+      await appendCompletedRun('continued')
+      await expect(inspect()).resolves.toMatchObject({
+        promptMessageId: 'continued',
+        continuedFromRefusalId: refusalId,
+        status: 'completed',
+        notebookRunId: 'notebook-continued',
+        kernelDispatched: true
+      })
     } finally {
       await api.dispose()
       await notebook.dispose()

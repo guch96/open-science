@@ -1573,30 +1573,37 @@ class NotebookRuntimeService {
   }
 
   async inspectTaskExecution(
-    request: NotebookExecutionIntentScope
+    request: NotebookExecutionIntentScope & { includeSessionRefusal?: true }
   ): Promise<import('../../shared/task-api').TaskNotebookExecution> {
-    const { projectId, sessionId } = request
+    const { projectId, sessionId, promptMessageId } = request
     const scope = { projectId, sessionId }
     const current = this.executionIntents.current(scope)
-    const promptMessageId = request.promptMessageId ?? current?.scope.promptMessageId
     const intent =
-      request.promptMessageId && request.promptMessageId !== current?.scope.promptMessageId
-        ? this.executionIntents.resolve(scope, request.promptMessageId)
-        : current
+      promptMessageId === current?.scope.promptMessageId
+        ? current
+        : promptMessageId
+          ? this.executionIntents.resolve(scope, promptMessageId)
+          : undefined
+    // The Session can still be blocked while its latest prompt is not bound to the refusal.
+    const observedIntent = request.includeSessionRefusal && current?.refusalId ? current : intent
+    const observedPromptId =
+      observedIntent === intent ? promptMessageId : observedIntent?.scope.promptMessageId
     const origin = {
       ...scope,
-      ...(promptMessageId ? { promptMessageId } : {}),
-      ...(intent?.scope.messageBranchId ? { messageBranchId: intent.scope.messageBranchId } : {}),
-      ...(intent?.scope.continuedFromRefusalId
-        ? { continuedFromRefusalId: intent.scope.continuedFromRefusalId }
+      ...(observedPromptId ? { promptMessageId: observedPromptId } : {}),
+      ...(observedIntent?.scope.messageBranchId
+        ? { messageBranchId: observedIntent.scope.messageBranchId }
+        : {}),
+      ...(observedIntent?.scope.continuedFromRefusalId
+        ? { continuedFromRefusalId: observedIntent.scope.continuedFromRefusalId }
         : {})
     }
-    if (intent?.refusalId && intent === current) {
+    if (observedIntent?.refusalId && observedIntent === current) {
       return {
         ...origin,
         status: 'waiting_for_user',
         reasonCode: 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION',
-        refusalId: intent.refusalId,
+        refusalId: observedIntent.refusalId,
         owner: 'user',
         requiresUser: true,
         retryable: false,

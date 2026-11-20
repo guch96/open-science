@@ -3027,7 +3027,7 @@ class TaskRunner {
     }
   }
 
-  private async findSession(sessionId: string, projectId?: string): Promise<PersistedChatSession> {
+  async findSession(sessionId: string, projectId?: string): Promise<PersistedChatSession> {
     const session = (await this.dependencies.sessions.list()).find(
       (candidate) => candidate.id === sessionId
     )

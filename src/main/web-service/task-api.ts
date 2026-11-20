@@ -19,7 +19,7 @@ import type {
   UpdateProjectSessionDefaultsRequest,
   UpdateSessionConfigurationRequest
 } from '../../shared/session-configuration'
-import type { PersistedChatSession } from '../../shared/session-persistence'
+import { latestOutcomePrompt, type PersistedChatSession } from '../../shared/session-persistence'
 import type { ActivePlanProjection, PlanResponseCommand } from '../../shared/session-plan/contract'
 import type {
   AddCustomServerRequest,
@@ -57,7 +57,6 @@ import { createLogger } from '@aipoch/diagnostics/node'
 import type { ApplicationCommandByNameDispatcher } from '../application-command-composition-contract'
 import { createTaskCallerContext, type CallerContext } from '../caller-context'
 import type { NotebookRuntimeService } from '../notebook/runtime-service'
-import type { NotebookExecutionIntentScope } from '../notebook/execution-intent'
 import type { PlanResponseResult } from '../session-plan/plan-service'
 import type { TaskControlPorts } from '../tasks/task-control-ports'
 import { TaskSubmissions } from '../tasks/task-submissions'
@@ -389,8 +388,13 @@ class HeadlessTaskApi {
   }
 
   async getSession(sessionId: string, projectId?: string): Promise<TaskSessionSummary> {
-    const session = await this.runner.getSession(sessionId, projectId)
-    return this.withNotebookExecution(session, { projectId: session.projectId, sessionId })
+    const session = await this.runner.findSession(sessionId, projectId)
+    return this.withNotebookExecution(summarizeSession(session), {
+      projectId: session.projectId,
+      sessionId,
+      promptMessageId: session.activeRun?.promptMessageId ?? latestOutcomePrompt(session)?.id,
+      includeSessionRefusal: true
+    })
   }
 
   getSessionConfiguration(
@@ -601,7 +605,7 @@ class HeadlessTaskApi {
 
   private async withNotebookExecution<T extends TaskRun | TaskSessionSummary>(
     value: T,
-    scope: NotebookExecutionIntentScope
+    scope: Parameters<NotebookRuntimeService['inspectTaskExecution']>[0]
   ): Promise<T> {
     if (!this.ports.notebook) return value
     try {
