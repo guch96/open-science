@@ -1465,7 +1465,9 @@ const emitRunEvent = (event, options, deps) => {
     if (message) deps.log(message)
   } else if (event.type === 'permission.requested') {
     deps.warn(
-      'Run is waiting for approval. Approve the request in Open-Science Desktop or the Web UI.'
+      event.data?.reasonCode === 'notebook_code_review_required'
+        ? 'Notebook code review is pending. Review it in the original Session in Open-Science.'
+        : 'Run is waiting for approval. Approve the request in Open-Science Desktop or the Web UI.'
     )
   } else if (
     event.type === 'run.event' &&

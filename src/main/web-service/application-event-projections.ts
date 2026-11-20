@@ -15,7 +15,9 @@ type PublicTaskEvent = TaskRunIdentity &
     | { type: 'run.event'; data: AcpRuntimeEvent }
     | {
         type: 'permission.requested'
-        data: Extract<ApplicationEvent, { channel: 'acp:permission-request' }>['payload']
+        data:
+          | Extract<ApplicationEvent, { channel: 'acp:permission-request' }>['payload']
+          | { sessionId: string; title: string; reasonCode: 'notebook_code_review_required' }
       }
     | { type: 'run.progress'; data: TaskRunProgressEvent }
   )
@@ -34,6 +36,15 @@ const projectWebRendererEvent = (event: ApplicationEvent): WebRendererEvent | un
       }
     : undefined
 
+const isNotebookCodeReviewCard = (value: unknown): boolean =>
+  isAppOwnedNotebookCodeReview(value) ||
+  (value !== null &&
+    typeof value === 'object' &&
+    'appOwned' in value &&
+    value.appOwned === true &&
+    'notebookCodeReview' in value &&
+    value.notebookCodeReview === true)
+
 const projectPublicTaskEvents = (
   event: ApplicationEvent,
   resolveActiveRun: ResolveActiveTaskRun = () => undefined
@@ -42,7 +53,7 @@ const projectPublicTaskEvents = (
     return event.payload.flatMap((item) => {
       if (
         isAppOwnedNotebookCodeReview(item) ||
-        (item.kind === 'permission' && isAppOwnedNotebookCodeReview(item.raw))
+        (item.kind === 'permission' && isNotebookCodeReviewCard(item.raw))
       ) {
         return []
       }
@@ -53,9 +64,17 @@ const projectPublicTaskEvents = (
     })
   }
   if (event.channel === 'acp:permission-request') {
-    if (isAppOwnedNotebookCodeReview(event.payload)) return []
-    const run = resolveActiveRun(event.payload.sessionId)
-    return run ? [{ ...run, type: 'permission.requested', data: event.payload }] : []
+    const { sessionId } = event.payload
+    const run = resolveActiveRun(sessionId)
+    if (!run) return []
+    const data = isNotebookCodeReviewCard(event.payload)
+      ? {
+          sessionId,
+          title: 'Notebook code review is pending in this Session.',
+          reasonCode: 'notebook_code_review_required' as const
+        }
+      : event.payload
+    return [{ ...run, type: 'permission.requested', data }]
   }
   return []
 }

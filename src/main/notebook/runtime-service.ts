@@ -1609,7 +1609,11 @@ class NotebookRuntimeService {
     }
     const runs = promptMessageId
       ? (await this.repository.readSessionRuns(projectId, sessionId)).filter(
-          (run) => run.source === 'agent' && run.promptMessageId === promptMessageId
+          (run) =>
+            run.source === 'agent' &&
+            run.promptMessageId === promptMessageId &&
+            (request.messageBranchId === undefined ||
+              run.messageBranchId === request.messageBranchId)
         )
       : []
     const branch = request.messageBranchId ?? intent?.scope.messageBranchId

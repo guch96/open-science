@@ -273,6 +273,12 @@ class AcpRuntimeCoordinator {
     )
   }
 
+  pendingNotebookCodeReviewRunIds(sessionId: string): string[] {
+    return Array.from(this.runtimes).flatMap((runtime) =>
+      runtime.pendingNotebookCodeReviewRunIds(sessionId)
+    )
+  }
+
   getSnapshot(): AcpStateSnapshot {
     this.snapshotRevision += 1
     const snapshots = Array.from(this.runtimes, (runtime) => ({

@@ -766,6 +766,10 @@ class AcpPermissionContext {
     return this.broker.getPendingRequests()
   }
 
+  pendingNotebookCodeReviewRunIds(sessionId: string): string[] {
+    return this.broker.pendingNotebookCodeReviewRunIds(sessionId)
+  }
+
   hasPendingForSession(sessionId: string): boolean {
     return this.broker.hasPendingForSession(sessionId)
   }

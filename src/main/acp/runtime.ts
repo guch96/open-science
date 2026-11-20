@@ -660,6 +660,10 @@ class AcpRuntime {
     return this.publication.getState()
   }
 
+  pendingNotebookCodeReviewRunIds(sessionId: string): string[] {
+    return this.permissionContext.pendingNotebookCodeReviewRunIds(sessionId)
+  }
+
   captureBackend(): AcpBackendGenerationView {
     return this.backend
   }

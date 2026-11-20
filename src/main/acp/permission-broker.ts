@@ -3,7 +3,11 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import { createLogger } from '@aipoch/diagnostics/node'
 import type { AcpPermissionResponse, AcpPermissionSettlementState } from '../../shared/acp'
-import type { AcpPermissionGrant, AcpPermissionRequest } from '../../shared/acp-permission-contract'
+import {
+  isAppOwnedNotebookCodeReview,
+  type AcpPermissionGrant,
+  type AcpPermissionRequest
+} from '../../shared/acp-permission-contract'
 import type {
   PermissionCapability,
   PermissionGrantRecord,
@@ -920,6 +924,14 @@ class AcpPermissionBroker {
           pending.durablePersistenceSettled === true
       )
       .map(({ request }) => request)
+  }
+
+  pendingNotebookCodeReviewRunIds(sessionId: string): string[] {
+    return this.getPendingRequests().flatMap((request) => {
+      if (request.sessionId !== sessionId || !isAppOwnedNotebookCodeReview(request)) return []
+      const { runId } = request.rawInput.notebookCodeRisk
+      return typeof runId === 'string' ? [runId] : []
+    })
   }
 
   hasPendingForSession(sessionId: string): boolean {

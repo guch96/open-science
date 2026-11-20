@@ -1,6 +1,5 @@
 import type { AcpRuntimeCoordinator } from '../acp/runtime-coordinator'
 import type { NotebookRuntimeService } from '../notebook/runtime-service'
-import { isAppOwnedNotebookCodeReview } from '../../shared/acp-permission-contract'
 import type { PermissionProfileId } from '../../shared/permission-profiles'
 
 // Each callback reads the current Session profile at the actual host decision, after discovery.
@@ -8,7 +7,11 @@ import type { PermissionProfileId } from '../../shared/permission-profiles'
 export function bindNotebookApprovals(
   notebook: Pick<NotebookRuntimeService, 'setExecutionApproval' | 'setRuntimeBindingApproval'>,
   runtimeForApproval: () =>
-    Pick<AcpRuntimeCoordinator, 'getState' | 'requestAppApproval'> | undefined,
+    | Pick<
+        AcpRuntimeCoordinator,
+        'getState' | 'requestAppApproval' | 'pendingNotebookCodeReviewRunIds'
+      >
+    | undefined,
   readSessionProfile?: (
     projectId: string,
     sessionId: string
@@ -40,12 +43,7 @@ export function bindNotebookApprovals(
       if (request.permissionPrompts === 'none') return false
       return runtime().requestAppApproval(request)
     },
-    (sessionId) =>
-      (runtimeForApproval()?.getState().pendingPermissions ?? []).flatMap((request) => {
-        if (request.sessionId !== sessionId || !isAppOwnedNotebookCodeReview(request)) return []
-        const runId = request.rawInput.notebookCodeRisk.runId
-        return typeof runId === 'string' ? [runId] : []
-      })
+    (sessionId) => runtimeForApproval()?.pendingNotebookCodeReviewRunIds(sessionId) ?? []
   )
   notebook.setRuntimeBindingApproval(async (request) => {
     const profile = await profileFor(request)

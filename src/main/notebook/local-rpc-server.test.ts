@@ -5555,8 +5555,13 @@ describe('real ACP / RPC / Runtime approval wiring', () => {
         ({
           getState: () => ({ permissionProfiles: { session: { selectedProfile: state.profile } } }),
           requestAppApproval: (input: Parameters<AcpPermissionContext['requestAppApproval']>[0]) =>
-            context.requestAppApproval(input)
-        }) as unknown as Pick<AcpRuntimeCoordinator, 'getState' | 'requestAppApproval'>
+            context.requestAppApproval(input),
+          pendingNotebookCodeReviewRunIds: (sessionId: string) =>
+            context.pendingNotebookCodeReviewRunIds(sessionId)
+        }) as unknown as Pick<
+          AcpRuntimeCoordinator,
+          'getState' | 'requestAppApproval' | 'pendingNotebookCodeReviewRunIds'
+        >
     )
     let call = 0
     const outer = async (

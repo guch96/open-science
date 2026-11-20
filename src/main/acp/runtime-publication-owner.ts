@@ -82,6 +82,7 @@ const projectPermissionRequest = (request: AcpPermissionRequest): AcpPermissionR
   if (notebookReview && sanitizedRawInput === undefined)
     return {
       ...sanitizedProjection,
+      notebookCodeReview: true,
       options: request.options.filter((option) => option.kind.startsWith('reject_'))
     }
 

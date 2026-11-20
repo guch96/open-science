@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { AcpRuntimeEvent } from '../../shared/acp'
 import type { TaskRunProgressEvent } from '../../shared/task-api'
 import type { ApplicationEvent } from '../application-events'
+import { projectPermissionRequest } from '../acp/runtime-publication-owner'
 import {
   projectPublicTaskEvent,
   projectPublicTaskProgressEvent,
@@ -143,7 +144,7 @@ describe('application event projections', () => {
     expect(projectPublicTaskEvent(compute)).toBeUndefined()
   })
 
-  it('keeps Notebook code review payloads in the application event stream', () => {
+  it('keeps a Session-scoped public notice and leaves review details to the application', () => {
     const card = {
       sessionId: activeRun.sessionId,
       requestId: 'review-1',
@@ -151,7 +152,7 @@ describe('application event projections', () => {
       title: 'Review potentially destructive code',
       appOwned: true as const,
       rawInput: { code: 'private source', notebookCodeRisk: { runId: 'notebook-1', risks: [] } },
-      options: []
+      options: [{ optionId: 'private-option-id', kind: 'reject_once', name: 'Decline' }]
     }
     const activity = {
       id: 'event-1',
@@ -160,22 +161,36 @@ describe('application event projections', () => {
       sessionId: card.sessionId,
       toolCallId: card.toolCallId
     }
-    const events: ApplicationEvent[] = [
-      { channel: 'acp:permission-request', payload: card },
-      {
-        channel: 'acp:event',
-        payload: [
-          { ...activity, kind: 'permission', permissionRequestId: card.requestId, raw: card }
-        ]
-      },
-      {
-        channel: 'acp:event',
-        payload: [{ ...activity, kind: 'tool', appOwned: true, rawInput: card.rawInput }]
+    const trimmed = projectPermissionRequest(card)
+    expect(trimmed.rawInput).toBeUndefined()
+    for (const request of [card, trimmed]) {
+      const permission: ApplicationEvent = { channel: 'acp:permission-request', payload: request }
+      expect(projectPublicTaskEvent(permission, () => activeRun)).toEqual({
+        ...activeRun,
+        type: 'permission.requested',
+        data: {
+          sessionId: card.sessionId,
+          title: 'Notebook code review is pending in this Session.',
+          reasonCode: 'notebook_code_review_required'
+        }
+      })
+      const events: ApplicationEvent<'acp:event'>[] = [
+        {
+          channel: 'acp:event',
+          payload: [
+            { ...activity, kind: 'permission', permissionRequestId: card.requestId, raw: request }
+          ]
+        },
+        {
+          channel: 'acp:event',
+          payload: [{ ...activity, kind: 'tool', appOwned: true, rawInput: card.rawInput }]
+        }
+      ]
+      for (const event of [permission, ...events]) {
+        if (event.channel === 'acp:event')
+          expect(projectPublicTaskEvent(event, () => activeRun)).toBeUndefined()
+        expect(projectWebRendererEvent(event)?.payload).toBe(event.payload)
       }
-    ]
-    for (const event of events) {
-      expect(projectPublicTaskEvent(event, () => activeRun)).toBeUndefined()
-      expect(projectWebRendererEvent(event)?.payload).toBe(event.payload)
     }
   })
 })
