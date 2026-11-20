@@ -673,22 +673,39 @@ unavailable references fail with `invalid_configuration`.
 
 ## Session package export and import
 
-Export a Session to a `.science` package at an explicit path. The Session must be idle:
+Export an idle Session with the shared Agent capability. Use explicit source IDs and a new
+absolute `.science` path in an existing directory on the same machine:
 
 ```bash
-open-science session export <session-id> --project <id-or-name> --output ~/backups/session.science
+printf '%s\n' '{"projectId":"PROJECT_ID","sessionId":"SESSION_ID","destinationPath":"/absolute/path/result.science"}' \
+  | open-science tools call export_session --json
 ```
 
-`--project` resolves a Project by id or name and selects which Session to export. `--output` must
-be an absolute or relative path ending in `.science`; when it is omitted the command fails instead
-of opening a native save dialog, because the CLI runs without a desktop session. The command
-returns the saved status and written path as JSON with `--json`.
+The MCP `export_session` tool takes the same arguments. The CLI shortcut
+`open-science session export SESSION_ID --project PROJECT_ID_OR_NAME --output PATH --json`
+resolves the Project and path then calls the same capability. `waitMs` (shortcut: `--timeout-ms`)
+defaults to 30,000 and accepts 1–300,000 ms. The wait only limits observation; the service can
+finish the export afterward. Existing files, directories and symbolic links are never replaced.
 
-Both package commands allow up to one hour by default. Use `--timeout-ms <milliseconds>`
-to adjust the request deadline for large packages or slower disks.
+Save the returned `operationId` and `correlationId`. After a timeout, pass either original
+reference to `get_package_operation`; also pass the original scope fields when available:
+
+```bash
+printf '%s\n' '{"correlationId":"ORIGINAL_CORRELATION_UUID","kind":"export"}' \
+  | open-science tools call get_package_operation --json
+```
+
+The lookup is read-only. It can report pending or verify the package actually delivered at the
+local path, including its size and SHA-256. If the service has restarted, a newer snapshot
+replaced the original, or the file cannot be verified, expect `completionStatus: "unconfirmed"`.
+Keep the original references and check the destination; do not repeat the export automatically.
+Package operations do not offer the durable receipts that research submissions provide.
+If Open-Science detects sensitive content, the export is blocked and returned with
+`requiresUser: true`; the Agent has no confirmation or force option.
 
 Import a `.science` package. Import is non-interactive by design and requires an explicit
-confirmation flag:
+confirmation flag. It waits up to one hour by default; use `--timeout-ms <milliseconds>` to
+adjust the request deadline:
 
 ```bash
 open-science session import ~/backups/session.science --new-project "Restored session" --non-interactive
@@ -705,12 +722,8 @@ before retrying, since another import can create a second Session. For a rejecte
 include the returned `error.correlationId` (when present) when looking up the service log. The
 package file is read directly from disk, so no upload or drag-and-drop step is involved.
 
-Both commands dispatch the same `sessions:export-package`, `sessions:import-package`, and
-`sessions:package-operation` application commands the desktop app uses, over the authenticated
-loopback HTTP channel. They are unavailable to remote Web sessions by design: the channel is
-installed as a rejecting stub for remote callers, and the handler additionally requires a local
-caller, so arbitrary-path file read and write stay confined to loopback callers that hold the
-service token.
+Both commands reuse the Package Owner over the authenticated loopback channel. They are
+unavailable to remote Web sessions: arbitrary-path file reads and writes require local access.
 
 ### Fork an existing Session
 
@@ -1102,7 +1115,9 @@ service on the same machine with access to the input and delivery files.
 | `cancel_run`                   | Explicitly cancel a run without undoing previous effects |
 | `get_plan`                     | Read the plan and its version/revision                   |
 | `respond_plan`                 | Approve/reject a reviewed version or request changes     |
-| `list_artifacts`               | List artifact metadata without downloading files         |
+| `list_artifacts`               | List published Artifact versions and download IDs        |
+| `download_artifact`            | Deliver one listed version to a new local file           |
+| `get_delivery_status`         | Check report and result table delivery for one Run       |
 | `search_literature`            | Search or browse Literature library records              |
 | `get_literature_item`          | Read one Literature record                               |
 | `list_citation_styles`         | List citation styles available for formatting            |
@@ -1130,6 +1145,21 @@ profile. The same effective submission and ID resolve to the same receipt; a cha
 under that ID fails with `submission_conflict`. A Run interrupted by restart reports
 `failureCode: "process_restarted"`. Use a new ID for a separately authorized research turn.
 Older services without durable submission support reject the operation without writing a Run.
+
+Use the session and Run IDs from `get_run` to list the Artifacts for that research.
+Notebook working files must be published as Artifacts before they can be downloaded. For each
+Artifact, pass its `downloadId` and `sessionId` to `download_artifact`; `artifactId` identifies
+the lineage and `versionId` identifies the immutable version. Files default to
+`<profile>/agent-delivery/<downloadId>/<Artifact name>`. An explicit `outputPath` is an absolute
+local path in an existing directory. The destination filesystem must support hard links. An
+existing file, directory or symbolic link is refused. A download returns the actual path, bytes,
+SHA-256 and verification result. Verification requires the size and checksum of the source version.
+
+For `get_delivery_status`, pass the Run ID and exact requested `reportName` and `tableName`, plus
+`reportPath` or `tablePath` if custom paths were used. Only Artifacts associated with this Run
+count. `missing` and `partial` describe how many requested outputs are available. `available` means
+both outputs exist at the source. `verified` means both local files match their source versions;
+it does not validate the scientific result.
 
 Successful calls return `structuredContent: { "result": ... }` plus the same JSON in text content.
 Tool failures set `isError: true` and return `{ "error": ... }` with `code`, `message`, `owner`,

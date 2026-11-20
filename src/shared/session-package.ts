@@ -167,12 +167,31 @@ export type BrowserPackageTransfer = {
   totalBytes: number
 }
 
+const agentPackageOperationReferenceSchema = z
+  .object({
+    correlationId: z.uuid(),
+    destinationPath: z
+      .string()
+      .min(1)
+      .max(32768)
+      .regex(/\.science$/i)
+      .optional()
+  })
+  .strict()
+export type AgentPackageOperationReference = z.infer<typeof agentPackageOperationReferenceSchema>
+
+const packageFileDigestSchema = z
+  .object({ sizeBytes: z.number().int().nonnegative(), checksum })
+  .strict()
+export type PackageFileDigest = z.infer<typeof packageFileDigestSchema>
+
 export type PackageOperationSnapshot = {
   id: string
   kind: 'export' | 'import' | 'fork'
   session?: SessionPackageRequest
   sessionTitle?: string
   exportDestination?: 'local' | 'org-case'
+  agent?: AgentPackageOperationReference & { failure?: 'destination-conflict' | 'requires-user' }
   importTarget?: SessionPackageImportRequest
   presentationRevision?: number
   importRequestId?: string
@@ -189,6 +208,7 @@ export type PackageOperationSnapshot = {
   summary?: PackageSelectionSummary
   result?: {
     filePath?: string
+    fileDigest?: PackageFileDigest
     webOmissions?: PackageWebOmission[]
     uploadedCase?: OrgCaseUploadedSummary
     imported?: SessionPackageRequest
@@ -204,6 +224,17 @@ export type PackageOperationSnapshot = {
 export const packageOperationRequestSchema = z
   .discriminatedUnion('action', [
     z.object({ action: z.literal('snapshot') }).strict(),
+    agentPackageOperationReferenceSchema
+      .extend({
+        action: z.literal('agent-export'),
+        session: z.object({ projectId: identity, sessionId: identity }).strict(),
+        destinationPath: z
+          .string()
+          .min(1)
+          .max(32768)
+          .regex(/\.science$/i)
+      })
+      .strict(),
     z.object({ action: z.literal('cancel'), operationId: identity }).strict(),
     z
       .object({
@@ -396,6 +427,9 @@ const packageOperationSnapshotSchema: z.ZodType<PackageOperationSnapshot> = z
     session: sessionPackageRequestSchema.optional(),
     sessionTitle: z.string().max(1000).optional(),
     exportDestination: z.enum(['local', 'org-case']).optional(),
+    agent: agentPackageOperationReferenceSchema
+      .extend({ failure: z.enum(['destination-conflict', 'requires-user']).optional() })
+      .optional(),
     importTarget: sessionPackageImportRequestSchema.optional(),
     presentationRevision: z.number().int().nonnegative().optional(),
     importRequestId: identity.optional(),
@@ -506,6 +540,7 @@ const packageOperationSnapshotSchema: z.ZodType<PackageOperationSnapshot> = z
     result: z
       .object({
         filePath: z.string().optional(),
+        fileDigest: packageFileDigestSchema.optional(),
         webOmissions: z.array(packageWebOmissionSchema).max(100).optional(),
         uploadedCase: orgCaseUploadedSummarySchema.optional(),
         imported: sessionPackageRequestSchema.optional(),

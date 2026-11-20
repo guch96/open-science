@@ -199,6 +199,8 @@ describe('OpenScienceClient', () => {
         'updateSessionConfiguration',
         'callRpc',
         'exportSessionPackage',
+        'startAgentPackageExport',
+        'getPackageOperation',
         'importSessionPackage',
         'getAgentRouting',
         'updateAgentRouting',

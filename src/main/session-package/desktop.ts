@@ -15,6 +15,8 @@ import { lstat, mkdtemp, opendir, readdir, realpath, rm, stat } from 'node:fs/pr
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join } from 'node:path'
 import type {
+  AgentPackageOperationReference,
+  PackageFileDigest,
   PackageFileSelection,
   SensitiveContentEvidence,
   SessionPackageExportResult,
@@ -358,6 +360,39 @@ export class SessionPackageDesktop {
   respond(
     request: PackageOperationRequest
   ): PackageOperationSnapshot | null | Promise<PackageOperationSnapshot | null> {
+    if (request.action === 'agent-export') {
+      const { session, destinationPath, correlationId } = request
+      if (!isAbsolute(destinationPath))
+        throw new ApplicationCommandError(
+          'invalid-command-arguments',
+          'Use an absolute export path.'
+        )
+      const current = this.operations.snapshot
+      if (
+        this.operations.active ||
+        current?.result?.recovery ||
+        current?.agent?.correlationId === correlationId
+      )
+        throw new ApplicationCommandError(
+          'session-package-operation-conflict',
+          'Another package operation must be resolved before starting this export.'
+        )
+      const agent = { correlationId, destinationPath }
+      // run() admits the operation synchronously. Completion remains owned by the same
+      // package operation even after this HTTP request has returned or disconnected.
+      void this.exportWithPolicy(
+        session,
+        undefined,
+        false,
+        destinationPath,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        agent
+      ).catch(() => undefined)
+      return this.operations.snapshot
+    }
     if (request.action === 'cancel-browser-transfer') {
       return Promise.resolve(this.options.cancelBrowserTransfer?.(request.transferId)).then(
         () => this.operations.snapshot
@@ -372,6 +407,7 @@ export class SessionPackageDesktop {
         failed.kind !== 'export' ||
         failed.state !== 'failed' ||
         !failed.session ||
+        failed.agent ||
         (previous && previous.operationId !== failed.id) ||
         !failed.sensitiveContent?.length ||
         failed.cleanupPending ||
@@ -531,11 +567,11 @@ export class SessionPackageDesktop {
     destination: string,
     phase: 'copying' | 'saving',
     signal: AbortSignal
-  ): Promise<void> {
-    await withPackageTransfer(async (transfer) => {
+  ): Promise<PackageFileDigest> {
+    return withPackageTransfer(async (transfer) => {
       const size = (await stat(source)).size
       await assertPackageCapacity(dirname(destination), size)
-      await copyFileWithinBudget(
+      return copyFileWithinBudget(
         source,
         destination,
         PACKAGE_MAX_BYTES,
@@ -684,6 +720,10 @@ export class SessionPackageDesktop {
 
   // Preflight validation and staged operations share the same user-facing error conversion.
   private failOperation(error: unknown, request?: SessionPackageRequest): never {
+    if (error instanceof PackageSensitiveContentError)
+      this.operations.setAgentFailure('requires-user')
+    if (error instanceof Error && 'code' in error && error.code === 'EEXIST')
+      this.operations.setAgentFailure('destination-conflict')
     if (error instanceof PackageSensitiveContentError && request && error.evidence) {
       this.operations.setSensitiveContent([error.evidence])
       try {
@@ -899,7 +939,8 @@ export class SessionPackageDesktop {
     selection?: PackageFileSelection,
     stageDownload?: boolean,
     uploadOrgCase?: OrgCaseUploadMetadata,
-    initialTitle?: string
+    initialTitle?: string,
+    agent?: AgentPackageOperationReference
   ): Promise<SessionPackageExportResult> {
     const stage = stageDownload ?? this.stageDownloadForRetries
     let operationSignal: AbortSignal | undefined
@@ -1038,14 +1079,23 @@ export class SessionPackageDesktop {
               }
               if (!filePath) throw new Error('No export destination was selected.')
               this.operations.report({ phase: 'saving' })
+              let fileDigest: PackageFileDigest | undefined
               await publishUserFile(
                 filePath,
-                (temporary) => this.copyArchive(archive, temporary, 'saving', signal),
+                async (temporary) => {
+                  fileDigest = await this.copyArchive(archive, temporary, 'saving', signal)
+                },
                 {
+                  exclusive: Boolean(agent),
+                  signal,
                   validateDestination: async () => signal.throwIfAborted()
                 }
               )
-              this.operations.completeResult({ filePath, ...omissionResult })
+              this.operations.completeResult({
+                filePath,
+                ...(agent && fileDigest ? { fileDigest } : {}),
+                ...omissionResult
+              })
               return { saved: true, filePath }
             }, request)
           } finally {
@@ -1055,7 +1105,8 @@ export class SessionPackageDesktop {
         undefined,
         undefined,
         undefined,
-        uploadOrgCase ? 'org-case' : destinationPath ? 'local' : undefined
+        uploadOrgCase ? 'org-case' : destinationPath ? 'local' : undefined,
+        agent
       )
       .catch((error) => {
         if (operationSignal?.aborted && !this.shutdown.signal.aborted) return { saved: false }

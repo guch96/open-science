@@ -398,14 +398,6 @@ register(
   write,
   (client, args, options) => client.respondSessionPlan(args.sessionId, args.response, options)
 )
-register(
-  'list_artifacts',
-  'delivery',
-  'List generated artifact metadata for a session. Does not download files or write local paths.',
-  { sessionId },
-  read,
-  (client, args, options) => client.listArtifacts(args.sessionId, options)
-)
 registerResource(
   'search_literature',
   'research',

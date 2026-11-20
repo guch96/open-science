@@ -45,6 +45,11 @@
    并发、冲突和重启后的回执关联及中断状态。
 3. [#62–#65](https://github.com/guch96/open-science/issues/54) 接入包导出、导入、Fork、查询和敏感确认。
    以真实 `.science` 和原操作关联证据区分可验证交付、待确认和未知结果。
+   [#62](https://github.com/guch96/open-science/issues/62) 导出由 Package Owner 在受理时记录 operation/correlation，
+   并使用排他发布。Adapter 用 Owner 提供的大小和摘要核对本地文件；丢响应、快照被替换或文件不匹配时
+   返回 `unconfirmed`。查询仅匹配当前快照，不提供研究提交级别的持久回执。导出入口会阻断未经确认的敏感包；
+   同一操作与具体内容绑定的人工确认由 #65 补齐。真实 CLI JSON、MCP stdio 与 Package Owner 集成覆盖
+   文件内容、目标冲突、回执关联、超时和敏感阻断。
 4. [#66–#67](https://github.com/guch96/open-science/issues/54) 以实际构建的 npm 包运行 README 两条验收路径。
    只给提示语时，准备好后等用户研究指令；给包时在无源数据库、Notebook 工作目录或凭据的独立环境先只读检查。
 5. [#68](https://github.com/guch96/open-science/issues/68) 在目标版本发布后从 registry 复验。

@@ -434,6 +434,29 @@ export type Run = {
 export type SessionStatus =
   'idle' | 'running' | 'waiting-for-user' | 'waiting-permission' | 'waiting-plan-approval' | 'error'
 
+export type PackageOperation = {
+  id: string
+  kind: 'export' | 'import' | 'fork'
+  state: 'running' | 'awaiting-selection' | 'cancelling' | 'succeeded' | 'cancelled' | 'failed'
+  session?: { projectId: string; sessionId: string }
+  agent?: {
+    correlationId: string
+    destinationPath?: string
+    failure?: 'destination-conflict' | 'requires-user'
+  }
+  result?: {
+    filePath?: string
+    fileDigest?: { sizeBytes: number; checksum: string }
+    imported?: { projectId: string; sessionId: string }
+    recovery?: {
+      projectId: string
+      sessionId: string
+      operationId: string
+      outcome: 'committed' | 'unconfirmed'
+    }
+  }
+}
+
 export type SessionOrigin = {
   importId: string
   sourceProjectId: string
@@ -507,6 +530,11 @@ export type AgentRouting = {
 
 export type Artifact = {
   id: string
+  artifactId?: string
+  versionId?: string
+  versionNumber?: number
+  artifactRunId?: string
+  producerRunId?: string
   kind: 'workspace-file' | 'external-file' | 'managed-file'
   path: string
   name?: string
@@ -698,6 +726,20 @@ export class OpenScienceClient {
     sessionId: string,
     options?: RequestOptions
   ): Promise<{ projectId: string; sessionId: string } | null>
+  exportSessionPackage(
+    projectId: string,
+    sessionId: string,
+    destinationPath: string,
+    options?: RequestOptions
+  ): Promise<{ saved: boolean; filePath?: string }>
+  startAgentPackageExport(
+    projectId: string,
+    sessionId: string,
+    destinationPath: string,
+    correlationId: string,
+    options?: RequestOptions
+  ): Promise<PackageOperation>
+  getPackageOperation(options?: RequestOptions): Promise<PackageOperation | null>
   submitRun(
     requestId: string,
     request: Parameters<OpenScienceClient['startRun']>[0],

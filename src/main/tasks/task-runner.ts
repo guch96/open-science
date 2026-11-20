@@ -21,7 +21,7 @@ import type {
   FinalizeRunArtifactsResult,
   ResolveArtifactVersionDescriptorsRequest
 } from '../../shared/artifacts'
-import { artifactCreatedAtMs } from '../../shared/artifacts'
+import { artifactCreatedAtMs, MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS } from '../../shared/artifacts'
 import { ComputeHostPreferenceValidationError } from '../../shared/compute'
 import { buildConfiguredModelCatalog } from '../../shared/configured-model-catalog'
 import {
@@ -1201,8 +1201,40 @@ class TaskRunner {
     }
   }
 
-  async listArtifacts(sessionId: string): Promise<PersistedArtifact[]> {
-    return [...((await this.findSession(sessionId)).artifacts ?? [])]
+  async listArtifacts(
+    sessionId: string
+  ): Promise<Array<PersistedArtifact & { artifactRunId?: string; producerRunId?: string }>> {
+    const session = await this.findSession(sessionId)
+    const artifacts = session.artifacts ?? []
+    const versionIds = artifacts
+      .filter(({ kind }) => kind === 'managed-file')
+      .map(({ versionId, id }) => versionId ?? id)
+    const descriptors = new Map<string, ArtifactVersionDescriptor>()
+    for (let i = 0; i < versionIds.length; i += MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS) {
+      const batch = await this.dependencies.artifacts.resolveVersionDescriptors({
+        projectId: session.projectId,
+        appSessionId: session.id,
+        versionIds: versionIds.slice(i, i + MAX_ARTIFACT_VERSION_DESCRIPTOR_IDS)
+      })
+      for (const descriptor of batch) descriptors.set(descriptor.versionId, descriptor)
+    }
+    return artifacts.map((artifact) => {
+      const version = descriptors.get(artifact.versionId ?? artifact.id)
+      return version
+        ? {
+            ...artifact,
+            artifactId: version.artifactId,
+            versionId: version.versionId,
+            versionNumber: version.versionNumber,
+            artifactRunId: version.runId,
+            producerRunId: version.producerRunId,
+            name: version.name,
+            mimeType: version.mimeType,
+            size: version.size,
+            sha256: version.checksum
+          }
+        : artifact
+    })
   }
 
   async acquireArtifact(artifactId: string): Promise<TaskArtifactLease> {

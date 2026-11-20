@@ -3,11 +3,9 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 
 import { randomUUID } from 'node:crypto'
-import { closeSync, createWriteStream, existsSync, openSync, realpathSync } from 'node:fs'
-import { chmod, lstat, mkdir, open, readFile, readlink, rename, rm, stat } from 'node:fs/promises'
+import { closeSync, existsSync, openSync, realpathSync } from 'node:fs'
+import { mkdir, open, readFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
-import { Readable } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
 import { text as readStreamText } from 'node:stream/consumers'
 import { spawn } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -38,7 +36,6 @@ const STOP_TIMEOUT_MS = 42_000
 // Artifact content may be produced after a long-running task completes. Keep the CLI's
 // default transfer budget separate from the short control-request timeout used by the SDK.
 const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1_000
-const MAX_DOWNLOAD_SYMLINK_HOPS = 40
 
 const usage = `Usage: open-science <command> [options]
 
@@ -1335,46 +1332,12 @@ export const urlCommand = async (options, deps = DEFAULT_DEPS) => {
   deps.log(await authenticatedUrl(state, deps))
 }
 
-const resolveDownloadOutput = async (output) => {
-  let candidate = output
-  for (let hop = 0; ; hop += 1) {
-    const linkTarget = await lstat(candidate).then(
-      (metadata) => (metadata.isSymbolicLink() ? readlink(candidate) : undefined),
-      (error) => {
-        if (error?.code === 'ENOENT') return undefined
-        throw error
-      }
-    )
-    if (linkTarget === undefined) return candidate
-    if (hop === MAX_DOWNLOAD_SYMLINK_HOPS) break
-    candidate = resolve(dirname(candidate), linkTarget)
-  }
-  throw new Error(`Too many symbolic links in artifact output: ${output}`)
-}
-
 const writeDownload = async (response, output) => {
-  if (!response.body) throw new Error('Artifact download returned no data.')
-  const destination = await resolveDownloadOutput(output)
-  const existingMode = await stat(destination).then(
-    ({ mode }) => mode & 0o777,
-    (error) => {
-      if (error?.code === 'ENOENT') return undefined
-      throw error
-    }
-  )
-  const temporaryOutput = join(dirname(destination), `.open-science-${randomUUID()}.tmp`)
+  const { deliverLocalFile } = await import('./local-file-delivery.mjs')
   try {
-    await pipeline(
-      Readable.fromWeb(response.body),
-      createWriteStream(temporaryOutput, {
-        flags: 'wx',
-        ...(existingMode === undefined ? {} : { mode: existingMode })
-      })
-    )
-    if (existingMode !== undefined) await chmod(temporaryOutput, existingMode)
-    await rename(temporaryOutput, destination)
+    await deliverLocalFile(() => response, output)
   } finally {
-    await rm(temporaryOutput, { force: true }).catch(() => undefined)
+    if (response.body && !response.body.locked) await response.body.cancel().catch(() => {})
   }
 }
 
@@ -1979,13 +1942,19 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!options.project) throw new CliUsageError('--project is required.')
     if (!options.output) throw new CliUsageError('--output is required.')
     const projectId = await resolveCliProjectId(client, options.project)
-    outputValue(
-      await client.exportSessionPackage(projectId, sessionId, resolve(options.output), {
-        timeoutMs: options.timeoutMs
-      }),
-      options,
-      deps
+    const { invokeAgentCapability } = await import('./agent-adapter.mjs')
+    const result = await invokeAgentCapability(
+      'export_session',
+      {
+        projectId,
+        sessionId,
+        destinationPath: resolve(options.output),
+        ...(options.timeoutMs === undefined ? {} : { waitMs: options.timeoutMs })
+      },
+      { exposure: 'cli', configRoot: options.configRoot, connect: async () => client }
     )
+    if (options.json) deps.log(JSON.stringify({ result }))
+    else outputValue(result, options, deps)
     return
   }
   if (command === 'session' && subcommand === 'import') {
