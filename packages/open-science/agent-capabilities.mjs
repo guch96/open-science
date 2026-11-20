@@ -233,14 +233,6 @@ register(
   (client, args, options) => client.respondSessionPlan(args.sessionId, args.response, options)
 )
 register(
-  'list_artifacts',
-  'delivery',
-  'List generated artifact metadata for a session. Does not download files or write local paths.',
-  { sessionId },
-  read,
-  (client, args, options) => client.listArtifacts(args.sessionId, options)
-)
-register(
   'search_literature',
   'research',
   'Search Literature library records by title, author, abstract or identifier; omit query to browse. Optionally limit results to one project. Returns at most 20 records per page; pass nextOffset as offset to continue. Does not search external providers or read PDF full text.',

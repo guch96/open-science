@@ -1617,6 +1617,7 @@ const startWebHttpServer = async (options: WebServerOptions): Promise<RunningWeb
           taskCapabilities: options.tasks
             ? [
                 'permission-prompts-none',
+                'task-artifacts',
                 ...(options.tasks.doctor ? ['doctor'] : []),
                 ...(!externalAuthorization && options.tasks.bootstrap ? ['runtime-bootstrap'] : []),
                 ...(!externalAuthorization && options.tasks.supportsSubmissions?.()

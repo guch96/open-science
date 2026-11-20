@@ -2,6 +2,7 @@
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { existingMcpCapabilities } from './agent-capabilities.mjs'
+import { artifactCapabilities } from './agent-artifacts.mjs'
 import { connectToOpenScience } from './index.mjs'
 
 export const agentGuideUri = 'openscience://agent/guide'
@@ -433,7 +434,8 @@ const definitions = [
     serviceCapability: 'runtime-bootstrap',
     handler: prepareRuntime
   },
-  ...existingMcpCapabilities
+  ...existingMcpCapabilities,
+  ...artifactCapabilities
 ]
 const capabilities = new Map(definitions.map((entry) => [entry.name, entry]))
 

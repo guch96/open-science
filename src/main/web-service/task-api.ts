@@ -19,7 +19,6 @@ import type {
   UpdateProjectSessionDefaultsRequest,
   UpdateSessionConfigurationRequest
 } from '../../shared/session-configuration'
-import type { PersistedArtifact } from '../../shared/session-message-contract'
 import type { PersistedChatSession } from '../../shared/session-persistence'
 import type { ActivePlanProjection, PlanResponseCommand } from '../../shared/session-plan/contract'
 import type {
@@ -593,7 +592,7 @@ class HeadlessTaskApi {
     return this.runner.resolveActiveRun(sessionId, promptMessageId)
   }
 
-  listArtifacts(sessionId: string): Promise<PersistedArtifact[]> {
+  listArtifacts(sessionId: string): ReturnType<TaskRunner['listArtifacts']> {
     return this.runner.listArtifacts(sessionId)
   }
 

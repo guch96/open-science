@@ -200,8 +200,9 @@ describe('research MCP tools', () => {
   })
 
   it.each(cases)('%s preserves the SDK HTTP contract', async (name, args, path, method, body) => {
+    const artifactList = name === 'list_artifacts'
     const fetch = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
-      Response.json({ data: { example: 'result' } })
+      Response.json({ data: artifactList ? [{ id: 'version-1' }] : { example: 'result' } })
     )
     const sdk = new OpenScienceClient({
       baseUrl: 'http://127.0.0.1:44100',
@@ -212,7 +213,9 @@ describe('research MCP tools', () => {
     const { client } = await harness(connect)
     const response = await client.callTool({ name, arguments: args })
     expect(response.isError).not.toBe(true)
-    expect(response.structuredContent).toEqual({ result: { example: 'result' } })
+    expect(response.structuredContent).toEqual({
+      result: artifactList ? [{ downloadId: 'version-1' }] : { example: 'result' }
+    })
     expect(response.content).toEqual([
       { type: 'text', text: JSON.stringify(response.structuredContent) }
     ])

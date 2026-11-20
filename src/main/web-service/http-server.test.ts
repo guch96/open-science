@@ -1313,7 +1313,7 @@ describe('startWebHttpServer', () => {
       rpcProtocolVersion: WEB_RPC_PROTOCOL_VERSION,
       rpcCapabilities: WEB_RPC_CAPABILITIES,
       rpcChannels: ['projects:list'],
-      taskCapabilities: ['permission-prompts-none']
+      taskCapabilities: ['permission-prompts-none', 'task-artifacts']
     })
 
     const compressedStatic = await fetch(`${base}/app.js`, {

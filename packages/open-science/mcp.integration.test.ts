@@ -1,7 +1,16 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  symlink,
+  writeFile
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -500,12 +509,164 @@ it('serves a real stdio run/poll/artifact workflow through authenticated HTTP an
   expect(
     (await client.callTool({ name: 'list_artifacts', arguments: { sessionId: 's1' } }))
       .structuredContent
-  ).toEqual({ result: [{ id: 'a1', name: 'report.md' }] })
+  ).toEqual({ result: [{ downloadId: 'a1', name: 'report.md' }] })
   await client.close()
   expect(requests.some((request) => request.url.includes('cancel'))).toBe(false)
   expect(stderr).not.toContain(token)
   expect(http.listening).toBe(true)
 }, 15000)
+
+it('delivers a pinned Artifact through either entry point without overwriting local files', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-artifact-delivery-'))
+  cleanup.push(() => rm(profile, { recursive: true, force: true }))
+  const token = 'artifact-fixture-secret'
+  const report = {
+    id: 'report-version',
+    artifactId: 'report-lineage',
+    versionId: 'report-version',
+    producerRunId: 'notebook-run',
+    name: 'report.md',
+    kind: 'managed-file',
+    mimeType: 'text/markdown',
+    size: 3,
+    sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+  }
+  const table = { ...report, id: 'table-version', versionId: 'table-version', name: 'results.csv' }
+  const unrelated = { ...table, id: 'old-version', versionId: 'old-version', name: 'other.csv' }
+  const run = { id: 'r1', sessionId: 's1', status: 'completed', artifacts: [report, table] }
+  let content = 'abc'
+  const service = createServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${token}`) return res.writeHead(401).end()
+    if (req.url?.endsWith('/content')) {
+      return res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(content)
+    }
+    res.setHeader('content-type', 'application/json')
+    if (req.url === '/api/bootstrap') return res.end('{}')
+    if (req.url === '/api/v1/sessions/s1/artifacts') {
+      return res.end(JSON.stringify({ data: [report, table, unrelated] }))
+    }
+    if (req.url === '/api/v1/runs/r1') return res.end(JSON.stringify({ data: run }))
+    return res.writeHead(404).end()
+  })
+  service.listen(0, '127.0.0.1')
+  await once(service, 'listening')
+  cleanup.push(async () => {
+    service.closeAllConnections()
+    await new Promise<void>((done) => service.close(() => done()))
+  })
+  await writeFile(
+    join(profile, 'web-service.json'),
+    JSON.stringify({
+      pid: process.pid,
+      port: (service.address() as { port: number }).port,
+      startedAt: new Date().toISOString()
+    })
+  )
+  await writeFile(join(profile, 'web-token'), token)
+  const mcp = await connectMcp(profile)
+  const cliArgs = (name: string): string[] => [
+    'tools',
+    'call',
+    name,
+    '--profile',
+    profile,
+    '--json'
+  ]
+  const call = (name: string, args: Record<string, unknown>): ReturnType<Client['callTool']> =>
+    mcp.callTool({ name, arguments: args })
+  const both = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    const remote = await call(name, args)
+    expect(remote.isError, JSON.stringify(remote.structuredContent)).not.toBe(true)
+    expect(remote.structuredContent).toEqual(
+      JSON.parse((await runCli(cliArgs(name), JSON.stringify(args))).stdout)
+    )
+    return (remote.structuredContent as { result: unknown }).result
+  }
+  const bothFail = async (args: Record<string, unknown>, code: string): Promise<void> => {
+    const remote = await call('download_artifact', args)
+    expect(remote.isError).toBe(true)
+    const cli = await cliError(cliArgs('download_artifact'), JSON.stringify(args))
+    expect(remote.structuredContent).toEqual({ error: cli.error })
+    expect(cli.error).toMatchObject({ code })
+  }
+  const listed = await both('list_artifacts', { sessionId: 's1', runId: 'r1' })
+  expect(listed).toEqual([
+    expect.objectContaining({
+      downloadId: 'report-version',
+      artifactId: 'report-lineage',
+      versionId: 'report-version',
+      producerRunId: 'notebook-run',
+      runId: 'r1',
+      name: 'report.md',
+      bytes: 3,
+      sha256: report.sha256
+    }),
+    expect.objectContaining({ downloadId: 'table-version' })
+  ])
+  const expected = { runId: 'r1', reportName: 'report.md', tableName: 'results.csv' }
+  expect(await both('get_delivery_status', { ...expected, tableName: 'other.csv' })).toMatchObject({
+    delivery: { status: 'partial', verified: false }
+  })
+  expect(await both('get_delivery_status', expected)).toMatchObject({
+    delivery: { status: 'available', verified: false }
+  })
+
+  const reportPath = join(profile, 'agent-delivery', 'report-version', 'report.md')
+  const request = { sessionId: 's1', downloadId: 'report-version' }
+  expect((await call('download_artifact', request)).structuredContent).toMatchObject({
+    result: { path: reportPath, bytes: 3, sha256: report.sha256, verified: true, timeoutMs: 300000 }
+  })
+  expect(await readFile(reportPath, 'utf8')).toBe('abc')
+  const tablePath = join(profile, 'results.csv')
+  const tableRequest = { sessionId: 's1', downloadId: 'table-version', outputPath: tablePath }
+  expect(
+    JSON.parse((await runCli(cliArgs('download_artifact'), JSON.stringify(tableRequest))).stdout)
+  ).toMatchObject({
+    result: { path: tablePath, bytes: 3, sha256: report.sha256, verified: true }
+  })
+  expect(await readFile(tablePath, 'utf8')).toBe('abc')
+  expect(await both('get_delivery_status', { ...expected, tablePath })).toMatchObject({
+    delivery: { status: 'verified', verified: true }
+  })
+
+  await bothFail(request, 'delivery_target_exists')
+  await bothFail({ ...request, downloadId: 'report-lineage' }, 'artifact_not_found')
+  const directory = join(profile, 'directory')
+  await mkdir(directory)
+  await bothFail({ ...request, outputPath: directory }, 'delivery_target_exists')
+  if (process.platform !== 'win32') {
+    const link = join(profile, 'link')
+    await symlink(reportPath, link)
+    await bothFail({ ...request, outputPath: link }, 'delivery_target_exists')
+    expect(await readlink(link)).toBe(reportPath)
+  }
+  expect(await readFile(reportPath, 'utf8')).toBe('abc')
+
+  const badPath = join(directory, 'bad.md')
+  for (const changed of ['ab', 'xyz']) {
+    content = changed
+    await bothFail({ ...request, outputPath: badPath }, 'delivery_integrity_mismatch')
+    expect(await readdir(directory)).toEqual([])
+  }
+  delete (report as Partial<typeof report>).sha256
+  const unverified = await call('download_artifact', { ...request, outputPath: badPath })
+  expect(unverified.structuredContent).toMatchObject({
+    result: { path: badPath, bytes: 3, verified: false }
+  })
+  expect(await readFile(badPath, 'utf8')).toBe('xyz')
+
+  const collisionPath = join(profile, 'collision.md')
+  const concurrent = await Promise.all(
+    [1, 2].map(() => call('download_artifact', { ...request, outputPath: collisionPath }))
+  )
+  expect(concurrent.map((result) => result.structuredContent)).toEqual(
+    expect.arrayContaining([
+      { result: expect.objectContaining({ path: collisionPath }) },
+      { error: expect.objectContaining({ code: 'delivery_target_exists' }) }
+    ])
+  )
+  expect(await readFile(collisionPath, 'utf8')).toBe('xyz')
+}, 20000)
 
 it.each(['EOF', 'SIGTERM', 'SIGINT'] as const)(
   'terminates on %s without writing non-protocol stdout',
