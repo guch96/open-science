@@ -1200,6 +1200,11 @@ under that ID fails with `submission_conflict`. A Run interrupted by restart rep
 `failureCode: "process_restarted"`. Use a new ID for a separately authorized research turn.
 Older services without durable submission support reject the operation without writing a Run.
 
+A failed receipt with `error.code: "provider_auth_required"` means the provider rejected
+authentication during Run preparation. Use the private Settings entry point in `error.next` to
+ask the user to restore access in the same profile. Recheck setup after the user's action. The
+original receipt is final and will not replay, even if the user signs in later.
+
 Use the session and Run IDs from `get_run` to list the Artifacts for that research.
 Notebook working files must be published as Artifacts before they can be downloaded. For each
 Artifact, pass its `downloadId` and `sessionId` to `download_artifact`; `artifactId` identifies

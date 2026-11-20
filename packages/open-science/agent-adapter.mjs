@@ -1,11 +1,11 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
-import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { artifactCapabilities } from './agent-artifacts.mjs'
 import { existingMcpCapabilities } from './agent-capabilities.mjs'
 import { inspectAgentDeliveryDirectory } from './agent-delivery-directory.mjs'
 import { projectAgentNotebookReadiness, readinessActions } from './agent-notebook-readiness.mjs'
 import { getAgentPackageCapabilities } from './agent-package-capabilities.mjs'
+import { setupAction } from './agent-setup-action.mjs'
 import { connectToOpenScience } from './index.mjs'
 
 export const agentGuideUri = 'openscience://agent/guide'
@@ -364,38 +364,6 @@ const setupCodes = [
   'provider_missing',
   'provider_not_ready'
 ]
-
-const cliPath = fileURLToPath(new URL('./cli.mjs', import.meta.url))
-
-const setupAction = ({ code, argv }, profile) => {
-  const runtime = code.startsWith('runtime_')
-  const prepare = runtime && argv?.[0] === 'runtime' && argv[1] === 'install' && argv[2] === 'codex'
-  const login = !runtime && argv?.[0] === 'codex' && argv[1] === 'login'
-  const action = prepare ? 'prepare_runtime' : login ? 'provider_login' : 'open_settings'
-  const userCommand = login
-    ? ['codex', 'login', ...(argv[2] === '--force' ? ['--force'] : [])]
-    : ['url']
-  return {
-    code,
-    action,
-    owner: prepare ? 'agent' : 'user',
-    requiresUser: !prepare,
-    retryable: false,
-    message: prepare
-      ? 'Prepare the managed Codex runtime through Open-Science.'
-      : login
-        ? 'Ask the user to run the Open-Science Codex login command for this profile.'
-        : `Ask the user to open Open-Science Settings for this profile and check the ${runtime ? 'Agent runtime' : 'model provider'}.`,
-    ...(!prepare
-      ? {
-          executable: process.execPath,
-          argv: [cliPath, ...userCommand, ...(profile ? ['--profile', profile] : [])],
-          ...(profile ? { cwd: profile } : {})
-        }
-      : {}),
-    verify: { capability: 'get_setup_status', ...(profile ? { profile } : {}) }
-  }
-}
 
 async function doctor(_args, { getClient, configRoot, signal }) {
   const client = await getClient()

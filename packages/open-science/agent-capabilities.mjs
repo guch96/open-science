@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { z } from 'zod'
+import { projectSubmissionReceipt } from './agent-setup-action.mjs'
 import { OpenScienceApiError } from './index.mjs'
 
 const id = (description) => z.string().trim().min(1).describe(description)
@@ -302,17 +303,20 @@ registerResource(
     enabledComputeHostIds: z.array(id('Enabled Compute Host ID for a new session.')).optional()
   },
   { ...write, idempotentHint: true },
-  (client, { requestId, projectId, providerId, model, reasoningEffort, ...request }, options) =>
-    client.submitRun(
-      requestId,
-      {
-        project: projectId,
-        ...request,
-        ...(providerId !== undefined || model !== undefined || reasoningEffort !== undefined
-          ? { agentConfiguration: { providerId, model, reasoningEffort } }
-          : {})
-      },
-      options
+  async (client, { requestId, projectId, providerId, model, reasoningEffort, ...request }, options) =>
+    projectSubmissionReceipt(
+      await client.submitRun(
+        requestId,
+        {
+          project: projectId,
+          ...request,
+          ...(providerId !== undefined || model !== undefined || reasoningEffort !== undefined
+            ? { agentConfiguration: { providerId, model, reasoningEffort } }
+            : {})
+        },
+        options
+      ),
+      client.configRoot
     ),
   ({ permissionPrompts, turnIntent }, context) => {
     if (permissionPrompts === 'none' && turnIntent === 'plan-first')
@@ -326,7 +330,8 @@ registerResource(
   'Read the original durable receipt by requestId. A missing receipt is not a reason to submit with a new ID.',
   { requestId },
   read,
-  (client, args, options) => client.getSubmission(args.requestId, options),
+  async (client, args, options) =>
+    projectSubmissionReceipt(await client.getSubmission(args.requestId, options), client.configRoot),
   undefined,
   { serviceCapability: 'durable-submissions' }
 )
@@ -338,11 +343,10 @@ registerResource(
   read,
   async (client, { requestId, timeoutMs }, options) => ({
     timeoutMs,
-    receipt: await client.waitForSubmission(requestId, {
-      ...options,
-      timeoutMs,
-      returnReceipt: true
-    })
+    receipt: projectSubmissionReceipt(
+      await client.waitForSubmission(requestId, { ...options, timeoutMs, returnReceipt: true }),
+      client.configRoot
+    )
   }),
   undefined,
   { serviceCapability: 'durable-submissions', boundedWait: true }

@@ -189,6 +189,57 @@ it('recovers the original study after the initial submission response is lost', 
   expect(writes).toBe(1)
 })
 
+it('recovers the same provider authentication handoff through CLI and MCP', async () => {
+  const receipt = {
+    requestId: 'needs-login',
+    status: 'failed',
+    createdAt: 1,
+    error: { code: 'provider_auth_required', message: 'private provider detail' }
+  }
+  const agent = await resourceAgents(
+    (request, response) => {
+      if (request.url === `/api/v1/run-submissions/${receipt.requestId}`) {
+        response.end(JSON.stringify({ data: receipt }))
+      } else {
+        response.writeHead(404).end()
+      }
+    },
+    ['durable-submissions']
+  )
+  const key = { requestId: receipt.requestId }
+  const handoff = {
+    ...key,
+    status: 'failed',
+    error: {
+      code: 'provider_auth_required',
+      owner: 'user',
+      requiresUser: true,
+      retryable: false,
+      next: [
+        expect.objectContaining({
+          action: 'open_settings',
+          executable: process.execPath,
+          argv: [cli, 'url', '--profile', agent.profile],
+          verify: { capability: 'get_setup_status', profile: agent.profile }
+        })
+      ]
+    }
+  }
+  for (const [name, args] of [
+    ['start_run', { ...key, projectId: 'p1', prompt: 'Read these results.' }],
+    ['get_submission', key],
+    ['wait_submission', key]
+  ] as const) {
+    const observed = await agent.mcp(name, args)
+    expect(observed.isError).not.toBe(true)
+    expect(observed.structuredContent).toEqual(await agent.cli(name, args))
+    expect(observed.structuredContent).toMatchObject({
+      result: name === 'wait_submission' ? { timeoutMs: 10000, receipt: handoff } : handoff
+    })
+    expect(JSON.stringify(observed)).not.toContain('private provider detail')
+  }
+})
+
 it('bounds receipt and Run waiting without cancelling or issuing another submission', async () => {
   const receipt: { requestId: string; status: string; createdAt: number; runId?: string } = {
     requestId: 'wait-request',
