@@ -60,6 +60,9 @@
    从绝对路径导入 `.science`，将已校验包的摘要和新建只读 Session 关联到原操作。使用实际 Project/Session ID
    查阅 Session、历史回答和已发布 Artifact。测试只迁移包字节到另一个空数据目录，验证拒绝写入、
    丢失回执后查询原操作以及快照被覆盖时保留 `unconfirmed`；独立机器或容器验收留给 #67。
+   [#64](https://github.com/guch96/open-science/issues/64) Fork 复用已有发布与权限检查。操作回执的顶层 ID
+   指向本次直接来源，嵌套 `session` 指向可写副本；副本的 `forkOrigin` 保留包来源。只在用户同意后 Fork，
+   另行授权的二次研究使用新 Session 和新 `requestId`。源 Session 有 Notebook 拒绝时仍须回到原处继续。
    [#65](https://github.com/guch96/open-science/issues/65) 检出敏感内容后在服务的私有暂存保留候选包，
    用原操作返回 `pending` 和 `requiresUser`。同 profile 的 Desktop 显示脱敏证据和目标位置；
    原生对话框默认取消，批准绑定候选归档大小与 SHA-256，发布时再次核对。拒绝或十分钟未确认即取消并清理；

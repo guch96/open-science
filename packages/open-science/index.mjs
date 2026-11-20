@@ -415,6 +415,14 @@ export class OpenScienceClient {
     })
   }
 
+  startAgentPackageFork(projectId, sessionId, correlationId, options) {
+    return this.callRpc(
+      'sessions:package-operation',
+      [{ action: 'agent-fork', session: { projectId, sessionId }, correlationId }],
+      options
+    )
+  }
+
   exportSessionPackage(projectId, sessionId, destinationPath, options) {
     return this.callRpc('sessions:export-package', [{ projectId, sessionId }, destinationPath], {
       ...options,

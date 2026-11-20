@@ -776,23 +776,24 @@ unavailable to remote Web sessions: arbitrary-path file reads and writes require
 
 ### Fork an existing Session
 
-Import, fork and new-Session creation are separate operations. Import keeps the imported research
-read-only and never executes it. Fork explicitly creates a writable continuation with copied
-history, managed files and a source relationship; it does not overwrite or unlock the imported
-Session. Starting a Run without `--session` creates a new independent Session.
+Show the results of the read-only inspection first and ask the user whether to Fork. Once the
+user agrees, call `fork_session` with the source `projectId` and `sessionId`. Its completed result
+keeps the immediate source IDs at the top level and returns the new writable IDs in `session`.
+The new Session's `forkOrigin` can point further back to the original package. Use the nested
+`session` IDs and a new `requestId` for a separately authorized follow-up. Omitting the Session
+starts an unrelated Session. Query the original `requestId` when recovering earlier work.
 
 ```bash
 open-science session fork <imported-session-id> --project <id-or-name> --json
 open-science run --project <project-id> --session <returned-fork-session-id> --prompt "Continue the analysis" --wait
 ```
 
-Fork reuses the desktop package owner, including admission, recovery and provenance remapping.
-Imported forks replay their copied history with this installation's model defaults; they do not
-restore another machine's provider process, credentials or pending approvals. Local forks preserve
-the existing model-selection policy. `run --session <imported-session-id>` returns `session_read_only`
-with a fork instruction. The `session fork` request uses the same one-hour default timeout as package
-transfers and accepts `--timeout-ms`; after a timeout inspect the operation and Session list before
-forking again. Fork is available only through authenticated local access.
+The CLI shortcut accepts an exact Project name or ID and the same wait range as `fork_session`.
+After an unconfirmed result, query `get_package_operation` by the original `operationId` or
+`correlationId`, using `kind: "fork"` and the source IDs. Do not repeat the Fork automatically.
+Imported Forks use the receiving profile's model defaults. Pending approvals and a current
+Notebook stop on the source must be resolved in Open-Science; a Fork cannot continue the stopped
+intent. Fork is available only through authenticated local access.
 
 ## Agent routing settings
 
@@ -1169,6 +1170,7 @@ service on the same machine with access to the input and delivery files.
 | `get_delivery_status`         | Check report and result table delivery for one Run       |
 | `export_session`              | Export one Session to a local `.science` file           |
 | `import_session`              | Import a local `.science` file as a read-only Session     |
+| `fork_session`                | Create a writable copy after the user agrees            |
 | `get_package_operation`      | Check the outcome of a specific package operation        |
 | `search_literature`            | Search or browse Literature library records              |
 | `get_literature_item`          | Read one Literature record                               |

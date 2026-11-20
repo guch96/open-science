@@ -332,6 +332,7 @@ export class SessionPackageOperation {
     if (
       request.action === 'agent-export' ||
       request.action === 'agent-import' ||
+      request.action === 'agent-fork' ||
       [
         'reveal',
         'retry-cleanup',

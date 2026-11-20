@@ -1921,18 +1921,13 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!sessionId) throw new CliUsageError('Session id is required.')
     if (!options.project) throw new CliUsageError('--project is required.')
     const projectId = await resolveCliProjectId(client, options.project)
-    try {
-      outputValue(
-        await client.forkSession(projectId, sessionId, { timeoutMs: options.timeoutMs }),
-        options,
-        deps
-      )
-    } catch (error) {
-      if (error?.code === 'timeout')
-        error.message +=
-          ' Fork outcome is unconfirmed. Inspect the package operation and Session list before forking again.'
-      throw error
-    }
+    const result = await call('fork_session', {
+      projectId,
+      sessionId,
+      ...(options.timeoutMs === undefined ? {} : { waitMs: options.timeoutMs })
+    })
+    if (options.json) deps.log(JSON.stringify({ result }))
+    else outputValue(result, options, deps)
     return
   }
 
