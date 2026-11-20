@@ -1378,11 +1378,38 @@ const writeDownload = async (response, output) => {
   }
 }
 
+const persistRunRequest = async ({ profile, requestId, projectId, sessionId }) => {
+  const directory = join(profile, 'agent-run-requests')
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  if (!(await lstat(directory)).isDirectory()) throw new Error('Invalid recovery directory.')
+  const path = join(directory, `${requestId}.json`)
+  const file = await open(path, 'wx', 0o600)
+  try {
+    await file.writeFile(`${JSON.stringify({ requestId, profile, projectId, sessionId })}\n`)
+    await file.sync()
+  } finally {
+    await file.close()
+  }
+  // Persist the directory entries before the service can admit the request.
+  if (process.platform !== 'win32') {
+    for (const current of [directory, profile]) {
+      const entry = await open(current, 'r')
+      try {
+        await entry.sync()
+      } finally {
+        await entry.close()
+      }
+    }
+  }
+  return path
+}
+
 const TASK_DEPS = {
   connect: (options) => connectToOpenScience(options),
   readFile: (path) => readFile(path, 'utf8'),
   readBinaryFile: (path) => readFile(path),
   readStdin: () => readStreamText(process.stdin),
+  persistRunRequest,
   writeDownload,
   log: (...args) => console.log(...args),
   warn: (...args) => console.warn(...args),
@@ -2230,6 +2257,24 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     const prompt = waiting ? undefined : await readPrompt(options, deps)
     if (!waiting && !prompt) throw new CliUsageError('Prompt is required.')
     const requestId = options.requestId ?? (waiting ? undefined : randomUUID())
+    let recoveryFile
+    if (!waiting && options.requestId === undefined) {
+      try {
+        recoveryFile = await deps.persistRunRequest({
+          profile: client.configRoot ?? options.configRoot,
+          requestId,
+          projectId,
+          sessionId: options.session
+        })
+      } catch {
+        const { AgentError } = await import('./agent-adapter.mjs')
+        throw new AgentError('recovery_record_failed', {
+          message: 'Could not save the request in the selected profile. No research was submitted.',
+          owner: 'deployment',
+          next: [{ action: 'check_profile', profile: client.configRoot ?? options.configRoot }]
+        })
+      }
+    }
     const waitStartedAt = Date.now()
     const remainingTimeout = () => {
       if (options.timeoutMs === undefined) return undefined
@@ -2367,7 +2412,9 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     } catch (error) {
       if (error && typeof error === 'object' && requestId) {
         error.requestId = requestId
-        error.message += ` Request: ${requestId}. Query: open-science run status --request-id ${requestId}.`
+        if (recoveryFile) error.recoveryFile = recoveryFile
+        const profile = client.configRoot ? ` --profile ${JSON.stringify(client.configRoot)}` : ''
+        error.message += ` Request: ${requestId}. Query: open-science run status --request-id ${requestId}${profile}.`
       }
       if (
         error &&
@@ -2412,6 +2459,9 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
         notice: 'Submitted, not completed. Exiting the App may interrupt this work.',
         next: ['run', 'status', result.id]
       }
+    }
+    if (recoveryFile && (options.json || options.jsonl)) {
+      result = { ...result, requestId, recoveryFile }
     }
     if (options.json || options.jsonl) outputValue(result, options, deps)
     else if (result.status === 'completed') deps.log(result.output || `Run completed: ${result.id}`)
@@ -2473,6 +2523,7 @@ export const reportCliError = (error, argv = process.argv.slice(2), dependencies
           ...(error?.requestId ? { requestId: error.requestId } : {}),
           ...(error?.completionStatus ? { completionStatus: error.completionStatus } : {}),
           ...(error?.runId ? { runId: error.runId } : {}),
+          ...(error?.recoveryFile ? { recoveryFile: error.recoveryFile } : {}),
           ...(error?.code === 'startup_unconfirmed'
             ? {
                 configRoot: error.configRoot,

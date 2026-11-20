@@ -1360,6 +1360,12 @@ class TaskRunner {
     if (request.sessionId && !existing) {
       throw new TaskRunnerError('session_not_found', `Session not found: ${request.sessionId}`)
     }
+    if (existing && existing.projectId !== project.id) {
+      throw new TaskRunnerError(
+        'session_project_mismatch',
+        `Session ${existing.id} does not belong to project ${project.id}.`
+      )
+    }
     if (existing?.packageOrigin) {
       throw new TaskRunnerError(
         'session_read_only',
@@ -1368,12 +1374,6 @@ class TaskRunner {
     }
     if (existing?.archivedAt !== undefined) {
       throw new TaskRunnerError('session_archived', archiveAvailabilityMessage('session-archived'))
-    }
-    if (existing && existing.projectId !== project.id) {
-      throw new TaskRunnerError(
-        'invalid_request',
-        `Session ${existing.id} does not belong to project ${project.id}.`
-      )
     }
     if (
       existing &&

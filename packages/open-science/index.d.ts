@@ -706,6 +706,10 @@ export class OpenScienceClient {
   getSubmission(requestId: string, options?: RequestOptions): Promise<Submission>
   waitForSubmission(
     requestId: string,
+    options: RequestOptions & { pollIntervalMs?: number; returnReceipt: true }
+  ): Promise<Submission>
+  waitForSubmission(
+    requestId: string,
     options?: RequestOptions & { pollIntervalMs?: number }
   ): Promise<Run>
   startRun(

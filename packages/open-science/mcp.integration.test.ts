@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -51,7 +51,8 @@ async function cliError(
 }
 
 async function resourceAgents(
-  handle: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
+  handle: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
+  taskCapabilities: string[] = []
 ) {
   const profile = await mkdtemp(join(tmpdir(), 'osci-agent-resources-'))
   cleanup.push(() => rm(profile, { recursive: true, force: true }))
@@ -63,7 +64,7 @@ async function resourceAgents(
     }
     response.setHeader('content-type', 'application/json')
     if (request.url === '/api/bootstrap') {
-      response.end(JSON.stringify({ taskCapabilities: [] }))
+      response.end(JSON.stringify({ taskCapabilities }))
       return
     }
     void Promise.resolve(handle(request, response)).catch(() => response.writeHead(500).end())
@@ -93,6 +94,7 @@ async function resourceAgents(
     '--json'
   ]
   return {
+    profile,
     async cli(name: string, args: Record<string, unknown> = {}) {
       return JSON.parse((await runCli(cliArgs(name), JSON.stringify(args))).stdout) as {
         result: unknown
@@ -104,6 +106,174 @@ async function resourceAgents(
       cliError(cliArgs(name), JSON.stringify(args))
   }
 }
+
+it('recovers the original study after the initial submission response is lost', async () => {
+  const args = { requestId: 'study-request', projectId: 'p1', prompt: 'Review these results.' }
+  const receipt = { requestId: args.requestId, status: 'accepted', runId: 'run-1', createdAt: 1 }
+  let accepted = false
+  let writes = 0
+  const agent = await resourceAgents(
+    async (request, response) => {
+      if (request.url === '/api/v1/run-submissions/study-request') {
+        if (request.method === 'PUT') {
+          let body = ''
+          for await (const chunk of request) body += chunk
+          const input = JSON.parse(body)
+          if (
+            input.project === 'p1' &&
+            input.prompt === args.prompt &&
+            input.sessionId === undefined
+          ) {
+            accepted = true
+            writes += 1
+            response.destroy()
+            return
+          }
+        } else if (request.method === 'GET' && accepted) {
+          response.end(JSON.stringify({ data: receipt }))
+          return
+        }
+      }
+      response.writeHead(404).end(JSON.stringify({ error: { code: 'submission_not_found' } }))
+    },
+    ['durable-submissions']
+  )
+
+  for (const invalid of [
+    { projectId: 'p1', prompt: 'Missing request' },
+    { ...args, requestId: '../invalid' },
+    { requestId: 'no-project', prompt: 'Missing Project' },
+    { ...args, permissionProfile: 'full' }
+  ]) {
+    const rejected = await agent.mcp('start_run', invalid)
+    expect(rejected.isError).toBe(true)
+    expect(rejected.structuredContent).toMatchObject({ error: { code: 'invalid_request' } })
+    expect(rejected.structuredContent).toEqual({
+      error: (await agent.cliError('start_run', invalid)).error
+    })
+  }
+  const lost = await agent.mcp('start_run', args)
+  expect(lost.isError).toBe(true)
+  expect(lost.structuredContent).toMatchObject({
+    error: {
+      requestId: args.requestId,
+      completionStatus: 'submission-unconfirmed',
+      retryable: false,
+      next: [{ action: 'get_submission', requestId: args.requestId }]
+    }
+  })
+  const key = { requestId: args.requestId }
+  expect(await agent.cli('get_submission', key)).toEqual({ result: receipt })
+  const reconnected = await connectMcp(agent.profile)
+  expect(
+    (await reconnected.callTool({ name: 'get_submission', arguments: key })).structuredContent
+  ).toEqual({ result: receipt })
+  expect(writes).toBe(1)
+})
+
+it('bounds receipt and Run waiting without cancelling or issuing another submission', async () => {
+  const receipt: { requestId: string; status: string; createdAt: number; runId?: string } = {
+    requestId: 'wait-request',
+    status: 'pending',
+    createdAt: 1
+  }
+  const run = { id: 'run-1', projectId: 'p1', sessionId: 's1', status: 'running' }
+  const writes: string[] = []
+  const agent = await resourceAgents(
+    (request, response) => {
+      if (request.method !== 'GET') writes.push(request.url!)
+      if (request.url === '/api/v1/run-submissions/wait-request') {
+        response.end(JSON.stringify({ data: receipt }))
+      } else if (request.url === '/api/v1/runs/run-1') {
+        response.end(JSON.stringify({ data: run }))
+      } else if (request.url === '/api/v1/runs/run-1/cancel' && request.method === 'POST') {
+        run.status = 'cancelled'
+        response.end(JSON.stringify({ data: run }))
+      } else {
+        response.writeHead(404).end()
+      }
+    },
+    ['durable-submissions']
+  )
+  const described = await agent.cli('describe_capability', { name: 'wait_run' })
+  expect(described.result).toMatchObject({
+    inputSchema: { properties: { timeoutMs: { default: 10000, maximum: 30000 } } }
+  })
+  for (const [name, reference, action] of [
+    ['wait_submission', { requestId: receipt.requestId }, 'get_submission'],
+    ['wait_run', { runId: run.id }, 'get_run']
+  ] as const) {
+    const args = { ...reference, timeoutMs: 120 }
+    const result = await agent.mcp(name, args)
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent).toMatchObject({
+      error: { code: 'timeout', ...args, next: [{ action, ...reference }] }
+    })
+    expect(result.structuredContent).toEqual({ error: (await agent.cliError(name, args)).error })
+  }
+  receipt.status = 'accepted'
+  receipt.runId = run.id
+  expect(await agent.cli('wait_submission', { requestId: receipt.requestId })).toEqual({
+    result: { timeoutMs: 10000, receipt }
+  })
+  expect(writes).toEqual([])
+  expect(await agent.cli('cancel_run', { runId: run.id })).toEqual({
+    result: { ...run, status: 'cancelled' }
+  })
+  expect((await agent.mcp('wait_run', { runId: run.id })).structuredContent).toEqual({
+    result: { timeoutMs: 10000, run }
+  })
+  expect(writes).toEqual(['/api/v1/runs/run-1/cancel'])
+})
+
+it('persists a generated CLI request before it can be admitted and refuses to submit without the record', async () => {
+  let requestId: string | undefined
+  let recordAtAdmission: unknown
+  let writes = 0
+  const agent = await resourceAgents(
+    async (request, response) => {
+      if (request.url === '/api/v1/projects') {
+        response.end(JSON.stringify({ data: [{ id: 'p1', name: 'Study' }] }))
+      } else if (request.method === 'PUT' && request.url?.startsWith('/api/v1/run-submissions/')) {
+        writes += 1
+        requestId = request.url.split('/').at(-1)!
+        recordAtAdmission = JSON.parse(
+          await readFile(join(agent.profile, 'agent-run-requests', `${requestId}.json`), 'utf8')
+        )
+        response.destroy()
+      } else if (request.url === `/api/v1/run-submissions/${requestId}`) {
+        response.end(JSON.stringify({ data: { requestId, status: 'accepted', runId: 'run-1' } }))
+      } else {
+        response.writeHead(404).end()
+      }
+    },
+    ['durable-submissions']
+  )
+  const records = join(agent.profile, 'agent-run-requests')
+  const args = [
+    'run',
+    '--profile',
+    agent.profile,
+    '--project',
+    'p1',
+    '--prompt',
+    'private study',
+    '--json'
+  ]
+  const lost = await cliError(args)
+  expect(lost.error).toMatchObject({ requestId, completionStatus: 'submission-unconfirmed' })
+  expect(await readdir(records)).toEqual([`${requestId}.json`])
+  expect(recordAtAdmission).toEqual({ requestId, projectId: 'p1', profile: agent.profile })
+  expect(await agent.cli('get_submission', { requestId })).toMatchObject({
+    result: { requestId, runId: 'run-1' }
+  })
+
+  await rm(records, { recursive: true })
+  await writeFile(records, 'not a directory')
+  const unwritable = await cliError(args)
+  expect(unwritable.error).toMatchObject({ code: 'recovery_record_failed', retryable: false })
+  expect(writes).toBe(1)
+})
 
 it('creates and discovers explicit Project IDs through both Agent entry points', async () => {
   const projects = [{ id: 'p1', name: 'Original', updatedAt: 1 }]
@@ -747,6 +917,7 @@ it('serves a real stdio run/poll/artifact workflow through authenticated HTTP an
   const allowStartup = Promise.withResolvers<void>()
   const token = 'mcp-fixture-secret'
   const run = { id: 'r1', sessionId: 's1', projectId: 'p1', status: 'running' }
+  const receipt = { requestId: 'study-001', runId: run.id, status: 'accepted', createdAt: 1 }
   const http = createServer(async (req, res) => {
     if (req.headers.authorization !== `Bearer ${token}`) {
       res.writeHead(401).end()
@@ -759,11 +930,15 @@ it('serves a real stdio run/poll/artifact workflow through authenticated HTTP an
     if (req.url === '/api/bootstrap') {
       startupRequested.resolve()
       await allowStartup.promise
-      res.end('{}')
+      res.end(JSON.stringify({ taskCapabilities: ['durable-submissions'] }))
       return
     }
     const data =
-      req.url === '/api/v1/sessions/s1/artifacts' ? [{ id: 'a1', name: 'report.md' }] : run
+      req.url === '/api/v1/sessions/s1/artifacts'
+        ? [{ id: 'a1', name: 'report.md' }]
+        : req.url === '/api/v1/run-submissions/study-001'
+          ? receipt
+          : run
     res.end(JSON.stringify({ data }))
   })
   http.listen(0, '127.0.0.1')
@@ -803,23 +978,36 @@ it('serves a real stdio run/poll/artifact workflow through authenticated HTTP an
   allowStartup.resolve()
   const blocked = await client.callTool({
     name: 'start_run',
-    arguments: { projectId: 'p1', prompt: 'Research' }
+    arguments: { requestId: receipt.requestId, projectId: 'p1', prompt: 'Research' }
   })
   expect(blocked.isError).toBe(true)
   expect(blocked.content).toEqual([
     { type: 'text', text: expect.stringContaining('startup_unconfirmed') }
   ])
-  expect(requests.some((request) => request.method === 'POST')).toBe(false)
+  expect(requests.every((request) => request.method === 'GET')).toBe(true)
   await rm(ownerPath)
   const started = await client.callTool({
     name: 'start_run',
-    arguments: { projectId: 'p1', prompt: 'Research' }
+    arguments: {
+      requestId: receipt.requestId,
+      projectId: 'p1',
+      sessionId: 's1',
+      prompt: 'Continue',
+      model: null,
+      turnIntent: 'plan-first'
+    }
   })
-  expect(started.structuredContent).toEqual({ result: run })
-  expect(requests.find((request) => request.method === 'POST')).toEqual({
-    url: '/api/v1/runs',
-    method: 'POST',
-    body: { project: 'p1', prompt: 'Research' }
+  expect(started.structuredContent).toEqual({ result: receipt })
+  expect(requests.find((request) => request.method === 'PUT')).toEqual({
+    url: '/api/v1/run-submissions/study-001',
+    method: 'PUT',
+    body: {
+      project: 'p1',
+      sessionId: 's1',
+      prompt: 'Continue',
+      agentConfiguration: { model: null },
+      turnIntent: 'plan-first'
+    }
   })
   run.status = 'completed'
   expect(

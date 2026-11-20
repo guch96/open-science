@@ -479,7 +479,12 @@ export class OpenScienceClient {
         body: request
       })
     } catch (error) {
-      error.requestId = requestId
+      if (error && typeof error === 'object') {
+        error.requestId = requestId
+        if (error.status === undefined || error.status >= 500) {
+          error.completionStatus = 'submission-unconfirmed'
+        }
+      }
       throw error
     }
   }
@@ -488,7 +493,10 @@ export class OpenScienceClient {
     return this.request(`/api/v1/run-submissions/${encodeURIComponent(requestId)}`, options)
   }
 
-  async waitForSubmission(requestId, { pollIntervalMs = 250, timeoutMs, signal } = {}) {
+  async waitForSubmission(
+    requestId,
+    { pollIntervalMs = 250, timeoutMs, signal, returnReceipt = false } = {}
+  ) {
     if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0))
       throw new TypeError('timeoutMs must be a positive number.')
     if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0)
@@ -508,12 +516,16 @@ export class OpenScienceClient {
           throw new OpenScienceApiError('Submission identity mismatch.', {
             code: 'invalid_response'
           })
-        if (receipt.status === 'accepted' && receipt.runId)
+        if (receipt.status === 'accepted' && receipt.runId) {
+          if (returnReceipt) return receipt
           return await this.getRun(receipt.runId, beforeDeadline(options, deadline))
-        if (receipt.status === 'failed' || receipt.status === 'interrupted')
+        }
+        if (receipt.status === 'failed' || receipt.status === 'interrupted') {
+          if (returnReceipt) return receipt
           throw new OpenScienceApiError(receipt.error?.message ?? 'Submission failed.', {
             code: receipt.error?.code ?? 'submission_failed'
           })
+        }
         if (receipt.status !== 'pending')
           throw new OpenScienceApiError('Unknown submission status.', { code: 'invalid_response' })
         const sleepOptions = beforeDeadline({ timeoutMs: pollIntervalMs }, deadline)

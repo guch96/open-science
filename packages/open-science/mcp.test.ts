@@ -58,25 +58,6 @@ const cases = [
     'PATCH',
     { expectedRevision: 4, memoryEnabled: false }
   ],
-  [
-    'start_run',
-    {
-      projectId: 'p1',
-      sessionId: 's1',
-      prompt: 'Continue',
-      turnIntent: 'plan-first',
-      agentConfiguration: { model: null }
-    },
-    '/api/v1/runs',
-    'POST',
-    {
-      project: 'p1',
-      sessionId: 's1',
-      prompt: 'Continue',
-      turnIntent: 'plan-first',
-      agentConfiguration: { model: null }
-    }
-  ],
   ['get_run', { runId: 'r/1' }, '/api/v1/runs/r%2F1', 'GET', undefined],
   ['cancel_run', { runId: 'r/1' }, '/api/v1/runs/r%2F1/cancel', 'POST', undefined],
   ['get_plan', { sessionId: 's/1' }, '/api/v1/sessions/s%2F1/plan', 'GET', undefined],
@@ -426,7 +407,7 @@ describe('research MCP tools', () => {
     }
   )
 
-  it('preserves the unattended capability check without submitting unsupported runs', async () => {
+  it('requires durable submission support before submitting any Run', async () => {
     const fetch = vi.fn<(url: string) => Promise<Response>>(async () =>
       Response.json({ taskCapabilities: [] })
     )
@@ -434,10 +415,16 @@ describe('research MCP tools', () => {
     const { client } = await harness(vi.fn(async () => sdk))
     const response = await client.callTool({
       name: 'start_run',
-      arguments: { projectId: 'p1', prompt: 'Go', permissionPrompts: 'none' }
+      arguments: { requestId: 'original-study', projectId: 'p1', prompt: 'Go' }
     })
     expect(response.isError).toBe(true)
-    expect(JSON.stringify(response)).toContain('unsupported_capability')
+    expect(response.structuredContent).toMatchObject({
+      error: {
+        code: 'unsupported_capability',
+        retryable: false,
+        next: [{ action: 'update_service' }]
+      }
+    })
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(fetch.mock.calls[0][0]).toContain('/api/bootstrap')
   })
