@@ -315,6 +315,22 @@ export type Submission = {
 }
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 export type RunFailureCode = 'process_restarted'
+export type NotebookExecution = {
+  status: 'unconfirmed' | 'preparing' | 'running' | 'completed' | 'failed' | 'waiting_for_user'
+  projectId: string
+  sessionId: string
+  notebookRunId?: string
+  promptMessageId?: string
+  messageBranchId?: string
+  kernelDispatched?: boolean
+  reasonCode?: string
+  refusalId?: string
+  continuedFromRefusalId?: string
+  owner?: 'user'
+  requiresUser?: true
+  retryable?: false
+  next?: { action: 'continue_notebook_in_app'; message: string }
+}
 export type RunProgressPhase =
   | 'accepted'
   | 'session-ready'
@@ -430,6 +446,8 @@ export type Run = {
   output?: string
   error?: string
   failureCode?: RunFailureCode
+  /** Notebook evidence scoped to this research turn, independent of the outer Run status. */
+  execution?: NotebookExecution
   artifacts: Artifact[]
   attention?: RunAttention
   review?: {
@@ -515,6 +533,8 @@ export type Session = {
   readOnly?: boolean
   packageOrigin?: SessionOrigin
   forkOrigin?: SessionOrigin
+  /** Live Notebook intent, with evidence scoped to its prompt when available. */
+  execution?: NotebookExecution
 }
 
 export type SessionConfiguration = {

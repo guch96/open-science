@@ -73,6 +73,23 @@ export type TaskRunStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
 export type TaskRunFailureCode = 'process_restarted'
 
+export type TaskNotebookExecution = {
+  status: 'unconfirmed' | 'preparing' | 'running' | 'completed' | 'failed' | 'waiting_for_user'
+  projectId: string
+  sessionId: string
+  notebookRunId?: string
+  promptMessageId?: string
+  messageBranchId?: string
+  kernelDispatched?: boolean
+  reasonCode?: string
+  refusalId?: string
+  continuedFromRefusalId?: string
+  owner?: 'user'
+  requiresUser?: true
+  retryable?: false
+  next?: { action: 'continue_notebook_in_app'; message: string }
+}
+
 export type TaskRunProgressPhase =
   | 'accepted'
   | 'session-ready'
@@ -152,6 +169,8 @@ export type TaskRun = {
   output?: string
   error?: string
   failureCode?: TaskRunFailureCode
+  /** Notebook evidence for this research turn, independent of the outer Run status. */
+  execution?: TaskNotebookExecution
   artifacts: ArtifactFile[]
   attention?: TaskRunAttention
   review?: TaskRunReview
@@ -178,6 +197,8 @@ export type TaskSessionSummary = {
   readOnly: boolean
   packageOrigin?: TaskSessionOrigin
   forkOrigin?: TaskSessionOrigin
+  /** Live Notebook intent, with evidence scoped to its prompt when available. */
+  execution?: TaskNotebookExecution
 }
 
 export type TaskSessionOrigin = Omit<

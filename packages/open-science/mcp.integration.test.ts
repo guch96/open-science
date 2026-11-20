@@ -236,6 +236,44 @@ it('bounds receipt and Run waiting without cancelling or issuing another submiss
   expect(writes).toEqual(['/api/v1/runs/run-1/cancel'])
 })
 
+it('returns the stopped Notebook and user action without waiting for the outer Run to finish', async () => {
+  const run = {
+    id: 'run-stopped',
+    projectId: 'p1',
+    sessionId: 's1',
+    status: 'running',
+    execution: {
+      status: 'waiting_for_user',
+      projectId: 'p1',
+      sessionId: 's1',
+      reasonCode: 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION',
+      refusalId: 'refusal-1',
+      messageBranchId: 'branch-1',
+      requiresUser: true,
+      retryable: false,
+      next: { action: 'continue_notebook_in_app', message: 'Choose Continue Notebook work.' }
+    }
+  }
+  const agent = await resourceAgents((request, response) => {
+    if (request.method === 'GET' && request.url === `/api/v1/runs/${run.id}`) {
+      response.end(JSON.stringify({ data: run }))
+    } else response.writeHead(404).end()
+  })
+  const args = { runId: run.id, timeoutMs: 250 }
+  const expected = { result: { timeoutMs: args.timeoutMs, run } }
+  const result = await agent.mcp('wait_run', args)
+  expect(result.isError).not.toBe(true)
+  expect(result.structuredContent).toEqual(expected)
+  expect(await agent.cli('wait_run', args)).toEqual(expected)
+  const listed = (await agent.mcp('list_capabilities', { group: 'research' }))
+    .structuredContent as {
+    result: { groups: { research: { name: string }[] } }
+  }
+  expect(listed.result.groups.research.map(({ name }) => name)).not.toContain(
+    'continue_notebook_execution'
+  )
+})
+
 it('persists a generated CLI request before it can be admitted and refuses to submit without the record', async () => {
   let requestId: string | undefined
   let recordAtAdmission: unknown
