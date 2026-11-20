@@ -1556,6 +1556,11 @@ const computeHostsPatch = (options, current = { enabled: [], selected: [] }) => 
   return { enabled, selected }
 }
 
+const agentComputeHostFields = ({ enabled, selected }) => ({
+  enabledComputeHostIds: enabled,
+  selectedComputeHostIds: selected
+})
+
 const modelRouting = (options, prefix) => {
   const inherit = options[`${prefix}Inherit`]
   const providerId = options[`${prefix}Provider`]
@@ -1625,6 +1630,14 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   const { command, subcommand, positionals = [], options } = parsed
   if (command === 'doctor' || command === 'tools') return runAgentCommand(parsed, deps)
   const client = await deps.connect({ configRoot: options.configRoot })
+  const call = async (name, input = {}) => {
+    const { invokeAgentCapability } = await import('./agent-adapter.mjs')
+    return invokeAgentCapability(name, input, {
+      exposure: 'cli',
+      configRoot: options.configRoot,
+      connect: async () => client
+    })
+  }
 
   if (command === 'runtime' && subcommand === 'list') {
     const runtimes = await client.listRuntimes()
@@ -1734,7 +1747,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   }
 
   if (command === 'project' && subcommand === 'list') {
-    outputValue(await client.listProjects(), options, deps)
+    outputValue(await call('list_projects'), options, deps)
     return
   }
   if (command === 'project' && subcommand === 'create') {
@@ -1742,7 +1755,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!name) throw new CliUsageError('Project name is required.')
     const agentContext = await readAgentContext(options, deps)
     outputValue(
-      await client.createProject({
+      await call('create_project', {
         name,
         description: options.description,
         ...(agentContext === undefined ? {} : { agentContext })
@@ -1765,11 +1778,14 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     }
     const project = await resolveCliProject(client, selector)
     outputValue(
-      await client.updateProject(project.id, {
+      await call('update_project', {
+        projectId: project.id,
         expectedUpdatedAt: project.updatedAt,
         ...(options.name === undefined ? {} : { name: options.name }),
         ...(options.description === undefined ? {} : { description: options.description }),
-        ...(agentContext === undefined ? {} : { agentContext })
+        ...(agentContext === undefined
+          ? {}
+          : { agentContext: agentContext === '' ? null : agentContext })
       }),
       options,
       deps
@@ -1781,7 +1797,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     const selector = positionals.slice(1).join(' ').trim()
     if (!selector) throw new CliUsageError('Project id or name is required.')
     const project = await resolveCliProject(client, selector)
-    const current = await client.getProjectSessionDefaults(project.id)
+    const current = await call('get_project_session_defaults', { projectId: project.id })
     if (action === 'show') {
       outputValue(current, options, deps)
       return
@@ -1818,11 +1834,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     )
     const computeHosts = computeHostsPatch(options, current.configured.computeHosts)
     const patch = {
-      ...(options.clearProvider
-        ? { agentConfiguration: null }
-        : agent
-          ? { agentConfiguration: agent }
-          : {}),
+      ...(options.clearProvider ? { clearAgentConfiguration: true } : agent),
       ...(options.clearApprovalProfile
         ? { permissionProfile: null }
         : options.approvalProfile !== undefined
@@ -1848,17 +1860,18 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
         : options.specialist !== undefined
           ? { specialistId: options.specialist }
           : {}),
-      ...(computeHosts !== undefined
-        ? { computeHosts: options.clearComputeHosts ? null : computeHosts }
-        : {})
+      ...(options.clearComputeHosts
+        ? { clearComputeHosts: true }
+        : computeHosts && agentComputeHostFields(computeHosts))
     }
     if (Object.keys(patch).length === 0) {
       throw new CliUsageError('Project Session defaults update requires at least one field.')
     }
     outputValue(
-      await client.updateProjectSessionDefaults(project.id, {
+      await call('update_project_session_defaults', {
+        projectId: project.id,
         expectedUpdatedAt: current.updatedAt,
-        patch
+        ...patch
       }),
       options,
       deps
@@ -1868,7 +1881,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   if (command === 'session' && subcommand === 'status') {
     const sessionId = positionals[0]
     if (!sessionId) throw new CliUsageError('Session id is required.')
-    outputValue(await client.getSession(sessionId), options, deps)
+    outputValue(await call('get_session', { sessionId }), options, deps)
     return
   }
   if (command === 'session' && subcommand === 'config') {
@@ -1876,17 +1889,15 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     const sessionId = positionals[1]
     if (!sessionId) throw new CliUsageError('Session id is required.')
     if (action === 'show') {
-      outputValue(await client.getSessionConfiguration(sessionId), options, deps)
+      outputValue(await call('get_session_configuration', { sessionId }), options, deps)
       return
     }
     if (action !== 'update') throw new CliUsageError('Use session config show or update.')
     if (options.revision === undefined) throw new CliUsageError('--revision is required.')
-    const current = await client.getSessionConfiguration(sessionId)
+    const current = await call('get_session_configuration', { sessionId })
     const computeHosts = computeHostsPatch(options, current.persisted.computeHosts)
     const patch = {
-      ...(agentConfigurationPatch(options)
-        ? { agentConfiguration: agentConfigurationPatch(options) }
-        : {}),
+      ...agentConfigurationPatch(options),
       ...(options.approvalProfile !== undefined
         ? { permissionProfile: options.approvalProfile }
         : {}),
@@ -1895,13 +1906,14 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
         : {}),
       ...(options.memoryEnabled !== undefined ? { memoryEnabled: options.memoryEnabled } : {}),
       ...(options.delegation !== undefined ? { delegationPolicy: options.delegation } : {}),
-      ...(computeHosts !== undefined ? { computeHosts } : {})
+      ...(computeHosts && agentComputeHostFields(computeHosts))
     }
     if (Object.keys(patch).length === 0) {
       throw new CliUsageError('Session configuration update requires at least one field.')
     }
     outputValue(
-      await client.updateSessionConfiguration(sessionId, {
+      await call('update_session_configuration', {
+        sessionId,
         expectedRevision: options.revision,
         ...patch
       }),
@@ -2048,10 +2060,10 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   }
   if (command === 'literature' && subcommand === 'search') {
     const query = positionals.join(' ').trim()
-    const page = await client.searchLiterature({
+    const page = await call('search_literature', {
       ...(query ? { query } : {}),
       ...(options.project ? { projectId: await resolveCliProjectId(client, options.project) } : {}),
-      ...(options.limit === undefined ? {} : { limit: options.limit }),
+      limit: options.limit ?? 50,
       ...(options.offset === undefined ? {} : { offset: options.offset })
     })
     if (options.json) deps.log(JSON.stringify(page))
@@ -2065,19 +2077,19 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   if (command === 'literature' && subcommand === 'show') {
     const itemId = positionals[0]
     if (!itemId) throw new CliUsageError('Literature item id is required.')
-    const item = await client.getLiteratureItem(itemId)
+    const item = await call('get_literature_item', { itemId })
     if (options.json) deps.log(JSON.stringify(item))
     else deps.log(`${item.id}\t${item.item?.title ?? ''}`.trimEnd())
     return
   }
   if (command === 'literature' && subcommand === 'styles') {
-    outputValue(await client.listCitationStyles(), options, deps)
+    outputValue(await call('list_citation_styles'), options, deps)
     return
   }
   if (command === 'literature' && subcommand === 'format') {
     if (!positionals.length) throw new CliUsageError('At least one literature item id is required.')
     if (!options.style) throw new CliUsageError('--style is required.')
-    const result = await client.formatReferences({
+    const result = await call('format_references', {
       itemIds: positionals,
       styleId: options.style,
       locale: options.locale ?? 'en-US'
@@ -2090,7 +2102,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     const identifier = positionals[0]
     if (!identifier)
       throw new CliUsageError('A DOI, pmid:, pmcid: or arxiv: identifier is required.')
-    deps.log(JSON.stringify(await client.getReferenceMetadata(identifier)))
+    deps.log(JSON.stringify(await call('get_reference_metadata', { identifier })))
     return
   }
   if (command === 'literature' && subcommand === 'import') {
@@ -2098,7 +2110,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!source) throw new CliUsageError('A reference file path or - for stdin is required.')
     const content = source === '-' ? await deps.readStdin() : await deps.readFile(source)
     if (!content.trim()) throw new CliUsageError('Reference import content is empty.')
-    const result = await client.importLiterature({
+    const result = await call('import_literature', {
       mode: options.commit ? 'commit' : 'preview',
       content,
       ...(options.duplicates ? { duplicatePolicy: options.duplicates } : {}),
@@ -2121,7 +2133,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     const identifier = positionals[0]
     if (!identifier)
       throw new CliUsageError('A DOI, pmid:, pmcid: or arxiv: identifier is required.')
-    outputValue(await client.createLiteratureItem(identifier), options, deps)
+    outputValue(await call('create_literature_item', { identifier }), options, deps)
     return
   }
   if (command === 'literature' && (subcommand === 'link' || subcommand === 'unlink')) {
@@ -2129,7 +2141,11 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!options.project) throw new CliUsageError('--project is required.')
     const projectId = await resolveCliProjectId(client, options.project)
     outputValue(
-      await client.setProjectLiterature(projectId, positionals, subcommand === 'link'),
+      await call('update_project_literature', {
+        projectId,
+        itemIds: positionals,
+        included: subcommand === 'link'
+      }),
       options,
       deps
     )
@@ -2141,7 +2157,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
       const name = rest.join(' ').trim()
       if (!name) throw new CliUsageError('Collection name is required.')
       outputValue(
-        await client.createLiteratureCollection({
+        await call('create_literature_collection', {
           name,
           ...(options.description === undefined ? {} : { description: options.description }),
           ...(options.parent === undefined ? {} : { parentId: options.parent })
@@ -2157,7 +2173,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!collectionId || !itemIds.length)
       throw new CliUsageError('Collection id and at least one literature item id are required.')
     outputValue(
-      await client.setCollectionLiterature(collectionId, itemIds, action === 'add'),
+      await call('update_collection_items', { collectionId, itemIds, included: action === 'add' }),
       options,
       deps
     )
@@ -2168,16 +2184,16 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!['unread', 'reading', 'read'].includes(readingStatus))
       throw new CliUsageError('Reading status must be unread, reading, or read.')
     if (!itemIds.length) throw new CliUsageError('At least one literature item id is required.')
-    outputValue(await client.setLiteratureReadingStatus(itemIds, readingStatus), options, deps)
+    outputValue(await call('set_reading_status', { itemIds, readingStatus }), options, deps)
     return
   }
   if (command === 'literature' && (subcommand === 'trash' || subcommand === 'restore')) {
     if (!positionals.length) throw new CliUsageError('At least one literature item id is required.')
     outputValue(
-      await client.setLiteratureLifecycle(
-        positionals,
-        subcommand === 'trash' ? 'deleted' : 'active'
-      ),
+      await call('set_literature_lifecycle', {
+        itemIds: positionals,
+        state: subcommand === 'trash' ? 'deleted' : 'active'
+      }),
       options,
       deps
     )

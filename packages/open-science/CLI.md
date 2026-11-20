@@ -1071,8 +1071,10 @@ service on the same machine with access to the input and delivery files.
 | `list_projects`                | List projects and IDs                                    |
 | `create_project`               | Create a persistent project                              |
 | `update_project`               | Update project metadata and Agent Context                |
+| `get_project_session_defaults` | Read defaults for new Sessions and the Project revision  |
+| `update_project_session_defaults` | Update defaults for new Sessions                       |
 | `list_sessions`                | List sessions, optionally by project                     |
-| `get_session`                  | Read session information/status, not a full transcript   |
+| `get_session`                  | Read Session status and import or Fork provenance        |
 | `get_session_configuration`    | Read session configuration and revision                  |
 | `update_session_configuration` | Update settings with `expectedRevision`                  |
 | `start_run`                    | Submit a prompt and return a run ID                      |
@@ -1103,6 +1105,23 @@ same result on stdout or the same error with `exitCode` on stderr. An `unconfirm
 status means the original write may already have taken effect; query the original state before
 deciding whether to repeat it. Error output excludes raw service messages and credentials.
 
+Use the exact `projectId` from `list_projects` or `create_project` before submitting research.
+Use `list_sessions` with that Project ID to choose an existing Session, then pass both IDs to
+`get_session` to verify the association. The resource tools never choose a Project or Session for
+you. To start a new Session, submit research with the Project ID and omit `sessionId`.
+
+For `update_project`, use the Project's latest `updatedAt` as `expectedUpdatedAt`. Use the
+timestamp from `get_project_session_defaults` when updating defaults and the `revision` from
+`get_session_configuration` as `expectedRevision` when updating a Session. Configuration input
+uses flat fields such as `providerId`, `model`, and `reasoningEffort`; pass both
+`enabledComputeHostIds` and `selectedComputeHostIds` when replacing Compute Hosts. Session reads
+report persisted and effective settings; Project defaults only apply when creating a Session.
+Configuration reads and writes accept `projectId` to verify the Session belongs to that Project.
+
+`get_session` reports `readOnly: true` and `packageOrigin` for an imported Session. It can be
+inspected but cannot be configured or resumed. A writable Fork reports `forkOrigin`. A missing
+`readOnly` on an older service does not establish that a Session is writable.
+
 Runs use the service's configured framework and authorization defaults. `start_run` accepts
 existing session, provider/model, permission, skill, specialist, compute-host, memory, review,
 delegation and plan-first options; it does not change the global framework. A run can require
@@ -1112,8 +1131,8 @@ be combined with `turnIntent: "plan-first"`. Plan approval/rejection requires th
 revision from `get_plan`. Configuration updates require the revision from
 `get_session_configuration`.
 
-`search_literature` returns at most 20 records per page and `format_references` defaults to
-`en-US`. `get_reference_metadata` and `create_literature_item` contact external registries
+`search_literature` defaults to 20 records per page and accepts a `limit` from 1 to 100.
+`format_references` defaults to `en-US`. `get_reference_metadata` and `create_literature_item` contact external registries
 through the service, so they are marked open-world. `import_literature` takes reference text or
 item objects in the call, not a file path; call it with `mode: "preview"` before `"commit"`. If
 its Project link fails after commit, the error includes `itemIds`; link them with

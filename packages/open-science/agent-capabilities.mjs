@@ -21,8 +21,7 @@ const agentConfiguration = z.strictObject({
   model: id('Model identifier; null follows the provider default.').nullable().optional(),
   reasoningEffort: z.enum(['default', 'low', 'medium', 'high', 'xhigh', 'max']).optional()
 })
-const sessionSettings = {
-  agentConfiguration: agentConfiguration.optional(),
+const sessionPreferences = {
   permissionProfile: z
     .enum(['ask', 'auto', 'full'])
     .describe(
@@ -32,6 +31,58 @@ const sessionSettings = {
   autoReviewEnabled: z.boolean().optional(),
   memoryEnabled: z.boolean().optional(),
   delegationPolicy: z.enum(['allow', 'deny']).optional()
+}
+const sessionSettings = { ...sessionPreferences, agentConfiguration: agentConfiguration.optional() }
+const expectedUpdatedAt = z
+  .number()
+  .int()
+  .positive()
+  .describe('Current updatedAt from the read operation.')
+const hostIds = z.array(id('Compute Host ID.')).optional()
+const hostFields = {
+  enabledComputeHostIds: hostIds.describe(
+    'Supply with selectedComputeHostIds to replace Compute Hosts.'
+  ),
+  selectedComputeHostIds: hostIds.describe(
+    'Supply with enabledComputeHostIds; selected hosts must be enabled.'
+  )
+}
+
+const configurationPatch = ({
+  providerId,
+  model,
+  reasoningEffort,
+  enabledComputeHostIds,
+  selectedComputeHostIds,
+  clearAgentConfiguration,
+  clearComputeHosts,
+  ...patch
+}) => {
+  const agent = { providerId, model, reasoningEffort }
+  const setAgent = Object.values(agent).some((value) => value !== undefined)
+  const setHosts = enabledComputeHostIds !== undefined || selectedComputeHostIds !== undefined
+  if (
+    (clearAgentConfiguration && setAgent) ||
+    (clearComputeHosts && setHosts) ||
+    (setHosts && (enabledComputeHostIds === undefined || selectedComputeHostIds === undefined))
+  ) {
+    throw new OpenScienceApiError('Conflicting or incomplete configuration fields.', {
+      code: 'invalid_request'
+    })
+  }
+  return {
+    ...patch,
+    ...(clearAgentConfiguration
+      ? { agentConfiguration: null }
+      : setAgent
+        ? { agentConfiguration: agent }
+        : {}),
+    ...(clearComputeHosts
+      ? { computeHosts: null }
+      : setHosts
+        ? { computeHosts: { enabled: enabledComputeHostIds, selected: selectedComputeHostIds } }
+        : {})
+  }
 }
 const agentContext = z.string().trim().min(1).max(16000)
 const read = {
@@ -53,8 +104,7 @@ const libraryAdd = { ...libraryWrite, destructiveHint: false }
 
 export const existingMcpCapabilities = []
 
-// Keep existing tool arguments and SDK behavior while they migrate to shared CLI exposure.
-const register = (name, group, description, shape, annotations, invoke, refine) => {
+const addCapability = (exposure, name, group, description, shape, annotations, invoke, refine) => {
   const schema = z.strictObject(shape)
   existingMcpCapabilities.push({
     name,
@@ -62,12 +112,14 @@ const register = (name, group, description, shape, annotations, invoke, refine) 
     description,
     inputSchema: refine ? schema.superRefine(refine) : schema,
     annotations,
-    exposure: { mcp: true },
+    exposure,
     async handler(args, { getClient, signal }) {
       return invoke(await getClient(), args, { signal })
     }
   })
 }
+const register = (...definition) => addCapability({ mcp: true }, ...definition)
+const registerResource = (...definition) => addCapability({ cli: true, mcp: true }, ...definition)
 
 register(
   'list_runtimes',
@@ -77,7 +129,7 @@ register(
   read,
   (client, _args, options) => client.listRuntimes(options)
 )
-register(
+registerResource(
   'list_projects',
   'research',
   'List projects and their IDs before choosing a research destination.',
@@ -85,7 +137,7 @@ register(
   read,
   (client, _args, options) => client.listProjects(options)
 )
-register(
+registerResource(
   'create_project',
   'research',
   'Create a persistent research project. Agent Context applies to future work in this project.',
@@ -97,20 +149,67 @@ register(
   write,
   (client, args, options) => client.createProject(args, options)
 )
-register(
+registerResource(
   'update_project',
   'research',
   'Update a persistent project. Only supplied fields change; null clears Agent Context.',
   {
     projectId,
+    expectedUpdatedAt,
     name: id('New project name.').optional(),
     description: z.string().optional(),
     agentContext: agentContext.nullable().optional()
   },
   write,
-  (client, { projectId, ...patch }, options) => client.updateProject(projectId, patch, options)
+  (client, { projectId, agentContext, ...patch }, options) =>
+    client.updateProject(
+      projectId,
+      {
+        ...patch,
+        ...(agentContext !== undefined ? { agentContext: agentContext ?? '' } : {})
+      },
+      options
+    )
 )
-register(
+registerResource(
+  'get_project_session_defaults',
+  'research',
+  'Read configured defaults for new Task API Sessions in one Project and the current updatedAt.',
+  { projectId },
+  read,
+  (client, args, options) => client.getProjectSessionDefaults(args.projectId, options)
+)
+registerResource(
+  'update_project_session_defaults',
+  'research',
+  'Update defaults for new Task API Sessions in one Project. Use the current updatedAt. Null clears a preference.',
+  {
+    projectId,
+    expectedUpdatedAt,
+    ...agentConfiguration.shape,
+    ...Object.fromEntries(
+      Object.entries(sessionPreferences).map(([key, schema]) => [key, schema.nullable()])
+    ),
+    ...hostFields,
+    specialistId: id('Specialist ID. Null clears the default.').nullable().optional(),
+    clearAgentConfiguration: z
+      .literal(true)
+      .describe('Remove the configured Agent default.')
+      .optional(),
+    clearComputeHosts: z
+      .literal(true)
+      .describe('Remove the configured Compute Host defaults.')
+      .optional()
+  },
+  write,
+  (client, { projectId, expectedUpdatedAt, ...fields }, options) =>
+    client.updateProjectSessionDefaults(
+      projectId,
+      { expectedUpdatedAt, patch: configurationPatch(fields) },
+      options
+    )
+)
+registerResource(
   'list_sessions',
   'research',
   'List sessions, optionally within one project. Use the returned ID to inspect or continue a session.',
@@ -120,40 +219,39 @@ register(
   read,
   (client, args, options) => client.listSessions(args.projectId, options)
 )
-register(
+registerResource(
   'get_session',
   'research',
-  'Read session information and current status. This is not a full conversation transcript.',
-  { sessionId },
+  'Inspect Session identity, status, and import or Fork provenance. Pass projectId to verify ownership.',
+  { sessionId, projectId: projectId.optional() },
   read,
-  (client, args, options) => client.getSession(args.sessionId, options)
+  (client, { sessionId, projectId }, options) =>
+    client.getSession(sessionId, { ...options, projectId })
 )
-register(
+registerResource(
   'get_session_configuration',
   'research',
   'Read current session configuration and revision before changing it.',
-  { sessionId },
+  { sessionId, projectId: projectId.optional() },
   read,
-  (client, args, options) => client.getSessionConfiguration(args.sessionId, options)
+  (client, { sessionId, projectId }, options) =>
+    client.getSessionConfiguration(sessionId, { ...options, projectId })
 )
-register(
+registerResource(
   'update_session_configuration',
   'research',
   'Update persistent session settings using the latest revision. May change model costs and execution permissions; only supplied fields change.',
   {
     sessionId,
+    projectId: projectId.optional(),
     expectedRevision,
-    ...sessionSettings,
-    computeHosts: z
-      .strictObject({
-        enabled: z.array(id('Enabled Compute Host ID.')),
-        selected: z.array(id('Selected Compute Host ID.'))
-      })
-      .optional()
+    ...agentConfiguration.shape,
+    ...sessionPreferences,
+    ...hostFields
   },
   write,
-  (client, { sessionId, ...patch }, options) =>
-    client.updateSessionConfiguration(sessionId, patch, options)
+  (client, { sessionId, ...fields }, options) =>
+    client.updateSessionConfiguration(sessionId, configurationPatch(fields), options)
 )
 register(
   'start_run',
@@ -240,21 +338,20 @@ register(
   read,
   (client, args, options) => client.listArtifacts(args.sessionId, options)
 )
-register(
+registerResource(
   'search_literature',
   'research',
-  'Search Literature library records by title, author, abstract or identifier; omit query to browse. Optionally limit results to one project. Returns at most 20 records per page; pass nextOffset as offset to continue. Does not search external providers or read PDF full text.',
+  'Search Literature library records by title, author, abstract or identifier; omit query to browse. Optionally limit results to one project. Pages default to 20 records; pass nextOffset as offset to continue. Does not search external providers or read PDF full text.',
   {
     query: z.string().trim().min(1).max(2000).optional(),
     projectId: projectId.optional(),
     offset: z.number().int().nonnegative().optional(),
-    limit: z.number().int().min(1).max(20).optional()
+    limit: z.number().int().min(1).max(100).default(20)
   },
   read,
-  (client, { limit = 20, ...request }, options) =>
-    client.searchLiterature({ ...request, limit }, options)
+  (client, request, options) => client.searchLiterature(request, options)
 )
-register(
+registerResource(
   'get_literature_item',
   'research',
   'Read one Literature library record, including bibliographic metadata, attachments and project links.',
@@ -262,7 +359,7 @@ register(
   read,
   (client, args, options) => client.getLiteratureItem(args.itemId, options)
 )
-register(
+registerResource(
   'list_citation_styles',
   'research',
   'List the built-in and imported citation styles available to format_references.',
@@ -270,20 +367,19 @@ register(
   read,
   (client, _args, options) => client.listCitationStyles(options)
 )
-register(
+registerResource(
   'format_references',
   'research',
   'Format Literature library records as bibliography entries and in-text citations in one citation style, with BibTeX and RIS exports. Does not modify records or write files.',
   {
     itemIds: z.array(literatureItemId).min(1).max(200),
     styleId: id('Citation style ID returned by list_citation_styles.'),
-    locale: z.enum(['en-US', 'zh-CN']).optional()
+    locale: z.enum(['en-US', 'zh-CN']).default('en-US')
   },
   read,
-  (client, { locale = 'en-US', ...request }, options) =>
-    client.formatReferences({ ...request, locale }, options)
+  (client, request, options) => client.formatReferences(request, options)
 )
-register(
+registerResource(
   'get_reference_metadata',
   'research',
   'Resolve bibliographic metadata for a DOI (10.x/...), pmid:<n>, pmcid:PMC<n> or arxiv:<id> through external registries. Does not add the record to the library.',
@@ -291,7 +387,7 @@ register(
   { ...read, openWorldHint: true },
   (client, args, options) => client.getReferenceMetadata(args.identifier, options)
 )
-register(
+registerResource(
   'import_literature',
   'research',
   'Import BibTeX, RIS or NBIB text, or item objects, into the Literature library. Call with mode "preview" first to inspect entries, duplicates and warnings without saving; then call "commit" with the same source. duplicatePolicy defaults to reuse. Optionally add committed records to a collection and link them to a project.',
@@ -305,12 +401,19 @@ register(
       .describe('Item objects in the get_literature_item "item" shape.')
       .optional(),
     selectedItemIndexes: z.array(z.number().int().nonnegative()).min(1).max(1000).optional(),
-    duplicatePolicy: z.enum(['reuse', 'separate', 'fill-missing']).optional(),
+    duplicatePolicy: z
+      .enum(['reuse', 'separate', 'fill-missing'])
+      .describe('Commit only; defaults to reuse.')
+      .optional(),
     collectionId: collectionId.optional(),
     projectId: projectId.optional()
   },
   libraryAdd,
-  (client, request, options) => client.importLiterature(request, options),
+  (client, request, options) =>
+    client.importLiterature(
+      request.mode === 'commit' ? { duplicatePolicy: 'reuse', ...request } : request,
+      options
+    ),
   (request, context) => {
     if ((request.content === undefined) === (request.items === undefined))
       context.addIssue({ code: 'custom', message: 'Provide exactly one of content or items.' })
@@ -324,7 +427,7 @@ register(
       })
   }
 )
-register(
+registerResource(
   'create_literature_item',
   'research',
   'Add one record to the Literature library from a DOI, pmid:<n>, pmcid:PMC<n> or arxiv:<id>. Metadata is resolved through external registries; an existing record with the same identifier is reused.',
@@ -332,7 +435,7 @@ register(
   { ...libraryAdd, idempotentHint: true, openWorldHint: true },
   (client, args, options) => client.createLiteratureItem(args.identifier, options)
 )
-register(
+registerResource(
   'update_project_literature',
   'research',
   'Link Literature records to a project, or unlink them with included false. Unlinking does not delete records.',
@@ -341,7 +444,7 @@ register(
   (client, args, options) =>
     client.setProjectLiterature(args.projectId, args.itemIds, args.included, options)
 )
-register(
+registerResource(
   'create_literature_collection',
   'research',
   'Create a Literature collection, optionally nested under a parent collection. Collection names must be unique.',
@@ -353,7 +456,7 @@ register(
   libraryAdd,
   (client, args, options) => client.createLiteratureCollection(args, options)
 )
-register(
+registerResource(
   'update_collection_items',
   'research',
   'Add Literature records to a collection, or remove them with included false. Removing does not delete records.',
@@ -362,7 +465,7 @@ register(
   (client, args, options) =>
     client.setCollectionLiterature(args.collectionId, args.itemIds, args.included, options)
 )
-register(
+registerResource(
   'set_reading_status',
   'research',
   'Set the personal reading status of Literature records.',
@@ -371,7 +474,7 @@ register(
   (client, args, options) =>
     client.setLiteratureReadingStatus(args.itemIds, args.readingStatus, options)
 )
-register(
+registerResource(
   'set_literature_lifecycle',
   'research',
   'Move Literature records to the trash with state "deleted", or restore them with "active". Records are not permanently deleted.',

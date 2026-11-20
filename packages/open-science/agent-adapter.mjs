@@ -58,10 +58,35 @@ const policies = {
     'Project not found. Refresh list_projects.',
     { action: 'list_projects' }
   ],
+  project_conflict: [
+    'agent',
+    'The Project changed. Read its current updatedAt and review the change before updating again.',
+    { action: 'list_projects' }
+  ],
   session_not_found: [
     'agent',
     'Session not found. Refresh list_sessions.',
     { action: 'list_sessions' }
+  ],
+  session_project_mismatch: [
+    'agent',
+    'The Session does not belong to the supplied Project. Check its Project ID before continuing.',
+    { action: 'list_sessions' }
+  ],
+  session_read_only: [
+    'user',
+    'Imported history is read-only. Review the Session and ask the user before creating a writable Fork.',
+    { action: 'get_session' }
+  ],
+  session_revision_conflict: [
+    'agent',
+    'The Session configuration changed. Read the current revision before updating again.',
+    { action: 'get_session_configuration' }
+  ],
+  invalid_configuration: [
+    'agent',
+    'The service rejected these settings. Check the configured providers, models, and Compute Hosts.',
+    { action: 'inspect_state' }
   ],
   run_not_found: [
     'agent',
@@ -125,7 +150,7 @@ export const agentErrorDetails = (error, { capability, configRoot, readOnly, con
       ? 'access_denied'
       : error?.code === 'request_timeout' || error?.name === 'TimeoutError'
         ? 'timeout'
-        : status === 404 && capability === 'doctor'
+        : status === 404 && (capability === 'doctor' || error?.code === 'not_found')
           ? 'unsupported_capability'
           : known && !(status >= 500 && error.code === 'daemon_unavailable')
             ? error.code
@@ -145,6 +170,7 @@ export const agentErrorDetails = (error, { capability, configRoot, readOnly, con
   ) {
     details.requiresUser = true
   }
+  if (code === 'session_read_only') details.requiresUser = true
   details.retryable = readOnly === true && code === 'timeout'
   if (configRoot && ['daemon_unavailable', 'startup_unconfirmed'].includes(code)) {
     const [next] = details.next
