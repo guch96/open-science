@@ -1188,8 +1188,11 @@ service on the same machine with access to the input and delivery files.
 Generate and retain a `requestId` before calling `start_run` over MCP or `tools call`. Send
 `{ "requestId": "analysis-001", "projectId": "…", "prompt": "…" }`. The result is a durable
 receipt, which can be pending. Read it with `get_submission`, or use `wait_submission` to observe
-it until it leaves `pending`. An accepted receipt provides the `runId` for `get_run` or
-`wait_run`; an interrupted or failed receipt does not start another Run. Both wait tools
+it until it leaves `pending`. The pending receipt's `next` names `wait_submission` and the same
+`requestId`. An accepted receipt provides the `runId` for `get_run` or `wait_run`; an interrupted
+or failed receipt does not start another Run. When continuing an existing Session, include its
+`sessionId` and use its current provider, model, reasoning effort, memory, and enabled Compute
+Hosts. Change those via `update_session_configuration` before starting the Run. Both wait tools
 default to `timeoutMs: 10000` and accept up to `30000`. They return the applied budget and the
 receipt or Run. Timeout returns the same budget and reference for the next read. Disconnecting
 or timing out never cancels the study; use `cancel_run` to cancel explicitly.

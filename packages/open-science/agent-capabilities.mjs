@@ -283,7 +283,7 @@ registerResource(
 registerResource(
   'start_run',
   'research',
-  'Submit research and return its durable receipt. Keep requestId before sending. Omit sessionId to create a Session, or supply it to continue that Session in the Project. Uses the configured permissions and can incur model charges. Query get_submission after disconnect.',
+  'Submit research and return its durable receipt. Keep requestId before sending. Omit sessionId to create a Session. To continue an existing Session, pass requestId, projectId, sessionId, and prompt; omit provider, model, reasoning effort, memory, and enabled Compute Hosts so the existing configuration is used. Change those separately with update_session_configuration. A pending receipt has no runId yet: use wait_submission with requestId, then use the returned runId to observe the Run. Query get_submission after disconnect. Uses the configured permissions and can incur model charges.',
   {
     requestId,
     projectId,
@@ -347,7 +347,7 @@ registerResource(
 registerResource(
   'wait_submission',
   'research',
-  'Wait for the original receipt to leave pending. Failed and interrupted receipts are returned as recorded; timeout only stops observation.',
+  'Wait by requestId for the original receipt to leave pending. An accepted receipt has the runId for get_run or wait_run. Failed and interrupted receipts are returned as recorded; timeout only stops observation.',
   { requestId, timeoutMs: waitTimeoutMs },
   read,
   async (client, { requestId, timeoutMs }, options) => ({

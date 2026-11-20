@@ -240,6 +240,31 @@ it('recovers the same provider authentication handoff through CLI and MCP', asyn
   }
 })
 
+it('tells both transports how to observe a pending submission before a Run exists', async () => {
+  const args = { requestId: 'pending-study', projectId: 'p1', prompt: 'Review these results.' }
+  const receipt = { requestId: args.requestId, status: 'pending', createdAt: 1 }
+  const agent = await resourceAgents(
+    (request, response) => {
+      if (request.url === `/api/v1/run-submissions/${args.requestId}`) {
+        response.end(JSON.stringify({ data: receipt }))
+      } else response.writeHead(404).end()
+    },
+    ['durable-submissions']
+  )
+  const expected = {
+    result: { ...receipt, next: [{ action: 'wait_submission', requestId: args.requestId }] }
+  }
+  for (const [capability, input] of [
+    ['start_run', args],
+    ['get_submission', { requestId: args.requestId }]
+  ] as const) {
+    const mcp = await agent.mcp(capability, input)
+    expect(mcp.isError).not.toBe(true)
+    expect(mcp.structuredContent).toEqual(expected)
+    expect(await agent.cli(capability, input)).toEqual(expected)
+  }
+})
+
 it('bounds receipt and Run waiting without cancelling or issuing another submission', async () => {
   const receipt: { requestId: string; status: string; createdAt: number; runId?: string } = {
     requestId: 'wait-request',

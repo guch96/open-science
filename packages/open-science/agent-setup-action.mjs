@@ -34,6 +34,12 @@ export const setupAction = ({ code, argv }, profile) => {
 }
 
 export const projectSubmissionReceipt = (receipt, profile) => {
+  if (receipt.status === 'pending') {
+    return {
+      ...receipt,
+      next: [{ action: 'wait_submission', requestId: receipt.requestId }]
+    }
+  }
   if (receipt.status !== 'failed' || receipt.error?.code !== 'provider_auth_required')
     return receipt
   const { code } = receipt.error
