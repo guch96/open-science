@@ -1810,19 +1810,6 @@ const startWebHttpServer = async (options: WebServerOptions): Promise<RunningWeb
           )
           return
         }
-        if (
-          auth.ok &&
-          channel === 'acp:continue-notebook-execution' &&
-          (request.headers.authorization !== undefined || auth.queryToken)
-        ) {
-          webRpcError(
-            response,
-            403,
-            'handler_error',
-            'Continue stopped Notebook work from the Open-Science interface.'
-          )
-          return
-        }
         const callerContext = createWebCallerContext(clientId, {
           authorities:
             auth.localBearer &&

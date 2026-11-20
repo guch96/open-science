@@ -3408,7 +3408,7 @@ describe('startWebHttpServer', () => {
     expect(rpc.invoke).not.toHaveBeenCalled()
   })
 
-  it('does not treat SDK bearer credentials as a human Notebook continuation', async () => {
+  it('keeps Notebook continuation out of Web RPC for every local credential kind', async () => {
     const staticRoot = await mkdtemp(join(tmpdir(), 'open-science-web-static-'))
     roots.push(staticRoot)
     const channel = 'acp:continue-notebook-execution'
@@ -3442,13 +3442,18 @@ describe('startWebHttpServer', () => {
           args: [{ projectId: 'p1', sessionId: 's1', refusalId: 'r1', text: 'Continue.' }]
         })
       })
-    expect((await call({ authorization: 'Bearer local-token' })).status).toBe(403)
-    expect((await call({ authorization: 'Bearer local-token', origin: url })).status).toBe(403)
-    expect((await call({}, '?token=local-token')).status).toBe(403)
+    for (const response of [
+      await call({ cookie: 'open_science_web_token=local-token', origin: url }),
+      await call({ authorization: 'Bearer local-token' }),
+      await call({}, '?token=local-token')
+    ]) {
+      expect(response.status).toBe(404)
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        error: { code: 'method_not_found' }
+      })
+    }
     expect(invoke).not.toHaveBeenCalled()
-    expect((await call({ cookie: 'open_science_web_token=local-token', origin: url })).status).toBe(
-      200
-    )
   })
 
   it('pins the remote Web Notebook capability matrix', () => {
@@ -3534,7 +3539,8 @@ describe('startWebHttpServer', () => {
       .filter(([path]) => path.startsWith('acp.'))
       .map(([, channel]) => channel)
       .sort()
-    expect(acpChannels).toHaveLength(21)
+    expect(acpChannels).toHaveLength(20)
+    expect(acpChannels).not.toContain('acp:continue-notebook-execution')
     const permissionChannels = [
       'permissions:extend-undo',
       'permissions:list',

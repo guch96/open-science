@@ -551,7 +551,7 @@ const notebookRpcErrorGuidance = (status: number, error: unknown): string | unde
     code === 'NOTEBOOK_MEMORY_PRESSURE' ||
     code === 'NOTEBOOK_MEMORY_UNAVAILABLE'
   ) {
-    return 'Notebook work is stopped. Do not retry, change tools, language, environment or Session, or delegate it. Ask the user to choose Continue Notebook work in Open-Science Compute after resolving the cause.'
+    return 'Notebook work is stopped. Do not retry, change tools, language, environment or Session, or delegate it. After resolving the cause, ask the user to choose Continue Notebook work in Compute in the Open-Science desktop app.'
   }
   if (detail && ['recovery', 'retryable', 'hint', 'guidance'].some((key) => key in detail))
     return undefined

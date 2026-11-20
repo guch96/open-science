@@ -40,10 +40,11 @@
    TaskRunner 测试验证 Owner 的归属与只读限制。此处的导入 Session 使用测试记录，真实包迁移另行验收。
    [#60](https://github.com/guch96/open-science/issues/60) 用 Task Run 已记录的 prompt 标识，读取同一 Session
    中精确归属于该 prompt 的 Python/R Notebook Run。`execution` 独立于外层 Run；缺失派发证据时保留
-   `unconfirmed`。人工停止时有原 refusal/branch 和 Compute 的继续入口；用户完成后用原 Session 的
+   `unconfirmed`。人工停止时，Web 和 Agent 会提供原 refusal/branch 并指向连接同一服务的 Desktop Compute；
+   继续命令不接受 Web 请求。用户完成后用原 Session 的
    `continuedFromRefusalId` 观察新意图，原 Run 保留原事实。此关联只存在于当前服务，不更改任务或 `.science`
-   持久格式。自动化覆盖 CLI/MCP 查询与等待、服务端拒绝、错 branch 和旧回调、以及既有 Compute 按钮；
-   真实产品人工点击与模型派发另行验收。
+   持久格式。自动化覆盖 CLI/MCP 查询与等待、Web 拒绝、错 branch 和旧回调。Electron Playwright 夹具验证
+   Compute 按钮在恢复后创建新提示和审批，模型与真实数据验收另行记录。
    [#59](https://github.com/guch96/open-science/issues/59) 复用 TaskSubmissions 和 Run Owner；
    `start_run` 返回持久回执，`get_submission` / `wait_submission` 和 `get_run` / `wait_run`
    查询原任务。Agent 等待默认 10 秒、上限 30 秒，超时不取消。CLI `run` 自动分配 ID 时先将定位信息

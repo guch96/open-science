@@ -8176,6 +8176,7 @@
     "Close progress": "关闭进度",
     "Waiting for your decision": "等待您决定",
     "Continue Notebook work": "继续 Notebook 工作",
+    "Open the same Session and branch in the Open-Science desktop app, then choose Continue Notebook work in Compute.": "在 Open-Science 桌面应用中打开同一会话和分支，然后在「算力」中选择「继续 Notebook 工作」。",
     "Notebook work remains stopped until you explicitly continue. This sends a new guidance message and checks memory again.": "在您明确选择继续之前，Notebook 工作会保持停止。继续时将发送一条新的指导消息，并重新检查内存。",
     "Open in browser": "在浏览器中打开",
     "Close task": "关闭任务",

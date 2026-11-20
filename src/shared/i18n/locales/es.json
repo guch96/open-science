@@ -8520,6 +8520,7 @@
     "Close progress": "Cerrar progreso",
     "Waiting for your decision": "Esperando su decisión",
     "Continue Notebook work": "Continuar el trabajo de Notebook",
+    "Open the same Session and branch in the Open-Science desktop app, then choose Continue Notebook work in Compute.": "Abra la misma sesión y rama en la aplicación de escritorio de Open-Science. En Cálculo, seleccione «Continuar el trabajo de Notebook».",
     "Notebook work remains stopped until you explicitly continue. This sends a new guidance message and checks memory again.": "El trabajo de Notebook sigue detenido hasta que elija continuar. Se enviará un nuevo mensaje de instrucciones y se comprobará la memoria de nuevo.",
     "Open in browser": "Abrir en el navegador",
     "Close task": "Cerrar tarea",
