@@ -6640,9 +6640,14 @@ describe('TaskRunner', () => {
 })
 
 describe('runtime terminal outcomes and recovery retention', () => {
-  it.each(['cancelled', 'end_turn'] as const)(
+  it.each([
+    ['cancelled', 'cancelled', undefined],
+    ['end_turn', 'completed', undefined],
+    ['max_turn_requests', 'failed', 'turn limit'],
+    ['max_tokens', 'failed', 'output token limit']
+  ] as const)(
     'honors a prompt-scoped %s stop when the prompt resolves normally',
-    async (stopReason) => {
+    async (stopReason, expectedStatus, errorMessage) => {
       let emit: ((event: AcpRuntimeEvent) => void) | undefined
       const review = vi.fn(async () => ({ started: true }))
       const root = await mkdtemp(join(tmpdir(), 'task-outcome-'))
@@ -6687,7 +6692,8 @@ describe('runtime terminal outcomes and recovery retention', () => {
           autoReviewEnabled: true
         })
         const result = await runner.waitForRun(started.id)
-        expect.soft(result.status).toBe(stopReason === 'cancelled' ? 'cancelled' : 'completed')
+        expect.soft(result.status).toBe(expectedStatus)
+        if (errorMessage) expect.soft(result.error).toContain(errorMessage)
         expect.soft(result.output).toBe('Partial output.')
         expect
           .soft(result.cancelledAt)
@@ -6703,7 +6709,7 @@ describe('runtime terminal outcomes and recovery retention', () => {
         expect((await runJournal.load()).find((run) => run.id === result.id)?.cancelledAt).toBe(
           result.cancelledAt
         )
-        expect.soft(review).toHaveBeenCalledTimes(stopReason === 'cancelled' ? 0 : 1)
+        expect.soft(review).toHaveBeenCalledTimes(expectedStatus === 'completed' ? 1 : 0)
       } finally {
         await runner.dispose()
       }

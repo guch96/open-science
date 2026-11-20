@@ -269,7 +269,7 @@ type TaskRunEventAccumulator = {
   assistantEventIds: string[]
   images: PersistedMessageImage[]
   imageBytes: number
-  runtimeCancelled?: boolean
+  runtimeStopReason?: 'cancelled' | 'max_tokens' | 'max_turn_requests'
   terminalStop?: Pick<AcpRuntimeEvent, 'turnUsage' | 'modelCallUsage'>
   runtimeError?: Pick<AcpRuntimeEvent, 'text' | 'failure'>
   activities: Map<string, PendingTaskRunActivity>
@@ -2200,7 +2200,19 @@ class TaskRunner {
     promptError: unknown,
     cancellationAtPromptFailure: MutableTaskRun['cancellation']
   ): Promise<void> {
-    const runtimeCancelled = run.eventAccumulator?.runtimeCancelled === true
+    const stopReason = run.eventAccumulator?.runtimeStopReason
+    const runtimeCancelled = stopReason === 'cancelled'
+    if (promptError === undefined) {
+      if (stopReason === 'max_tokens') {
+        promptError = new Error(
+          'The model reached its output token limit before completing this Run.'
+        )
+      } else if (stopReason === 'max_turn_requests') {
+        promptError = new Error(
+          'The model reached its turn limit before completing this Run. Check the model and context window for this Session.'
+        )
+      }
+    }
     const acceptedSession =
       promptError === undefined ? consumePendingHistoryReplay(admittedSession) : admittedSession
 
@@ -2596,14 +2608,16 @@ class TaskRunner {
         continue
       }
       if (run.eventAccumulator) {
-        // Only the current prompt's terminal fact can cancel this Run. Unscoped compatibility
+        // Only the current prompt's terminal fact can stop this Run. Unscoped compatibility
         // events may still contribute output/usage, but cannot decide its terminal status.
         if (
           event.kind === 'stop' &&
-          event.text === 'cancelled' &&
-          event.promptMessageId === run.promptMessageId
+          event.promptMessageId === run.promptMessageId &&
+          (event.text === 'cancelled' ||
+            event.text === 'max_tokens' ||
+            event.text === 'max_turn_requests')
         ) {
-          run.eventAccumulator.runtimeCancelled = true
+          run.eventAccumulator.runtimeStopReason = event.text
         }
         accumulateTaskRunEvent(run.eventAccumulator, event)
       }
