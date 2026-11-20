@@ -63,7 +63,12 @@ async function cliError(
 async function resourceAgents(
   handle: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
   taskCapabilities: string[] = []
-) {
+): Promise<{
+  profile: string
+  cli: (name: string, args?: Record<string, unknown>) => Promise<{ result: unknown }>
+  mcp: (name: string, args?: Record<string, unknown>) => ReturnType<Client['callTool']>
+  cliError: (name: string, args: Record<string, unknown>) => ReturnType<typeof cliError>
+}> {
   const profile = await mkdtemp(join(tmpdir(), 'osci-agent-resources-'))
   cleanup.push(() => rm(profile, { recursive: true, force: true }))
   const token = 'resource-fixture-token'
