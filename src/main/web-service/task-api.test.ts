@@ -421,6 +421,7 @@ describe('HeadlessTaskApi adapter', () => {
   })
 
   it('reports ongoing Notebook provisioning and memory pressure without starting work', async () => {
+    let recovering = false
     const invoke = vi.fn(async (channel: string) => {
       switch (channel) {
         case 'settings:get-preflight':
@@ -438,6 +439,9 @@ describe('HeadlessTaskApi adapter', () => {
         case 'notebook:memory-policy-state':
           return {
             status: 'pressured',
+            ...(recovering
+              ? { reason: 'mac-memory-recovering', recoveryRemainingMs: 18_000 }
+              : { reason: 'mac-memory-warning' }),
             source: 'darwin-sysctl-dispatch',
             executionScope: 'darwin:host',
             detail: 'internal memory diagnostics'
@@ -465,6 +469,15 @@ describe('HeadlessTaskApi adapter', () => {
     })
     expect(JSON.stringify(report)).not.toContain('internal memory diagnostics')
     expect(invoke.mock.calls.map(([channel]) => channel)).not.toContain('notebook-env:provision')
+
+    recovering = true
+    await expect(api.doctor()).resolves.toMatchObject({
+      checks: {
+        notebook: {
+          memoryPolicy: { status: 'checking', reason: 'notebook_memory_recovering' }
+        }
+      }
+    })
   })
 
   it('returns available readiness evidence when an Owner cannot answer in time', async () => {

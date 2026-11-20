@@ -67,6 +67,11 @@ const actions = {
     'review_memory_policy',
     'Check the service log for the Notebook memory policy failure and repair the host memory reader.'
   ],
+  notebook_memory_recovering: [
+    'service',
+    'recheck_setup',
+    'The host memory reading has returned to normal. Check setup again in a few seconds while Open-Science confirms that it stays stable.'
+  ],
   notebook_memory_pressure: [
     'deployment',
     'review_memory_pressure',
