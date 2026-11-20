@@ -24,6 +24,11 @@ export type SensitiveContentEvidence = {
 }
 
 const identity = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/)
+export const sessionPackageRequestSchema = z
+  .object({ projectId: identity, sessionId: identity })
+  .strict()
+export type SessionPackageRequest = z.infer<typeof sessionPackageRequestSchema>
+
 const checksum = z.string().regex(/^[a-f0-9]{64}$/)
 export const PACKAGE_RO_CRATE_METADATA = 'ro-crate-metadata.json'
 export const PACKAGE_MAX_FILE_BYTES = 32 * 1024 ** 3
@@ -192,7 +197,9 @@ const agentPackageFailureSchema = z.enum([
   'invalid-archive',
   'source-unavailable',
   'requires-update',
-  'import-unconfirmed'
+  'import-unconfirmed',
+  'fork-waiting-approval',
+  'fork-notebook-refused'
 ])
 
 const packageFileDigestSchema = z
@@ -243,7 +250,7 @@ export const packageOperationRequestSchema = z
     agentPackageOperationReferenceSchema
       .extend({
         action: z.literal('agent-export'),
-        session: z.object({ projectId: identity, sessionId: identity }).strict(),
+        session: sessionPackageRequestSchema,
         destinationPath: z
           .string()
           .min(1)
@@ -257,6 +264,13 @@ export const packageOperationRequestSchema = z
         correlationId: z.uuid(),
         sourcePath: agentPackageSourcePathSchema,
         target: sessionPackageImportRequestSchema
+      })
+      .strict(),
+    z
+      .object({
+        action: z.literal('agent-fork'),
+        correlationId: z.uuid(),
+        session: sessionPackageRequestSchema
       })
       .strict(),
     z.object({ action: z.literal('cancel'), operationId: identity }).strict(),
@@ -329,11 +343,6 @@ export const packageOriginSchema = z
   })
   .strict()
 export type SessionPackageOrigin = z.infer<typeof packageOriginSchema>
-
-export const sessionPackageRequestSchema = z
-  .object({ projectId: identity, sessionId: identity })
-  .strict()
-export type SessionPackageRequest = z.infer<typeof sessionPackageRequestSchema>
 
 export const packageInventoryEntrySchema = z
   .object({

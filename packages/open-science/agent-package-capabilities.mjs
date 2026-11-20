@@ -10,6 +10,7 @@ const defaultWaitMs = 30_000
 const pollIntervalMs = 250
 const serviceCapability = 'agent-package-operations'
 const importCapability = 'agent-package-import'
+const forkCapability = 'agent-package-fork'
 const readOnly = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -169,8 +170,22 @@ async function packageStatus(snapshot, expected, signal) {
         ]
       }
     }
-    if (snapshot.result?.imported)
-      return { ...reference, completionStatus: 'completed', session: snapshot.result.imported }
+    if (snapshot.kind === 'fork') {
+      const fork = snapshot.result?.imported
+      if (
+        !fork ||
+        !snapshot.session ||
+        fork.projectId !== snapshot.session.projectId ||
+        fork.sessionId === snapshot.session.sessionId
+      )
+        return unconfirmed(reference)
+      return {
+        ...reference,
+        completionStatus: 'completed',
+        session: { ...fork, readOnly: false },
+        next: [{ action: 'get_session', ...fork }]
+      }
+    }
   }
   if (snapshot.state === 'cancelled')
     return { ...reference, completionStatus: 'cancelled', retryable: false }
@@ -178,6 +193,28 @@ async function packageStatus(snapshot, expected, signal) {
   if (snapshot.kind === 'import') {
     const failure = importFailureDetails(snapshot.agent.failure)
     return { ...reference, completionStatus: 'failed', retryable: false, ...failure }
+  }
+  if (snapshot.kind === 'fork') {
+    const notebook = snapshot.agent.failure === 'fork-notebook-refused'
+    const pendingApproval = snapshot.agent.failure === 'fork-waiting-approval'
+    return {
+      ...reference,
+      completionStatus: 'failed',
+      code: notebook
+        ? 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION'
+        : pendingApproval
+          ? 'session_busy'
+          : 'package_fork_failed',
+      message: notebook
+        ? 'Notebook execution in the source Session was stopped. Have the user continue the original work in Open-Science Compute before considering a Fork.'
+        : pendingApproval
+          ? 'The source Session still has an approval decision. Have the user review it in Open-Science.'
+          : 'Open-Science could not create the Fork. Check that the source Session exists and is idle.',
+      owner: notebook || pendingApproval ? 'user' : 'service',
+      requiresUser: notebook || pendingApproval,
+      retryable: false,
+      next: [{ action: notebook ? 'continue_notebook_in_app' : 'get_session', ...snapshot.session }]
+    }
   }
   if (snapshot.agent.failure === 'requires-user')
     return {
@@ -379,6 +416,38 @@ export const getAgentPackageCapabilities = (AgentError) => [
         signal,
         (observation) =>
           client.startAgentPackageImport(expected.sourcePath, target, expected.correlationId, {
+            signal: observation
+          }),
+        AgentError
+      )
+    }
+  },
+  {
+    name: 'fork_session',
+    group: 'delivery',
+    description:
+      'Create a writable Fork of the specified Session. Inspect imported history and ask the user before calling. Does not run research or continue a stopped Notebook.',
+    inputSchema: z.strictObject({
+      projectId: id.describe('Source Project ID.'),
+      sessionId: id.describe('Source Session ID.'),
+      waitMs: waitMsSchema.describe(
+        'Maximum time to observe the Fork. The operation may finish afterward.'
+      )
+    }),
+    annotations: { ...readOnly, readOnlyHint: false, idempotentHint: false },
+    exposure: { cli: true, mcp: true },
+    serviceCapability: forkCapability,
+    async handler({ projectId, sessionId, waitMs }, { getClient, signal }) {
+      const client = await getClient()
+      await requirePackageOperations(client, signal, AgentError, forkCapability)
+      const correlationId = randomUUID()
+      return startPackageOperation(
+        client,
+        { kind: 'fork', projectId, sessionId, correlationId },
+        waitMs,
+        signal,
+        (observation) =>
+          client.startAgentPackageFork(projectId, sessionId, correlationId, {
             signal: observation
           }),
         AgentError

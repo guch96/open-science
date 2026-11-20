@@ -7,7 +7,8 @@ import {
   PackageSensitiveContentError,
   type PackageSensitiveContentSource
 } from './sensitive-content'
-import { ForkRecoveryRequiredError } from './fork-session'
+import { ForkPendingApprovalError, ForkRecoveryRequiredError } from './fork-session'
+import { NotebookExecutionAdmissionError } from '../notebook/execution-admission'
 import { redactSensitiveText } from '@aipoch/diagnostics'
 import { formatPackageBytes, packageImportPercent } from '../../shared/session-package'
 import { createHash, randomUUID } from 'node:crypto'
@@ -361,6 +362,22 @@ export class SessionPackageDesktop {
   respond(
     request: PackageOperationRequest
   ): PackageOperationSnapshot | null | Promise<PackageOperationSnapshot | null> {
+    if (request.action === 'agent-fork') {
+      const { session, correlationId } = request
+      const current = this.operations.snapshot
+      if (
+        this.operations.active ||
+        this.lastImportFile?.recovery ||
+        current?.result?.recovery ||
+        current?.agent?.correlationId === correlationId
+      )
+        throw new ApplicationCommandError(
+          'session-package-operation-conflict',
+          'Resolve the current package operation before forking.'
+        )
+      void this.fork(session, undefined, { correlationId }).catch(() => undefined)
+      return this.operations.snapshot
+    }
     if (request.action === 'agent-import') {
       const { sourcePath, target, correlationId } = request
       if (!isAbsolute(sourcePath) || sourcePath.includes('\0'))
@@ -861,79 +878,98 @@ export class SessionPackageDesktop {
 
   fork(
     request: SessionPackageRequest,
-    originClientId?: string
+    originClientId?: string,
+    agent?: AgentPackageOperationReference
   ): Promise<SessionPackageRequest | null> {
     if (this.operations.snapshot?.result?.recovery)
       return Promise.reject(new Error(this.operations.snapshot.error))
     let operationSignal: AbortSignal | undefined
     return this.operations
-      .run('fork', request, async (signal) => {
-        operationSignal = signal
-        let release: (() => void) | undefined
-        try {
-          this.options.assertCanStart?.()
-          this.operations.setCleanupPending(this.pendingCleanup.size > 0)
-          release = await this.options.reserveExport?.(request, signal)
-          const result = await withPackageTransfer(
-            () =>
-              this.options.withDataRootWrite(() =>
-                this.acceptCleanup(() =>
-                  this.options.service.fork(request, signal, this.operations.report)
-                )
-              ),
-            () => this.operations.transferBytesPerSecond,
-            this.operations.reportIo
-          )
-          this.operations.completeResult({ imported: result })
+      .run(
+        'fork',
+        request,
+        async (signal) => {
+          operationSignal = signal
+          let release: (() => void) | undefined
           try {
-            await this.options.afterImport(result, originClientId, false)
-          } catch (error) {
-            createLogger('session-package').warn(
-              'Fork published; notification failed',
-              diagnosticErrorFields(error)
+            this.options.assertCanStart?.()
+            this.operations.setCleanupPending(this.pendingCleanup.size > 0)
+            release = await this.options.reserveExport?.(request, signal)
+            const result = await withPackageTransfer(
+              () =>
+                this.options.withDataRootWrite(() =>
+                  this.acceptCleanup(() =>
+                    this.options.service.fork(request, signal, this.operations.report)
+                  )
+                ),
+              () => this.operations.transferBytesPerSecond,
+              this.operations.reportIo
             )
-          }
-          return result
-        } catch (error) {
-          if (error instanceof PackageSensitiveContentError && error.evidence) {
-            this.operations.setSensitiveContent([error.evidence])
+            this.operations.completeResult({ imported: result })
             try {
-              this.options.onSensitiveContentFailure?.(
-                request,
-                [error.evidence],
-                error.source ? [error.source] : []
+              await this.options.afterImport(result, originClientId, false)
+            } catch (error) {
+              createLogger('session-package').warn(
+                'Fork published; notification failed',
+                diagnosticErrorFields(error)
               )
-            } catch {
-              // Diagnostic capture must not change the package operation result.
             }
-          }
-          if (error instanceof ForkRecoveryRequiredError) {
-            this.operations.completeResult({ recovery: error.recovery })
+            return result
+          } catch (error) {
+            if (error instanceof PackageSensitiveContentError && error.evidence) {
+              this.operations.setSensitiveContent([error.evidence])
+              try {
+                this.options.onSensitiveContentFailure?.(
+                  request,
+                  [error.evidence],
+                  error.source ? [error.source] : []
+                )
+              } catch {
+                // Diagnostic capture must not change the package operation result.
+              }
+            }
+            if (error instanceof ForkRecoveryRequiredError) {
+              this.operations.completeResult({ recovery: error.recovery })
+              throw new Error(
+                this.options.translate(
+                  'Fork publication needs recovery (operation {{operationId}}, Session {{sessionId}}). Restart the app to recover this attempt before forking again.',
+                  error.recovery
+                ),
+                { cause: error }
+              )
+            }
+            if (error instanceof ForkPendingApprovalError)
+              this.operations.setAgentFailure('fork-waiting-approval')
+            if (
+              error instanceof NotebookExecutionAdmissionError &&
+              error.code === 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION'
+            )
+              this.operations.setAgentFailure('fork-notebook-refused')
+            const detail = redactSensitiveText(
+              error instanceof Error ? error.message : String(error)
+            )
+            const reason =
+              detail.startsWith('Wait for') || detail === 'The Session is still active.'
+                ? this.options.translate(
+                    'Wait for all Session activity and pending approvals to finish before forking.'
+                  )
+                : detail.length > 1500
+                  ? `${detail.slice(0, 1500)}…`
+                  : detail
             throw new Error(
-              this.options.translate(
-                'Fork publication needs recovery (operation {{operationId}}, Session {{sessionId}}). Restart the app to recover this attempt before forking again.',
-                error.recovery
-              ),
+              this.options.translate('Could not fork this Session: {{reason}}', { reason }),
               { cause: error }
             )
+          } finally {
+            release?.()
           }
-          const detail = redactSensitiveText(error instanceof Error ? error.message : String(error))
-          const reason =
-            detail.startsWith('Wait for') || detail === 'The Session is still active.'
-              ? this.options.translate(
-                  'Wait for all Session activity and pending approvals to finish before forking.'
-                )
-              : detail.length > 1500
-                ? `${detail.slice(0, 1500)}…`
-                : detail
-          throw new Error(
-            this.options.translate('Could not fork this Session: {{reason}}', { reason }),
-            { cause: error }
-          )
-        } finally {
-          release?.()
-        }
-      })
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        agent
+      )
       .catch((error) => {
         if (
           operationSignal?.aborted &&

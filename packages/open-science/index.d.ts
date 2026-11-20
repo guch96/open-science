@@ -463,6 +463,8 @@ export type PackageOperation = {
       | 'source-unavailable'
       | 'requires-update'
       | 'import-unconfirmed'
+      | 'fork-waiting-approval'
+      | 'fork-notebook-refused'
   }
   result?: {
     filePath?: string
@@ -756,6 +758,12 @@ export class OpenScienceClient {
     sessionId: string,
     options?: RequestOptions
   ): Promise<{ projectId: string; sessionId: string } | null>
+  startAgentPackageFork(
+    projectId: string,
+    sessionId: string,
+    correlationId: string,
+    options?: RequestOptions
+  ): Promise<PackageOperation>
   exportSessionPackage(
     projectId: string,
     sessionId: string,

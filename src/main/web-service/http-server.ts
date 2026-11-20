@@ -1643,7 +1643,7 @@ const startWebHttpServer = async (options: WebServerOptions): Promise<RunningWeb
                 ]
               : []),
             ...(auth.ok && rpcChannels.includes('sessions:package-operation')
-              ? ['agent-package-operations']
+              ? ['agent-package-operations', 'agent-package-fork']
               : []),
             ...(auth.localBearer && rpcChannels.includes('sessions:package-operation')
               ? ['agent-package-import']

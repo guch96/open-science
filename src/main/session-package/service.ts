@@ -123,7 +123,12 @@ import {
   hasComputeLogEvidence,
   inheritedComputeChecksums
 } from './execution-evidence'
-import { ForkRecoveryRequiredError, createForkSession, nextForkTitle } from './fork-session'
+import {
+  ForkPendingApprovalError,
+  ForkRecoveryRequiredError,
+  createForkSession,
+  nextForkTitle
+} from './fork-session'
 import { preserveLocalForkWebEvidence } from '../web/fork-evidence'
 import { capturePackageHistory, type PackageHistory } from './history'
 import { assertSettledHistory, inspectSessionPackage, preview, readSession } from './inspection'
@@ -253,6 +258,7 @@ type PackageOptions = {
   getClient: () => Promise<PrismaClient>
   isSessionActive?: (projectId: string, sessionId: string) => boolean
   reserveExport?: (request: SessionPackageRequest, signal: AbortSignal) => Promise<() => void>
+  assertForkExecutionAllowed?: (request: SessionPackageRequest) => void
   readImageTasks?: (scope: ImageTaskScope) => Promise<ImageTask[]>
   inspectPackage?: typeof inspectSessionPackage
   runSessionPublication?: (
@@ -1918,12 +1924,13 @@ export class SessionPackageService {
           safe.sessionId
         )
         if (!source) throw new Error('Session not found or unreadable.')
+        this.options.assertForkExecutionAllowed?.(safe)
         if (
           source.runtimeContext?.networkApprovals?.some(({ state }) => state === 'pending') ||
           source.runtimeContext?.permission?.state === 'pending' ||
           source.runtimeContext?.plan?.approval === 'pending'
         )
-          throw new Error('Wait for pending approvals before forking this Session.')
+          throw new ForkPendingApprovalError()
         let result: SessionPackageRequest | undefined
         await this.exportNow(safe, '', {
           onProgress,

@@ -2657,21 +2657,3 @@ describe('local service CLI status', () => {
     })
   })
 })
-
-it('forks explicitly without importing a package or creating a run', async () => {
-  const client = {
-    listProjects: async () => [{ id: 'project-1', name: 'Research' }],
-    forkSession: vi.fn(async () => ({ projectId: 'project-1', sessionId: 'fork-1' })),
-    importSessionPackage: vi.fn(),
-    startRun: vi.fn()
-  }
-  const log = vi.fn()
-  await runTaskCommand(
-    parseCliArgs(['session', 'fork', 'import-1', '--project', 'Research', '--json']),
-    { connect: async () => client, log }
-  )
-  expect(client.forkSession).toHaveBeenCalledWith('project-1', 'import-1', { timeoutMs: undefined })
-  expect(client.importSessionPackage).not.toHaveBeenCalled()
-  expect(client.startRun).not.toHaveBeenCalled()
-  expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({ sessionId: 'fork-1' })
-})

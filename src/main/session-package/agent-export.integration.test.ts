@@ -22,6 +22,7 @@ import {
   registerDataContentApplicationCommands
 } from '../data-content-application-commands'
 import { englishNativeTranslator } from '../locale/main-process-messages'
+import { NotebookExecutionIntentOwner } from '../notebook/execution-intent'
 import { SessionRepository } from '../session-persistence/repository'
 import { initDataRoot } from '../storage-root'
 import { FileTaskRunJournal } from '../tasks/task-run-journal'
@@ -160,6 +161,7 @@ async function withPackageService(
     sensitive?: boolean
     advertisePackageOperations?: boolean
     seedSource?: boolean
+    executionIntents?: NotebookExecutionIntentOwner
   } = {}
 ): Promise<void> {
   const fixture = await createProvenanceTestFixture()
@@ -173,7 +175,9 @@ async function withPackageService(
   })
   const service = new SessionPackageService({
     storageRoot: root,
-    getClient: async () => fixture.client
+    getClient: async () => fixture.client,
+    assertForkExecutionAllowed: (request) =>
+      options.executionIntents?.current(request)?.assertExecutable()
   })
   const owner = new SessionPackageDesktop({
     service,
@@ -197,11 +201,7 @@ async function withPackageService(
         ...invocation,
         args: invocation.args as [PackageOperationRequest]
       })
-      if (
-        ['agent-export', 'agent-import'].includes(
-          (invocation.args[0] as PackageOperationRequest).action
-        )
-      )
+      if ((invocation.args[0] as PackageOperationRequest).action.startsWith('agent-'))
         await options.afterAdmission?.()
       return response
     }
@@ -448,6 +448,176 @@ it('imports an attached archive into a fresh profile and inspects the read-only 
       expect(content(write).error).toMatchObject({ code: 'session_read_only', retryable: false })
     },
     { seedSource: false }
+  )
+})
+
+it('forks inspected research and recovers the writable copy when the CLI loses its response', async () => {
+  const releaseResponse = Promise.withResolvers<void>()
+  let holdResponse = false
+  await withPackageService(
+    async ({ root, sdk, callCli }) => {
+      const sourcePath = join(root, 'attached.science')
+      await copyFile(artifactPackage, sourcePath)
+      const imported = content(
+        await sdk.callTool({ name: 'import_session', arguments: { sourcePath } })
+      ).result as { session: { projectId: string; sessionId: string } }
+      const { projectId, sessionId } = imported.session
+      expect(
+        content(await sdk.callTool({ name: 'get_session', arguments: { projectId, sessionId } }))
+          .result
+      ).toMatchObject({ readOnly: true, title: 'Artifact research' })
+      expect(
+        content(await sdk.callTool({ name: 'list_sessions', arguments: {} })).result
+      ).toHaveLength(1)
+
+      // The Agent calls this separately after the user agrees to Fork.
+      const fork = await sdk.callTool({ name: 'fork_session', arguments: { projectId, sessionId } })
+      expect(fork.isError, JSON.stringify(content(fork))).not.toBe(true)
+      const result = content(fork).result as {
+        operationId: string
+        session: { projectId: string; sessionId: string; readOnly: boolean }
+      }
+      expect(result).toMatchObject({
+        projectId,
+        sessionId,
+        kind: 'fork',
+        operationId: expect.any(String),
+        completionStatus: 'completed',
+        waitMs: 30_000,
+        session: { projectId, sessionId: expect.any(String), readOnly: false }
+      })
+      expect(result.session.sessionId).not.toBe(sessionId)
+      expect(
+        JSON.parse(
+          (
+            await callCli('get_package_operation', {
+              kind: 'fork',
+              operationId: result.operationId,
+              projectId,
+              sessionId
+            })
+          ).stdout
+        ).result
+      ).toMatchObject({ completionStatus: 'completed', session: result.session })
+      const copy = await sdk.callTool({
+        name: 'get_session',
+        arguments: {
+          projectId,
+          sessionId: result.session.sessionId
+        }
+      })
+      expect(content(copy).result).toMatchObject({
+        readOnly: false,
+        status: 'idle',
+        forkOrigin: { sourceProjectId: 'project-1', sourceSessionId: 'session-1' }
+      })
+      expect(
+        content(await sdk.callTool({ name: 'get_session', arguments: { projectId, sessionId } }))
+          .result
+      ).toMatchObject({ readOnly: true })
+      try {
+        holdResponse = true
+        const { stdout } = await exec(
+          process.execPath,
+          [
+            cli,
+            'session',
+            'fork',
+            sessionId,
+            '--project',
+            projectId,
+            '--timeout-ms',
+            '150',
+            '--profile',
+            root,
+            '--json'
+          ],
+          { encoding: 'utf8', timeout: 10_000 }
+        )
+        const lost = JSON.parse(stdout).result
+        expect(lost).toMatchObject({
+          kind: 'fork',
+          projectId,
+          sessionId,
+          correlationId: expect.any(String),
+          completionStatus: 'unconfirmed',
+          retryable: false,
+          waitMs: 150
+        })
+        await expect
+          .poll(
+            async () =>
+              content(
+                await sdk.callTool({
+                  name: 'get_package_operation',
+                  arguments: {
+                    correlationId: lost.correlationId,
+                    projectId,
+                    sessionId,
+                    kind: 'fork'
+                  }
+                })
+              ).result,
+            { timeout: 5000 }
+          )
+          .toMatchObject({
+            completionStatus: 'completed',
+            session: { projectId, readOnly: false }
+          })
+        expect(
+          content(
+            await sdk.callTool({
+              name: 'get_package_operation',
+              arguments: {
+                operationId: result.operationId,
+                projectId,
+                sessionId,
+                kind: 'fork'
+              }
+            })
+          ).result
+        ).toMatchObject({ completionStatus: 'unconfirmed', retryable: false })
+        expect(
+          content(await sdk.callTool({ name: 'list_sessions', arguments: {} })).result
+        ).toHaveLength(3)
+      } finally {
+        releaseResponse.resolve()
+      }
+    },
+    {
+      seedSource: false,
+      afterAdmission: async () => {
+        if (holdResponse) await releaseResponse.promise
+      }
+    }
+  )
+})
+
+it('keeps a stopped Notebook attached to the source and refuses to Fork around it', async () => {
+  const executionIntents = new NotebookExecutionIntentOwner()
+  executionIntents.create(source).block('test-refusal')
+  await withPackageService(
+    async ({ sdk, callCli }) => {
+      const fork = await sdk.callTool({ name: 'fork_session', arguments: source })
+      const failure = {
+        ...source,
+        kind: 'fork',
+        code: 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION',
+        completionStatus: 'failed',
+        retryable: false,
+        requiresUser: true,
+        owner: 'user',
+        next: [{ action: 'continue_notebook_in_app', ...source }]
+      }
+      expect(fork.isError).toBe(true)
+      expect(content(fork).error).toMatchObject(failure)
+      const rejected = await callCli('fork_session', source).catch((error) => error)
+      expect(JSON.parse(rejected.stderr).error).toMatchObject(failure)
+      expect(
+        content(await sdk.callTool({ name: 'list_sessions', arguments: {} })).result
+      ).toHaveLength(1)
+    },
+    { executionIntents }
   )
 })
 
