@@ -88,6 +88,7 @@ import type {
   TaskRunReview,
   TaskRunStatus,
   TaskSessionConfiguration,
+  TaskSessionOrigin,
   TaskSessionSummary,
   UpdateTaskProjectRequest
 } from '../../shared/task-api'
@@ -572,6 +573,20 @@ const consumePendingHistoryReplay = (session: PersistedChatSession): PersistedCh
   return accepted
 }
 
+const summarizeSessionOrigin = ({
+  importId,
+  sourceProjectId,
+  sourceSessionId,
+  importedAt,
+  manifestChecksum
+}: TaskSessionOrigin): TaskSessionOrigin => ({
+  importId,
+  sourceProjectId,
+  sourceSessionId,
+  importedAt,
+  manifestChecksum
+})
+
 const summarizeSession = (session: PersistedChatSession): TaskSessionSummary => ({
   id: session.id,
   projectId: session.projectId,
@@ -587,7 +602,12 @@ const summarizeSession = (session: PersistedChatSession): TaskSessionSummary => 
   updatedAt: session.updatedAt,
   output: [...session.messages].reverse().find((message) => message.role === 'agent')?.content,
   error: session.error,
-  artifactCount: session.artifacts?.length ?? 0
+  artifactCount: session.artifacts?.length ?? 0,
+  readOnly: Boolean(session.packageOrigin),
+  ...(session.packageOrigin
+    ? { packageOrigin: summarizeSessionOrigin(session.packageOrigin) }
+    : {}),
+  ...(session.forkOrigin ? { forkOrigin: summarizeSessionOrigin(session.forkOrigin) } : {})
 })
 
 const projectTaskProjection = (project: Project): TaskProject => ({
@@ -934,8 +954,8 @@ class TaskRunner {
     return sessions.filter((session) => session.projectId === resolved.id).map(summarizeSession)
   }
 
-  async getSession(sessionId: string): Promise<TaskSessionSummary> {
-    return summarizeSession(await this.findSession(sessionId))
+  async getSession(sessionId: string, projectId?: string): Promise<TaskSessionSummary> {
+    return summarizeSession(await this.findSession(sessionId, projectId))
   }
 
   async ensureSessionAttached(sessionId: string): Promise<PersistedChatSession> {
@@ -961,9 +981,12 @@ class TaskRunner {
     return session
   }
 
-  async getSessionConfiguration(sessionId: string): Promise<TaskSessionConfiguration> {
+  async getSessionConfiguration(
+    sessionId: string,
+    projectId?: string
+  ): Promise<TaskSessionConfiguration> {
     const [session, settings, availableComputeHosts] = await Promise.all([
-      this.findSession(sessionId),
+      this.findSession(sessionId, projectId),
       this.dependencies.settings.get(),
       this.dependencies.computePreferences.listAvailable?.() ?? Promise.resolve([])
     ])
@@ -1021,12 +1044,18 @@ class TaskRunner {
       typeof request !== 'object' ||
       !Number.isSafeInteger(request.expectedRevision) ||
       request.expectedRevision < 0 ||
-      !parsed.success ||
-      Object.keys(parsed.data).length === 1
+      !parsed.success
     ) {
       throw new TaskRunnerError('invalid_request', 'Invalid Session configuration update.')
     }
-    const session = await this.findSession(sessionId)
+    const { expectedRevision, projectId, ...patch } = parsed.data
+    if (Object.keys(patch).length === 0) {
+      throw new TaskRunnerError('invalid_request', 'Invalid Session configuration update.')
+    }
+    const session = await this.findSession(sessionId, projectId)
+    if (session.packageOrigin) {
+      throw new TaskRunnerError('session_read_only', 'Imported Session configuration is read-only.')
+    }
     if ((session.revision ?? 0) !== request.expectedRevision) {
       throw new TaskRunnerError(
         'session_revision_conflict',
@@ -1041,7 +1070,6 @@ class TaskRunner {
       throw new TaskRunnerError('session_busy', `Session has active work: ${session.id}`)
     }
     const settings = await this.dependencies.settings.get()
-    const patch = parsed.data
     const agentConfiguration = patch.agentConfiguration
       ? validateTaskAgentConfiguration(
           mergeAgentConfigurationPatch(
@@ -1077,10 +1105,7 @@ class TaskRunner {
       updatedAt: Math.max(session.updatedAt + 1, this.dependencies.now())
     }
     try {
-      const persisted = await this.dependencies.sessions.updateConfiguration(
-        next,
-        request.expectedRevision
-      )
+      const persisted = await this.dependencies.sessions.updateConfiguration(next, expectedRevision)
       this.dependencies.computePreferences.project?.(persisted)
     } catch (error) {
       if (isSessionConfigurationBusyError(error)) {
@@ -2952,11 +2977,17 @@ class TaskRunner {
     }
   }
 
-  private async findSession(sessionId: string): Promise<PersistedChatSession> {
+  private async findSession(sessionId: string, projectId?: string): Promise<PersistedChatSession> {
     const session = (await this.dependencies.sessions.list()).find(
       (candidate) => candidate.id === sessionId
     )
     if (!session) throw new TaskRunnerError('session_not_found', `Session not found: ${sessionId}`)
+    if (projectId !== undefined && session.projectId !== projectId) {
+      throw new TaskRunnerError(
+        'session_project_mismatch',
+        'Session does not belong to this Project.'
+      )
+    }
     return session
   }
 }

@@ -161,7 +161,15 @@ export type TaskSessionSummary = {
   output?: string
   error?: string
   artifactCount: number
+  readOnly: boolean
+  packageOrigin?: TaskSessionOrigin
+  forkOrigin?: TaskSessionOrigin
 }
+
+export type TaskSessionOrigin = Omit<
+  import('./session-package').SessionPackageOrigin,
+  'excludedFiles'
+>
 
 export type TaskProject = Omit<Project, 'agentContext' | 'sessionDefaults'> & {
   hasAgentContext: boolean
@@ -270,6 +278,7 @@ export type TaskApiErrorCode =
   | 'submission_unavailable'
   | 'submission_not_found'
   | 'session_read_only'
+  | 'session_project_mismatch'
   | 'invalid_request'
   | 'project_not_found'
   | 'project_conflict'
