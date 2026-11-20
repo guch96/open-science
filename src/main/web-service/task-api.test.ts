@@ -420,6 +420,101 @@ describe('HeadlessTaskApi adapter', () => {
     })
   })
 
+  it('reports ongoing Notebook provisioning and memory pressure without starting work', async () => {
+    const invoke = vi.fn(async (channel: string) => {
+      switch (channel) {
+        case 'settings:get-preflight':
+          return {
+            agentFrameworkId: 'codex',
+            runtimeReadiness: { status: 'ready' },
+            providerReadiness: { status: 'ready' }
+          }
+        case 'settings:list-skills':
+          return []
+        case 'notebook-env:status':
+          return { pythonReady: false, rReady: false, provisioning: true }
+        case 'settings:get-notebook-network-status':
+          return { kind: 'ready', warnings: [] }
+        case 'notebook:memory-policy-state':
+          return {
+            status: 'pressured',
+            source: 'darwin-sysctl-dispatch',
+            executionScope: 'darwin:host',
+            detail: 'internal memory diagnostics'
+          }
+        default:
+          throw new Error(`Unexpected Task command: ${channel}`)
+      }
+    })
+    const api = new HeadlessTaskApi({ commands: commandsFrom(invoke), agent: createAgent() })
+
+    const report = await api.doctor()
+    expect(report).toMatchObject({
+      ready: true,
+      checks: {
+        notebook: {
+          environment: { status: 'checking', reason: 'notebook_environment_preparing' },
+          memoryPolicy: {
+            status: 'blocked',
+            reason: 'notebook_memory_pressure',
+            source: 'darwin-sysctl-dispatch',
+            executionScope: 'darwin:host'
+          }
+        }
+      }
+    })
+    expect(JSON.stringify(report)).not.toContain('internal memory diagnostics')
+    expect(invoke.mock.calls.map(([channel]) => channel)).not.toContain('notebook-env:provision')
+  })
+
+  it('returns available readiness evidence when an Owner cannot answer in time', async () => {
+    vi.useFakeTimers()
+    try {
+      const commands = commandsFrom(async (channel) => {
+        switch (channel) {
+          case 'settings:get-preflight':
+            return {
+              agentFrameworkId: 'codex',
+              runtimeReadiness: { status: 'ready' },
+              providerReadiness: { status: 'ready' }
+            }
+          case 'settings:list-skills':
+            return []
+          case 'notebook-env:status':
+            return new Promise(() => undefined)
+          case 'notebook:memory-policy-state':
+            return {
+              status: 'unavailable',
+              diagnostic: 'linux-cgroup-visibility',
+              source: 'linux',
+              executionScope: 'default'
+            }
+          default:
+            throw new Error('Unavailable')
+        }
+      })
+      const api = new HeadlessTaskApi({ commands, agent: createAgent() })
+      const report = api.doctor()
+      await vi.advanceTimersByTimeAsync(6_000)
+      await expect(report).resolves.toMatchObject({
+        ready: true,
+        checks: {
+          notebook: {
+            environment: { status: 'unconfirmed', reason: 'notebook_evidence_unavailable' },
+            memoryPolicy: {
+              status: 'blocked',
+              reason: 'notebook_linux_cgroup_unavailable',
+              source: 'linux',
+              executionScope: 'default'
+            }
+          }
+        }
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('routes Project Session defaults through the Task-only persistence command', async () => {
     const invoke = vi.fn(
       async (channel: string, _callerContext: CallerContext, args: unknown[]) => {

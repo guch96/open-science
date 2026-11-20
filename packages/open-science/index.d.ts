@@ -229,6 +229,17 @@ export type ProviderReadinessReason =
   | 'incompatible'
   | 'server-error'
   | 'unknown'
+export type NotebookReadinessCheck = {
+  status: 'ready' | 'blocked' | 'checking' | 'unconfirmed'
+  reason?: string
+}
+export type NotebookReadiness = {
+  platform: string
+  environment: NotebookReadinessCheck & { pythonReady?: boolean; rReady?: boolean }
+  dependencies: NotebookReadinessCheck
+  sandbox: NotebookReadinessCheck
+  memoryPolicy: NotebookReadinessCheck & { source?: string; executionScope?: string }
+}
 export type DoctorReport = {
   ready: boolean
   checks: {
@@ -237,6 +248,7 @@ export type DoctorReport = {
     provider:
       { status: 'ready' | 'missing' } | { status: 'not_ready'; reason?: ProviderReadinessReason }
     skills: { status: 'ready'; enabled: string[] }
+    notebook?: NotebookReadiness
   }
   next: Array<{
     code: 'runtime_missing' | 'runtime_not_ready' | 'provider_missing' | 'provider_not_ready'

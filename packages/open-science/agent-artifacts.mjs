@@ -4,6 +4,7 @@ import { mkdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join } from 'node:path'
 import { z } from 'zod'
 import { AgentError } from './agent-adapter.mjs'
+import { defaultAgentDeliveryDirectory } from './agent-delivery-directory.mjs'
 import { deliverLocalFile, verifyLocalFile } from './local-file-delivery.mjs'
 
 const sessionId = z
@@ -74,7 +75,7 @@ const defaultOutput = (profile, { downloadId, name }) => {
       ? downloadId
       : createHash('sha256').update(downloadId).digest('hex')
   const filename = name && !/[\\/:]|\p{Cc}|[. ]$/u.test(name) ? name : 'artifact'
-  return join(profile, 'agent-delivery', segment, filename)
+  return join(defaultAgentDeliveryDirectory(profile), segment, filename)
 }
 
 async function download({ sessionId, downloadId, outputPath, timeoutMs }, context) {

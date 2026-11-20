@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -654,6 +655,7 @@ it('uses the authenticated service for doctor and maps invalid or unsupported ca
   const token = 'doctor-fixture-secret'
   let advertisesDoctor = true
   let agentReady = true
+  let notebookEvidence: Record<string, unknown> | undefined
   let doctorStatus = 200
   let doctorRequests = 0
   const service = createServer((req, res) => {
@@ -677,6 +679,7 @@ it('uses the authenticated service for doctor and maps invalid or unsupported ca
                   ready: agentReady,
                   checks: {
                     runtime: { status: 'ready', framework: 'codex' },
+                    notebook: notebookEvidence,
                     provider: {
                       status: agentReady ? 'ready' : 'not_ready',
                       reason: agentReady ? undefined : 'credential_invalid',
@@ -737,6 +740,120 @@ it('uses the authenticated service for doctor and maps invalid or unsupported ca
   expect(ready.structuredContent?.result).not.toHaveProperty('delivery')
   expect(JSON.stringify(ready)).not.toContain(token)
 
+  notebookEvidence = {
+    platform: 'darwin',
+    environment: { status: 'ready', pythonReady: true, rReady: false },
+    dependencies: { status: 'ready' },
+    sandbox: { status: 'ready' },
+    memoryPolicy: {
+      status: 'ready',
+      source: 'darwin-sysctl-dispatch',
+      executionScope: 'darwin:host',
+      detail: token
+    }
+  }
+  const notebookReady = await client.callTool({ name: 'get_setup_status' })
+  expect(notebookReady.structuredContent).toEqual(JSON.parse((await runCli(doctorArgs)).stdout))
+  const deliveryPath = join(profile, 'agent-delivery')
+  expect(notebookReady.structuredContent).toMatchObject({
+    result: {
+      profile,
+      readiness: { agent: 'ready', notebook: 'ready' },
+      checks: {
+        notebook: {
+          environment: { status: 'ready', pythonReady: true, rReady: false },
+          memoryPolicy: { source: 'darwin-sysctl-dispatch', executionScope: 'darwin:host' }
+        },
+        deliveryDirectory: { status: 'ready', path: deliveryPath, checkedDirectory: profile }
+      }
+    }
+  })
+  expect(JSON.stringify(notebookReady)).not.toContain(token)
+  await expect(lstat(deliveryPath)).rejects.toMatchObject({ code: 'ENOENT' })
+
+  for (const [check, evidence, reason, owner, requiresUser] of [
+    [
+      'environment',
+      { status: 'checking', pythonReady: false, rReady: false },
+      'notebook_environment_preparing',
+      'service',
+      false
+    ],
+    ['dependencies', { status: 'blocked' }, 'notebook_bubblewrap_missing', 'deployment', true],
+    ['dependencies', { status: 'blocked' }, 'notebook_trust_bundle_invalid', 'deployment', true],
+    [
+      'sandbox',
+      { status: 'unconfirmed' },
+      'notebook_linux_isolation_unconfirmed',
+      'deployment',
+      true
+    ],
+    [
+      'memoryPolicy',
+      { status: 'blocked' },
+      'notebook_linux_procfs_unavailable',
+      'deployment',
+      true
+    ],
+    [
+      'memoryPolicy',
+      { status: 'blocked' },
+      'notebook_linux_cgroup_unavailable',
+      'deployment',
+      true
+    ],
+    [
+      'memoryPolicy',
+      { status: 'blocked' },
+      'notebook_memory_policy_unavailable',
+      'deployment',
+      true
+    ]
+  ] as const) {
+    const baseline = notebookEvidence
+    notebookEvidence = {
+      ...baseline,
+      [check]: { ...evidence, reason, detail: token }
+    }
+    const status = await client.callTool({ name: 'get_setup_status' })
+    expect(status.structuredContent).toEqual(JSON.parse((await runCli(doctorArgs)).stdout))
+    expect(status.structuredContent).toMatchObject({
+      result: {
+        readiness: { agent: 'ready', notebook: evidence.status },
+        checks: { notebook: { [check]: { status: evidence.status, reason } } },
+        next: [
+          expect.objectContaining({
+            code: reason,
+            owner,
+            requiresUser,
+            verify: { capability: 'get_setup_status', profile }
+          })
+        ]
+      }
+    })
+    expect(JSON.stringify(status)).not.toContain(token)
+    notebookEvidence = baseline
+  }
+
+  await writeFile(deliveryPath, 'existing file')
+  const blockedDirectory = await client.callTool({ name: 'doctor' })
+  expect(blockedDirectory.structuredContent).toEqual(JSON.parse((await runCli(doctorArgs)).stdout))
+  expect(blockedDirectory.structuredContent).toMatchObject({
+    result: {
+      readiness: { notebook: 'ready' },
+      checks: {
+        deliveryDirectory: {
+          status: 'blocked',
+          path: deliveryPath,
+          reason: 'delivery_directory_not_directory'
+        }
+      },
+      next: [expect.objectContaining({ code: 'delivery_directory_not_directory', owner: 'user' })]
+    }
+  })
+  await rm(deliveryPath)
+
+  notebookEvidence = undefined
   advertisesDoctor = false
   await expectSupport('supported') // Older services may implement doctor without advertising it.
   agentReady = false

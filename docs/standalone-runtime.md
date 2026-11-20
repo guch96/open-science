@@ -328,6 +328,35 @@ Linux Notebook isolation still requires bubblewrap and permitted unprivileged us
 Missing sandbox support is an error; the Node host does not disable protection. Source Linux
 Electron tests also require an unlocked test Secret Service.
 
+### Notebook readiness for agents
+
+Run `open-science doctor --profile /absolute/path/to/profile --json` or call `get_setup_status`
+in that profile's local MCP session. `readiness.agent` covers runtime and provider. The independent
+`readiness.notebook` checks the default Python environment, protection dependencies and host
+memory policy using existing service Owners. You can inspect `checks.notebook.environment.rReady`
+for R. This check starts no Notebook or new execution domain, changes no execution permission,
+and leaves any user stop in effect. The delivery directory check runs in the CLI or MCP process.
+
+| Finding                                               | Who acts and how                                                                                                                                                                                                                                                |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Missing Python or recovery required                   | The user prepares or follows recovery instructions in Notebook environment Settings.                                                                                                                                                                            |
+| Invalid trust bundle                                  | The deployment operator checks the installation's OpenSSL and public CA prerequisites and the profile's custom PEM bundle. Doctor can diagnose the bundle of a running service; if the native OpenSSL dependency prevents startup, use the service startup log. |
+| Missing bubblewrap                                    | The Linux deployment operator installs the distribution package and makes `bwrap` available on the service PATH.                                                                                                                                                |
+| Linux isolation unconfirmed                           | The deployment operator verifies required namespaces and a private `/proc` mount under the service account and container policy. Finding `bwrap` proves only the executable is present. The read-only check does not launch a sandbox to verify this.           |
+| Linux procfs or limiting cgroup ancestors unavailable | The deployment operator restores authentic procfs and complete cgroup visibility for the memory reader. This is a host prerequisite, separate from Files permissions.                                                                                           |
+| Memory policy unavailable or under pressure           | The deployment operator uses the reported memory source and scope to diagnose the sampler or available resources.                                                                                                                                               |
+
+After an action, rerun setup status for the same profile. Readiness covers native host
+prerequisites. A Project, selected R or guest runtime, and current execution permissions are
+checked by their Owners at execution time. The Windows Settings protection check can launch
+compatibility probes, so the read-only Agent check leaves Windows isolation unconfirmed.
+
+The shared CLI/MCP contract is exercised with controlled service responses. Existing Owner tests
+cover native macOS readiness signals and Linux procfs/cgroup refusals. Those tests do not qualify
+every Linux host or container, or demonstrate Windows/WSL or remote Notebook execution. A
+container-specific setting from an installed test does not establish a general installation
+requirement. Confirm dispatch separately with the actual workload in the target deployment.
+
 ## Who stops the server
 
 | Action                                                                       | Result                                                                                                                                        |

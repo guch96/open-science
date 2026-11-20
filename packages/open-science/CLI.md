@@ -217,8 +217,7 @@ if the process subsequently exits; they cannot prove the stopped generation to a
 
 ## Readiness checks
 
-Inspect the running service without changing runtime, provider, credential, onboarding, or Skill
-settings:
+Inspect the running service and default local delivery directory:
 
 ```bash
 open-science doctor --json
@@ -228,8 +227,18 @@ The command prints `{ "result": { "readiness": ..., "checks": ..., "next": ... }
 `readiness.agent: "ready"` requires both the selected Agent runtime and active provider to be
 ready. A check is `missing` when its resource is absent and `not_ready` when it is configured but
 unusable; provider failures may include a stable `reason`, such as `credential_invalid`.
-`readiness.notebook: "unconfirmed"` means this check has no evidence about Notebook readiness.
-Doctor does not establish execution or delivery.
+`readiness.notebook` summarizes the service's default Python environment, system dependencies,
+isolation, and current host memory policy. `checks.notebook` reports each separately and includes
+the service platform, Python/R availability, and the memory source and scope when known. `ready`
+means the reported prerequisites passed. `checking` means an Owner is preparing or checking a
+prerequisite. `blocked` identifies a known problem. `unconfirmed` means some evidence is missing.
+See the [deployment prerequisites](../../docs/standalone-runtime.md#notebook-readiness-for-agents)
+for what each platform can establish. Actual Notebook dispatch and output delivery are separate.
+
+`checks.deliveryDirectory` inspects `<profile>/agent-delivery` on the CLI or MCP host, using the
+profile directory if the default location does not yet exist. It checks directory type and access
+without creating anything or writing a test file. File delivery still has to write and verify the
+actual output.
 
 Codex credential inspection checks supported material in the app-owned `auth.json` without launching
 Codex or validating expiry/revocation remotely; historical provider validation remains a separate gate.
@@ -237,7 +246,7 @@ Codex or validating expiry/revocation remotely; historical provider validation r
 `doctor` and `get_setup_status` have the same checks. `profile` identifies the running service's
 configuration root. `next` contains setup actions, with an owner, a user action flag and a
 verification step for the same profile. A completed inspection exits with code `0`, including
-when Agent readiness is blocked. If the service is
+when a readiness check is blocked. If the service is
 unreachable, the CLI emits `daemon_unavailable` and the startup command for the selected profile
 on stderr, and exits with code `3`. An HTTP authentication rejection stays an `access_denied`
 error.

@@ -7,6 +7,8 @@
     "packages/open-science/agent-adapter.mjs",
     "packages/open-science/agent-artifacts.mjs",
     "packages/open-science/agent-capabilities.mjs",
+    "packages/open-science/agent-delivery-directory.mjs",
+    "packages/open-science/agent-notebook-readiness.mjs",
     "packages/open-science/agent-package-capabilities.mjs",
     "packages/open-science/local-file-delivery.mjs",
     "packages/open-science/cli.mjs",
