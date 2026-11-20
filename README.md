@@ -343,7 +343,7 @@ open-science run --project "Systematic review" \
 
 # Download a generated artifact
 open-science artifacts list <session-id> --json
-open-science artifacts download <artifact-id> --output ./report.md
+open-science artifacts download <download-id> --session <session-id> --output ./report.md
 ```
 
 See the [CLI guide](packages/open-science/CLI.md) for the full command reference, JSON/JSONL output formats, exit codes, and headless service options.

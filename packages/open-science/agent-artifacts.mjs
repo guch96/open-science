@@ -136,9 +136,18 @@ async function deliveryStatus({ runId, reportName, tableName, reportPath, tableP
   )
   const available = outputs.filter(({ status }) => status === 'available' || status === 'verified')
   const verified = outputs.every(({ status }) => status === 'verified')
+  const execution = run.execution ?? { status: 'unconfirmed' }
+  const completed =
+    run.status === 'completed' &&
+    execution.sessionId === run.sessionId &&
+    execution.status === 'completed' &&
+    execution.kernelDispatched === true
   return {
     runId,
     sessionId: run.sessionId,
+    runStatus: run.status,
+    execution,
+    handoffStatus: completed && verified ? 'complete' : 'incomplete',
     delivery: {
       status: verified
         ? 'verified'
@@ -186,7 +195,7 @@ export const artifactCapabilities = [
   {
     name: 'get_delivery_status',
     description:
-      'Check delivery of the requested report and table for one Run. Verification checks source bytes and SHA-256, independently of scientific correctness.',
+      'Check execution and delivery for one Run. File verification checks source bytes and SHA-256. A complete handoff also requires Notebook dispatch and a completed Run; scientific correctness is separate.',
     inputSchema: z.strictObject({
       runId,
       reportName: outputName,

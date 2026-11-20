@@ -17,6 +17,8 @@ Install Open-Science with the application's installer or npm package. Start the 
 
 Use the capability catalog and detail schemas to find the operations the installed adapter exposes. Check service support and call doctor for the same profile. Base Agent readiness does not prove that a Notebook can run, has run, or produced files.
 
+For provider setup, relay the exact executable and argv from the setup action, including the selected profile. Wait for the user to sign in and then recheck that profile. Do not ask for or print credentials.
+
 Use the user's research instructions and choose an explicit Project. Generate and keep a request ID before sending. If the response is lost, query the original receipt in the same profile. Waiting only observes work; it does not cancel it. Use a new ID only for a new research turn. Leave provider credentials, Notebook continuation, and sensitive export confirmation to the user in Open-Science.
 
 Read the Run's Notebook execution separately from its outer status. If execution is waiting_for_user, keep the refusal ID and ask the user to choose Continue Notebook work in Compute in the original Session and branch once the cause is resolved. Do not resubmit, change execution context, or delegate stopped work. Recheck that same Session and match continuedFromRefusalId to observe the new user-authorized turn.
@@ -184,11 +186,20 @@ export class AgentError extends Error {
 }
 
 const safeId = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/)
+const requestReferences = (error, args) => {
+  const references = {}
+  for (const key of ['requestId', 'runId', 'sessionId', 'projectId', 'operationId', 'correlationId']) {
+    const value = [error?.[key], args?.[key]].find((id) => safeId.safeParse(id).success)
+    if (value) references[key] = value
+  }
+  return references
+}
 export const agentErrorDetails = (
   error,
   { capability, configRoot, readOnly, connected, args = {} } = {}
 ) => {
-  if (error instanceof AgentError) return error.details
+  if (error instanceof AgentError)
+    return { ...error.details, ...requestReferences(error.details, args) }
   const status = error?.status
   const known = Object.hasOwn(policies, error?.code)
   const code =
@@ -226,17 +237,7 @@ export const agentErrorDetails = (
     const [next] = details.next
     details.next = [{ ...next, argv: [...next.argv, '--profile', configRoot] }]
   }
-  for (const key of [
-    'requestId',
-    'runId',
-    'sessionId',
-    'projectId',
-    'operationId',
-    'correlationId'
-  ]) {
-    const value = error?.[key] ?? args[key]
-    if (safeId.safeParse(value).success) details[key] = value
-  }
+  Object.assign(details, requestReferences(error, args))
   if (code === 'literature_project_link_failed' && Array.isArray(error.itemIds)) {
     details.itemIds = error.itemIds.filter((id) => safeId.safeParse(id).success)
   }
@@ -538,7 +539,7 @@ export const invokeAgentCapability = async (
 ) => {
   const entry = getCapability(name, exposure)
   const args = entry.inputSchema.safeParse(input)
-  if (!args.success) throw new AgentError('invalid_request')
+  if (!args.success) throw new AgentError('invalid_request', requestReferences(undefined, input))
 
   let client
   const context = {

@@ -37,6 +37,16 @@ const actions = {
     'verify_notebook_isolation',
     'Verify that the Open-Science service user can launch bubblewrap with its required namespaces and private procfs mount in this deployment.'
   ],
+  notebook_linux_namespaces_unavailable: [
+    'deployment',
+    'review_linux_namespaces',
+    'Verify that the service account and container are permitted to create the namespaces required by bubblewrap.'
+  ],
+  notebook_linux_private_procfs_unavailable: [
+    'deployment',
+    'review_linux_private_procfs',
+    'Verify that the deployment permits bubblewrap to mount a private procfs inside the Notebook sandbox.'
+  ],
   notebook_windows_isolation_unconfirmed: [
     'user',
     'review_notebook_protection',

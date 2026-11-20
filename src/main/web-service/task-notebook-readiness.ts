@@ -1,4 +1,5 @@
 import type { ProvisionStatus } from '@aipoch/environment'
+import { probeLinuxIsolation } from '@aipoch/notebook-network-sandbox'
 import type { NotebookMemoryPolicyState } from '../../shared/notebook-memory'
 import type { NotebookNetworkStatus } from '../../shared/notebook-network'
 import type { TaskNotebookReadiness, TaskReadinessCheck } from '../../shared/task-api'
@@ -35,10 +36,10 @@ function environmentCheck(status?: ProvisionStatus): TaskNotebookReadiness['envi
   return { ...check, pythonReady: status.pythonReady, rReady: status.rReady }
 }
 
-function networkChecks(
+async function networkChecks(
   platform: NodeJS.Platform,
   network?: NotebookNetworkStatus
-): Pick<TaskNotebookReadiness, 'dependencies' | 'sandbox'> {
+): Promise<Pick<TaskNotebookReadiness, 'dependencies' | 'sandbox'>> {
   if (platform === 'win32') {
     return {
       dependencies: unconfirmed,
@@ -46,14 +47,20 @@ function networkChecks(
     }
   }
   switch (network?.kind) {
-    case 'ready':
+    case 'ready': {
+      const probe = platform === 'linux' ? await probeLinuxIsolation() : 'ready'
       return {
         dependencies: ready,
         sandbox:
-          platform === 'linux'
+          probe === 'unconfirmed'
             ? { status: 'unconfirmed', reason: 'notebook_linux_isolation_unconfirmed' }
-            : ready
+            : probe === 'namespaces-unavailable'
+              ? { status: 'blocked', reason: 'notebook_linux_namespaces_unavailable' }
+              : probe === 'procfs-unavailable'
+                ? { status: 'blocked', reason: 'notebook_linux_private_procfs_unavailable' }
+                : ready
       }
+    }
     case 'checking':
       return {
         dependencies: { status: 'checking', reason: 'notebook_sandbox_preparing' },
@@ -132,7 +139,7 @@ export async function readTaskNotebookReadiness(
   return {
     platform,
     environment: environmentCheck(environment),
-    ...networkChecks(platform, network),
+    ...(await networkChecks(platform, network)),
     memoryPolicy: memoryCheck(memory)
   }
 }

@@ -470,6 +470,11 @@ export type PackageOperation = {
   state: 'running' | 'awaiting-selection' | 'cancelling' | 'succeeded' | 'cancelled' | 'failed'
   session?: { projectId: string; sessionId: string }
   importTarget?: { projectId?: string; projectName?: string }
+  sensitiveExportReview?: {
+    expiresAt: number
+    destination?: string
+    fileDigest: { sizeBytes: number; checksum: string }
+  }
   agent?: {
     correlationId: string
     destinationPath?: string
@@ -477,6 +482,7 @@ export type PackageOperation = {
     failure?:
       | 'destination-conflict'
       | 'requires-user'
+      | 'content-changed'
       | 'invalid-archive'
       | 'source-unavailable'
       | 'requires-update'

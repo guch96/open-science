@@ -10,7 +10,7 @@ const requestId = z
   .string()
   .regex(/^[A-Za-z0-9_-]{1,128}$/)
   .describe('Stable request ID. Generate and keep it before you submit.')
-const waitTimeoutMs = z
+export const waitTimeoutMs = z
   .number()
   .int()
   .min(1)
@@ -290,7 +290,8 @@ registerResource(
     sessionId: sessionId.optional(),
     cwd: id('Working directory on the Open-Science host.').optional(),
     ...agentConfiguration.shape,
-    memoryEnabled: z.boolean().optional(),
+    ...sessionPreferences,
+    permissionPrompts: z.literal('none').describe('Deny requests that still need a person.').optional(),
     skillIds: z.array(id('Skill ID.')).optional(),
     specialist: id('Specialist ID or exact name for a new session.').optional(),
     turnIntent: z
@@ -313,7 +314,10 @@ registerResource(
       },
       options
     ),
-  undefined,
+  ({ permissionPrompts, turnIntent }, context) => {
+    if (permissionPrompts === 'none' && turnIntent === 'plan-first')
+      context.addIssue({ code: 'custom', message: 'A Plan requires an available human approver.' })
+  },
   { serviceCapability: 'durable-submissions' }
 )
 registerResource(

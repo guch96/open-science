@@ -537,7 +537,7 @@ a Run ID is returned, query the original receipt using the same profile:
 ```bash
 open-science run --project <project-id> --prompt-file ./task.md --request-id analysis-001 --wait --json
 open-science run status --request-id analysis-001 --json
-open-science run wait --request-id analysis-001 --timeout-ms 600000 --json
+open-science run wait --request-id analysis-001 --timeout-ms 30000 --json
 open-science run wait <run-id> --json
 ```
 
@@ -639,9 +639,9 @@ open-science run \
 - `--delegation allow|deny` updates whether the Session may create new delegated children. `deny`
   does not cancel, hide, or prevent collection/messaging of children admitted earlier.
 
-Ordinary `--wait` retains its terminal-only behavior. Add `--return-on-attention` to return a
-still-running Run when its Plan needs approval or Notebook work is stopped pending human
-continuation. Permission and delegated-question events do not cause an attention return.
+`--wait` returns a still-running Run when its Plan needs approval or Notebook work is stopped pending
+human continuation. `--return-on-attention` is accepted for older scripts and has the same behavior.
+Permission and delegated-question events do not cause an attention return.
 
 `get_run` and `wait_run` report Notebook `execution` independently from the outer Run. Execution
 describes the latest Python or R Notebook Run attributed to the exact research prompt: `preparing`,
@@ -896,7 +896,7 @@ List the artifacts produced for a session and download one by ID:
 
 ```bash
 open-science artifacts list <session-id> --json
-open-science artifacts download <artifact-id> --output ./report.md --json
+open-science artifacts download <download-id> --session <session-id> --output ./report.md --json
 ```
 
 Artifact output paths are resolved relative to the current working directory.

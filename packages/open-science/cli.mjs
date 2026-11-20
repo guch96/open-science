@@ -33,10 +33,6 @@ const DEFAULT_PORT = 44100
 const START_TIMEOUT_MS = 120_000
 // Cover the service's 40s authentication-aware stop budget plus exit-record observation.
 const STOP_TIMEOUT_MS = 42_000
-// Artifact content may be produced after a long-running task completes. Keep the CLI's
-// default transfer budget separate from the short control-request timeout used by the SDK.
-const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1_000
-
 const usage = `Usage: open-science <command> [options]
 
 Commands:
@@ -86,7 +82,7 @@ Commands:
   plan reject <session-id> --artifact-version <id> --revision <number>
   plan revise <session-id> --feedback <text>
   artifacts list <session-id>
-  artifacts download <artifact-id> --output <path>
+  artifacts download <download-id> --session <session-id> [--output <path>]
   literature search [query] [--project <id-or-name>] [--limit <n>] [--offset <n>]
   literature show <item-id>
   literature styles
@@ -106,14 +102,14 @@ Options:
   --config-root <path>   Config directory override
   --profile <path>       Alias for --config-root (portable CLI profile)
   --project <id-or-name> Project id or exact name
-  --session <id>         Resume an existing session
+  --session <id>         Resume a session or identify the Session for Artifact download
   --cwd <path>           Working directory for a new or matching existing session
   --prompt <text>        Prompt text (or read stdin when omitted)
   --prompt-file <path>   Read the prompt from a UTF-8 file
   --agent-context <text> Persistent Project Agent Context
   --agent-context-file <path>  Read Project Agent Context from a UTF-8 file
   --clear-agent-context  Clear a Project's persistent Agent Context
-  --approval-profile <profile>  ask, auto, or full (default: ask)
+  --approval-profile <profile>  ask, auto, or full (omit to use configured permissions)
   --provider <provider-id>  Configured Main provider
   --model <model-id>       Main model
   --provider-default-model Follow the provider-owned default model
@@ -136,13 +132,13 @@ Options:
   --clear-delegation | --clear-specialist  Clear one automation new-session default
   --permission-prompts none  Deny unresolved human interactions instead of waiting (run only)
   --request-id <id>      Stable submission identity for lookup and safe retries
-  --wait                 Wait for the run to finish
-  --return-on-attention  With --wait, return when the Plan needs approval
+  --wait                 Observe the Run until completion or attention (default: 10s, max: 30s)
+  --return-on-attention  Accepted for older scripts; --wait now returns on attention
   --timeout-ms <ms>      Bound startup or observation of a Run or package operation
   --output <path>        Destination path (session export, artifacts download)
   --style <style-id>     Citation style (literature format)
   --locale <locale>      Citation locale: en-US (default) or zh-CN (literature format)
-  --limit <n>            Page size, 1-100 (literature search)
+  --limit <n>            Page size, 1-100 (literature search; default: 20)
   --offset <n>           Page offset (literature search)
   --commit               Save a literature import; without it import only previews
   --duplicates <policy>  reuse (default), separate, or fill-missing (literature import --commit)
@@ -1332,15 +1328,6 @@ export const urlCommand = async (options, deps = DEFAULT_DEPS) => {
   deps.log(await authenticatedUrl(state, deps))
 }
 
-const writeDownload = async (response, output) => {
-  const { deliverLocalFile } = await import('./local-file-delivery.mjs')
-  try {
-    await deliverLocalFile(() => response, output)
-  } finally {
-    if (response.body && !response.body.locked) await response.body.cancel().catch(() => {})
-  }
-}
-
 const persistRunRequest = async ({ profile, requestId, projectId, sessionId }) => {
   const directory = join(profile, 'agent-run-requests')
   await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -1373,7 +1360,6 @@ const TASK_DEPS = {
   readBinaryFile: (path) => readFile(path),
   readStdin: () => readStreamText(process.stdin),
   persistRunRequest,
-  writeDownload,
   log: (...args) => console.log(...args),
   warn: (...args) => console.warn(...args),
   stdinIsTTY: process.stdin.isTTY,
@@ -1386,7 +1372,7 @@ const outputValue = (value, options, deps) => {
   if (options.json || options.jsonl) deps.log(JSON.stringify(value))
   else if (Array.isArray(value)) {
     for (const item of value) {
-      deps.log(`${item.id}\t${item.name ?? item.title ?? item.path ?? ''}`.trimEnd())
+      deps.log(`${item.id ?? item.downloadId}\t${item.name ?? item.title ?? item.path ?? ''}`.trimEnd())
     }
   } else {
     deps.log(
@@ -1496,7 +1482,8 @@ const emitRunEvent = (event, options, deps) => {
 }
 
 const isEventForRun = (event, run) => {
-  if (event?.runId) return event.runId === run.runId
+  const runId = event?.runId ?? event?.data?.runId
+  if (runId) return runId === run.runId
   const sessionId = event?.sessionId ?? event?.data?.sessionId
   return !sessionId || sessionId === run.sessionId
 }
@@ -1505,7 +1492,7 @@ const streamRunEvents = async (eventStream, runRef, options, deps, signal) => {
   try {
     for await (const event of eventStream) {
       if (!runRef.current) {
-        runRef.pending.push(event)
+        if (runRef.pending.length < 256) runRef.pending.push(event)
         continue
       }
       if (!isEventForRun(event, runRef.current)) continue
@@ -1626,11 +1613,12 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     return runAgentCommand(parsed, deps)
   }
   const client = await deps.connect({ configRoot: options.configRoot })
-  const call = async (name, input = {}) => {
+  const call = async (name, input = {}, signal) => {
     const { invokeAgentCapability } = await import('./agent-adapter.mjs')
     return invokeAgentCapability(name, input, {
       exposure: 'cli',
       configRoot: options.configRoot,
+      signal,
       connect: async () => client
     })
   }
@@ -2028,18 +2016,18 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   if (command === 'artifacts' && subcommand === 'list') {
     const sessionId = positionals[0]
     if (!sessionId) throw new CliUsageError('Session id is required.')
-    outputValue(await client.listArtifacts(sessionId), options, deps)
+    outputValue(await call('list_artifacts', { sessionId }), options, deps)
     return
   }
   if (command === 'artifacts' && subcommand === 'download') {
-    const artifactId = positionals[0]
-    if (!artifactId) throw new CliUsageError('Artifact id is required.')
-    if (!options.output) throw new CliUsageError('--output is required.')
-    const response = await client.downloadArtifact(artifactId, {
-      timeoutMs: options.timeoutMs ?? ARTIFACT_DOWNLOAD_TIMEOUT_MS
-    })
-    await deps.writeDownload(response, options.output)
-    outputValue({ artifactId, output: resolve(options.output) }, options, deps)
+    const downloadId = positionals[0]
+    if (!downloadId) throw new CliUsageError('Download ID is required.')
+    if (!options.session) throw new CliUsageError('--session is required.')
+    outputValue(await call('download_artifact', {
+      sessionId: options.session,
+      downloadId,
+      ...(options.output ? { outputPath: resolve(options.output) } : {})
+    }), options, deps)
     return
   }
   if (command === 'literature' && subcommand === 'search') {
@@ -2047,7 +2035,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     const page = await call('search_literature', {
       ...(query ? { query } : {}),
       ...(options.project ? { projectId: await resolveCliProjectId(client, options.project) } : {}),
-      limit: options.limit ?? 50,
+      ...(options.limit === undefined ? {} : { limit: options.limit }),
       ...(options.offset === undefined ? {} : { offset: options.offset })
     })
     if (options.json) deps.log(JSON.stringify(page))
@@ -2188,8 +2176,8 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (!runId && !options.requestId) throw new CliUsageError('Run id is required.')
     outputValue(
       options.requestId
-        ? await client.getSubmission(options.requestId)
-        : await client.getRun(runId),
+        ? await call('get_submission', { requestId: options.requestId })
+        : await call('get_run', { runId }),
       options,
       deps
     )
@@ -2198,7 +2186,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   if (command === 'run' && subcommand === 'cancel') {
     const runId = positionals[0]
     if (!runId) throw new CliUsageError('Run id is required.')
-    outputValue(await client.cancelRun(runId), options, deps)
+    outputValue(await call('cancel_run', { runId }), options, deps)
     return
   }
   if (command === 'run') {
@@ -2206,6 +2194,11 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
     if (waiting && !positionals[0] && !options.requestId)
       throw new CliUsageError('Run id or --request-id is required.')
     if (!waiting && !options.project) throw new CliUsageError('--project is required.')
+    const { AgentError } = await import('./agent-adapter.mjs')
+    const { waitTimeoutMs } = await import('./agent-capabilities.mjs')
+    const budget = waitTimeoutMs.safeParse(options.timeoutMs)
+    if (!budget.success) throw new AgentError('invalid_request', { message: 'Use a Run wait between 1 and 30000 milliseconds.' })
+    const timeoutMs = budget.data
     const projectId = waiting ? undefined : await resolveCliProjectId(client, options.project)
     const prompt = waiting ? undefined : await readPrompt(options, deps)
     if (!waiting && !prompt) throw new CliUsageError('Prompt is required.')
@@ -2220,24 +2213,29 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
           sessionId: options.session
         })
       } catch {
-        const { AgentError } = await import('./agent-adapter.mjs')
         throw new AgentError('recovery_record_failed', {
+          requestId,
+          projectId,
+          ...(options.session ? { sessionId: options.session } : {}),
           message: 'Could not save the request in the selected profile. No research was submitted.',
           owner: 'deployment',
           next: [{ action: 'check_profile', profile: client.configRoot ?? options.configRoot }]
         })
       }
     }
-    const waitStartedAt = Date.now()
-    const remainingTimeout = () => {
-      if (options.timeoutMs === undefined) return undefined
-      const remaining = options.timeoutMs - (Date.now() - waitStartedAt)
-      if (remaining <= 0)
-        throw new OpenScienceApiError('Timed out waiting for the Run.', { code: 'timeout' })
-      return remaining
-    }
+    const deadline = Date.now() + timeoutMs
+    const remainingTimeout = () => Math.max(1, deadline - Date.now())
+    const observation = options.wait ? AbortSignal.timeout(timeoutMs) : undefined
+    let runId = waiting ? positionals[0] : undefined
     const runRef = { current: undefined, pending: [] }
     const abortController = new AbortController()
+    const attachEvents = (run) => {
+      if (abortController.signal.aborted) return
+      runRef.current = { runId, sessionId: run.sessionId }
+      for (const event of runRef.pending.splice(0)) {
+        if (isEventForRun(event, runRef.current)) emitRunEvent(event, options, deps)
+      }
+    }
     let eventStream
     // The event stream only renders progress; waitForRun remains authoritative for the final Run
     // state, so a mid-run stream failure must not fail an otherwise-successful command.
@@ -2251,52 +2249,25 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
         )
     }
     let eventTask
-    let submissionAttempted = false
     let result
     try {
-      eventStream =
-        options.wait && !options.json && typeof client.events === 'function'
-          ? client.events({ signal: abortController.signal })
-          : undefined
-      let readyTimer
       try {
-        await (eventStream && options.timeoutMs !== undefined
-          ? Promise.race([
-              eventStream.ready,
-              new Promise((_, reject) => {
-                readyTimer = setTimeout(
-                  () =>
-                    reject(
-                      new OpenScienceApiError('Timed out waiting for the Run event stream.', {
-                        code: 'timeout'
-                      })
-                    ),
-                  remainingTimeout()
-                )
-              })
-            ])
-          : eventStream?.ready)
-      } finally {
-        clearTimeout(readyTimer)
-      }
-      eventTask = eventStream
-        ? streamRunEvents(eventStream, runRef, options, deps, abortController.signal).catch(
-            (error) => {
+        if (options.wait && !options.json && typeof client.events === 'function') {
+          eventStream = client.events({ signal: abortController.signal })
+          eventTask = Promise.resolve(eventStream.ready)
+            .then(() => streamRunEvents(eventStream, runRef, options, deps, abortController.signal))
+            .catch((error) => {
               if (!abortController.signal.aborted) warnEventFailure(error)
-            }
-          )
-        : undefined
-      submissionAttempted = !waiting
-      const started = waiting
-        ? requestId
-          ? await client.waitForSubmission(requestId, { timeoutMs: remainingTimeout() })
-          : await client.getRun(
-              positionals[0],
-              options.timeoutMs === undefined ? undefined : { timeoutMs: remainingTimeout() }
-            )
-        : await client.startRun(
-            {
-              project: projectId,
+            })
+        }
+      } catch (error) {
+        warnEventFailure(error)
+      }
+      let receipt = waiting
+        ? undefined
+        : await call('start_run', {
+              requestId,
+              projectId,
               prompt,
               ...(options.cwd ? { cwd: resolve(options.cwd) } : {}),
               ...(options.session ? { sessionId: options.session } : {}),
@@ -2311,9 +2282,7 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
                 : {}),
               ...(options.specialist ? { specialist: options.specialist } : {}),
               ...(options.delegation ? { delegationPolicy: options.delegation } : {}),
-              ...(agentConfigurationPatch(options)
-                ? { agentConfiguration: agentConfigurationPatch(options) }
-                : {}),
+              ...agentConfigurationPatch(options),
               ...(options.memoryEnabled !== undefined
                 ? { memoryEnabled: options.memoryEnabled }
                 : {}),
@@ -2327,67 +2296,45 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
                       ? { computeHostIds: options.computeHosts }
                       : {})
                   })
-            },
-            {
-              requestId,
-              ...(options.timeoutMs === undefined ? {} : { timeoutMs: remainingTimeout() })
-            }
-          )
-      runRef.current = { runId: started.id, sessionId: started.sessionId }
-      for (const event of runRef.pending.splice(0)) {
-        if (isEventForRun(event, runRef.current)) emitRunEvent(event, options, deps)
+            }, observation)
+      if (options.wait && requestId && (!receipt || receipt.status === 'pending')) {
+        receipt = (await call('wait_submission', { requestId, timeoutMs: remainingTimeout() }, observation)).receipt
       }
-      try {
-        const waitOptions = {
-          ...(options.timeoutMs === undefined ? {} : { timeoutMs: remainingTimeout() }),
-          ...(options.returnOnAttention ? { returnOnAttention: true } : {})
-        }
-        result = options.wait
-          ? Object.keys(waitOptions).length === 0
-            ? await client.waitForRun(started.id)
-            : await client.waitForRun(started.id, waitOptions)
-          : started
-      } catch (error) {
-        if (options.cancelOnTimeout && error?.code === 'timeout') {
+      runId ??= receipt?.runId
+      if (!options.wait || !runId) {
+        if (options.json || options.jsonl)
+          outputValue({ ...receipt, ...(recoveryFile ? { recoveryFile } : {}), ...(options.wait ? { timeoutMs } : {}) }, options, deps)
+        else
+          deps.log(`Submission ${receipt.status}: ${requestId}. Query: open-science run status --request-id ${requestId}.`)
+        if (['failed', 'interrupted'].includes(receipt.status)) deps.setExitCode(1)
+        return
+      }
+      if (eventStream) {
+        // Read Session identity for progress independently of the authoritative wait.
+        void call('get_run', { runId }, abortController.signal).then(attachEvents, () => {})
+      }
+      result = (await call('wait_run', { runId, timeoutMs: remainingTimeout() }, observation)).run
+      if (eventStream) attachEvents(result)
+    } catch (error) {
+      if (!(error instanceof AgentError)) throw error
+      const details = { ...error.details }
+      if (requestId) details.requestId ??= requestId
+      if (recoveryFile) details.recoveryFile = recoveryFile
+      if (options.wait) details.timeoutMs = timeoutMs
+      if (runId) {
+        details.runId ??= runId
+        details.completionStatus ??= 'unconfirmed'
+        details.next = [{ action: 'get_run', runId }]
+        if (options.cancelOnTimeout && details.code === 'timeout') {
           try {
-            await client.cancelRun(started.id)
-          } catch (cancelError) {
-            if (error instanceof Error) {
-              if (error.cause === undefined) error.cause = cancelError
-              const cancelMessage =
-                cancelError instanceof Error ? cancelError.message : String(cancelError)
-              error.message = `${error.message} Server run cancellation also failed: ${cancelMessage}`
-            }
+            await call('cancel_run', { runId })
+            details.message = 'The observation timed out and cancellation was requested. Query the original Run for its final state.'
+          } catch {
+            details.message = 'The observation timed out and cancellation was not confirmed. Query the original Run for its final state.'
           }
         }
-        throw error
       }
-    } catch (error) {
-      if (error && typeof error === 'object' && requestId) {
-        error.requestId = requestId
-        if (recoveryFile) error.recoveryFile = recoveryFile
-        const profile = client.configRoot ? ` --profile ${JSON.stringify(client.configRoot)}` : ''
-        error.message += ` Request: ${requestId}. Query: open-science run status --request-id ${requestId}${profile}.`
-      }
-      if (
-        error &&
-        typeof error === 'object' &&
-        ((runRef.current && options.wait) ||
-          (submissionAttempted &&
-            (['daemon_unavailable', 'timeout'].includes(error.code) ||
-              error instanceof SyntaxError ||
-              (error instanceof TypeError && error.message === 'fetch failed') ||
-              ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'UND_ERR_SOCKET'].includes(
-                error.cause?.code
-              ))))
-      ) {
-        error.completionStatus = runRef.current ? 'unconfirmed' : 'submission-unconfirmed'
-        if (runRef.current) error.runId = runRef.current.runId
-        error.message += runRef.current
-          ? ` Completion status unconfirmed for run ${runRef.current.runId}. Query: open-science run status ${runRef.current.runId}. The run was not retried.`
-          : ' Submission result unconfirmed. Query the request receipt before retrying; the request was not retried.'
-      }
-      throw error
+      throw new AgentError(details.code, details)
     } finally {
       abortController.abort()
       // Progress transports are advisory. An iterator ignoring abort must not trap CLI exit.
@@ -2405,30 +2352,18 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
         clearTimeout(timer)
       }
     }
-    if (!options.wait && !['completed', 'failed', 'cancelled'].includes(result.status)) {
-      result = {
-        ...result,
-        submissionStatus: 'submitted-not-completed',
-        notice: 'Submitted, not completed. Exiting the App may interrupt this work.',
-        next: ['run', 'status', result.id]
-      }
-    }
-    if (recoveryFile && (options.json || options.jsonl)) {
-      result = { ...result, requestId, recoveryFile }
-    }
-    if (options.json || options.jsonl) outputValue(result, options, deps)
+    if (options.json || options.jsonl)
+      outputValue({ ...result, timeoutMs, ...(requestId ? { requestId } : {}), ...(recoveryFile ? { recoveryFile } : {}) }, options, deps)
     else if (result.status === 'completed') deps.log(result.output || `Run completed: ${result.id}`)
     else if (result.status === 'failed') deps.log(`Run failed: ${result.error ?? result.id}`)
     else if (result.status === 'cancelled') deps.log(`Run cancelled: ${result.id}`)
+    else if (result.execution?.status === 'waiting_for_user')
+      deps.log(result.execution.next?.message ?? `Notebook execution needs the user: ${result.id}`)
     else if (result.attention?.kind === 'plan-approval') {
       const plan = result.attention.plan
       deps.log(
         `Run is waiting for Plan approval: open-science plan approve ${result.sessionId} --artifact-version ${plan.artifactVersionId} --revision ${plan.revision}`
       )
-      if (!options.wait)
-        deps.log(
-          `Submitted, not completed: ${result.id}. Exiting the App may interrupt this work. Query: open-science run status ${result.id}`
-        )
     } else
       deps.log(
         `Submitted, not completed: ${result.id} (session ${result.sessionId}). Exiting the App may interrupt this work. Query: open-science run status ${result.id}`

@@ -123,7 +123,9 @@ async function resourceAgents(
 }
 
 it('recovers the original study after the initial submission response is lost', async () => {
-  const args = { requestId: 'study-request', projectId: 'p1', prompt: 'Review these results.' }
+  const args = {
+    requestId: 'study-request', projectId: 'p1', prompt: 'Review these results.', permissionProfile: 'auto'
+  }
   const receipt = { requestId: args.requestId, status: 'accepted', runId: 'run-1', createdAt: 1 }
   let accepted = false
   let writes = 0
@@ -137,6 +139,7 @@ it('recovers the original study after the initial submission response is lost', 
           if (
             input.project === 'p1' &&
             input.prompt === args.prompt &&
+            input.permissionProfile === 'auto' &&
             input.sessionId === undefined
           ) {
             accepted = true
@@ -158,7 +161,7 @@ it('recovers the original study after the initial submission response is lost', 
     { projectId: 'p1', prompt: 'Missing request' },
     { ...args, requestId: '../invalid' },
     { requestId: 'no-project', prompt: 'Missing Project' },
-    { ...args, permissionProfile: 'full' }
+    { ...args, permissionProfile: 'unknown' }
   ]) {
     const rejected = await agent.mcp('start_run', invalid)
     expect(rejected.isError).toBe(true)
@@ -1302,7 +1305,29 @@ it('delivers a pinned Artifact through either entry point without overwriting lo
   })
   expect(await readFile(tablePath, 'utf8')).toBe('abc')
   expect(await both('get_delivery_status', { ...expected, tablePath })).toMatchObject({
+    handoffStatus: 'incomplete',
+    execution: { status: 'unconfirmed' },
     delivery: { status: 'verified', verified: true }
+  })
+  Object.assign(run, { execution: { status: 'failed', sessionId: 's1', kernelDispatched: true } })
+  expect(await both('get_delivery_status', { ...expected, tablePath })).toMatchObject({
+    handoffStatus: 'incomplete', execution: { status: 'failed', kernelDispatched: true }
+  })
+  Object.assign(run, { execution: { status: 'completed', sessionId: 's1', kernelDispatched: true } })
+  expect(await both('get_delivery_status', { ...expected, tablePath })).toMatchObject({
+    handoffStatus: 'complete', delivery: { status: 'verified', verified: true }
+  })
+  const shortcutPath = join(profile, 'shortcut.csv')
+  const shortcut = [
+    'artifacts', 'download', 'table-version', '--session', 's1', '--output', shortcutPath,
+    '--profile', profile, '--json'
+  ]
+  expect(JSON.parse((await runCli(shortcut)).stdout)).toMatchObject({
+    sessionId: 's1', downloadId: 'table-version', path: shortcutPath, bytes: 3,
+    sha256: report.sha256, verified: true
+  })
+  expect((await cliError(shortcut)).error).toMatchObject({
+    code: 'delivery_target_exists', sessionId: 's1'
   })
 
   await bothFail(request, 'delivery_target_exists')

@@ -1,6 +1,7 @@
 # Phase 1 Agent loop acceptance
 
-Track the gates in [the implementation plan](real-agent-loop-implementation-plan.md) and
+Track the gates in [the English implementation plan](real-agent-loop-implementation-plan.en.md)
+and [the original Chinese implementation note](real-agent-loop-implementation-plan.md) and
 [spec #54](https://github.com/guch96/open-science/issues/54). An installed package, an Agent
 turn, a Notebook dispatch, and verified files are separate observations.
 
