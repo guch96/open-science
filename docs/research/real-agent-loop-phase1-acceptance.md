@@ -212,6 +212,59 @@ the focused contracts and Owner test run passed 1,058 tests across 17 files.
   `waiting_for_user` with `kernelDispatched: false`. The operator denied a cell with an invalid
   Python import and an unintended write to the source input. No dispatch or delivered output was
   credited to that cell.
+- OpenCode resumed the same conversation after the operator increased the model context and
+  separately authorized a new Run in the same Fork. Its prompt explicitly preserved the
+  historical files. Run `493ff788-d734-4bca-9e45-34682b62e32f` requested a Shell script and then
+  a Python cell that both tried to overwrite historical files. The operator denied both in
+  Web and explicitly cancelled the Run. OpenCode correctly surfaced the code handoff and stopped
+  for the decision, but the local 9B model did not follow the research constraints.
+- In the same OpenCode conversation, a separately authorized rerun on `16ed98260` used a short
+  Python cell supplied as research input and the independently validated 64K Qwen3-4B provider.
+  OpenCode received no tool sequence, internal parameters, or script for the MCP workflow. Its new
+  request `continued-study-final-001` became Run `0781abd2-2631-44a4-b444-ce27cf1455b2` on the same
+  writable Fork. Notebook Run `notebook-run-1795175195236-1` dispatched Python, read the migrated
+  `stats_input.json`, and produced `6,90,15.0,10,20`. Both published Artifacts carry that producer ID.
+  OpenCode downloaded both files and exported the package itself over MCP. The original Session
+  remained read-only, and no CLI was used for import, research submission, Fork, or delivery.
+
+| File | Download or operation ID | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| `continued_report.md` | `acfff3ec-4607-438e-8731-8d67ec7f1d97` | 159 | `568d5eab4008b38fc7b0e363df9d24b39392e3af23e6dd84c274a35a11fc5285` |
+| `continued_results.csv` | `a17224c7-7ffb-42e0-bb64-12640231e10a` | 41 | `6f141f51adb0b0bde0baed696b27286a6c11d694960cbe173e844cae937e0254` |
+| `continued-study.science` | `5ea2608d-0138-49ce-94b5-55d2912faae2` | 567366 | `04e5bdec55bdcd68ef6f03a2bc3c1d32bc8f35369f38c5df6d32323ab5004ab1` |
+
+The export operation lookup confirmed the same file (correlation
+`1033ac68-9e10-40ac-ab16-b0f492fe93aa`); the receiving import and Fork lookups after restart were
+`unconfirmed`, as expected for prior package snapshots. The actual archive and 32 inventory records
+(23 unique entries) were verified, including the downloaded bytes. The input and statistics were
+verified independently. The model made further Notebook calls after publishing and hit
+`FileExistsError` on the exclusive outputs. The last Notebook Run `notebook-run-1795175277009-3`
+failed; `get_delivery_status` therefore returned `delivery.status: verified` and
+`handoffStatus: incomplete`. OpenCode's final prose overstated the Notebook outcome. This proves
+the same external Agent can drive the package and file operations, while the earlier guided run
+supplies the clean complete-handoff evidence. It does not close the stricter #67 gate for a clean
+run driven entirely by the same external Agent. The shared guide now calls for checking
+`get_delivery_status` before reporting success. A separate internal Notebook tool regression
+removes technical retry advice after a code or runtime approval was declined.
+
+### Repaired runtime handoff in the installed build
+
+- macOS and Linux npm builds from `16ed98260` passed `test:npm-installed`. The Linux CLI and
+  native tarballs had SHA-256 `081c8671e0492fc04a0d3afb836e0990b32240c03d6e79b6256d079b4f638818`
+  and `2f12f1b350120cad7687bcb257389837904a57a79f21f6b43156b08df0eb91be`. The directly installed
+  Linux package restarted the earlier receiving service, recovered accepted Run
+  `16837110-d44b-4df4-8130-782ae2fb5526`, and verified the earlier files again without resubmission.
+- From the same installed package a new Ask-mode Session `c423f8eb-62d9-4c19-812b-df304605de2c`
+  ran the synthetic `6 * 7` check. On Run `593b5c56-a4a0-42fa-a58f-800b14467788`
+  (`phase1-final-runtime-review-1120`), real `get_run`, `get_session`, and both CLI JSON and MCP
+  stdio `wait_run` returned `waiting_for_user`, `kernelDispatched: false`, and
+  `review_notebook_runtime_in_app` for the same Session, prompt, and branch. No Notebook Run ID
+  or interpreter path was returned before the decision. The operator confirmed the environment in
+  the original Web Session. The same research Run then completed with real `kernelDispatched: true`
+  on Notebook Run `notebook-run-1795174766048-1` and returned `42`.
+- Regression tests cover broker settlement, automatic binding, wrong prompt/branch, redacted
+  notices and protocol parity. Session queries also have a regression for a new prompt that
+  inherits a prior execution intent: only execution attributable to the new prompt can count.
 
 ### Desktop handoff regression
 
@@ -298,9 +351,10 @@ dialog; it verifies that the app defaults to Cancel and publishes the exact revi
 
 ## Remaining gates
 
-| Gate                                                                                              | Evidence required                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Registry ([#68](https://github.com/guch96/open-science/issues/68))                                | Repeat on the officially published target version after release. No registry result is inferred from local tarballs.                                                                                                                                                                                   |
+| Gate | Evidence required |
+| --- | --- |
+| Clean same-Agent migration ([#67](https://github.com/guch96/open-science/issues/67)) | Repeat the attached-package flow without a supplied calculation cell and with `handoffStatus: complete` in the same Agent conversation. The independent receiving environment and verified delivery evidence above are already recorded. |
+| Registry ([#68](https://github.com/guch96/open-science/issues/68)) | Repeat on the officially published target version after release. No registry result is inferred from local tarballs. |
 
 Record the build and environment, IDs linking requests to Runs and package operations, the actual
 MCP calls, user decisions, Notebook dispatch, and file paths, byte counts and checksums. Omit
