@@ -1,16 +1,18 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { expect, it } from 'vitest'
 import { configureTestRuntimeMetadata } from '../../../test/runtime-metadata'
+import type { ResolveArtifactVersionDescriptorsRequest } from '../../shared/artifacts'
 import type { PackageOperationRequest } from '../../shared/session-package'
 import { createApplicationCommandRouter } from '../application-command-router'
 import type { ApplicationCommandByNameDispatcher } from '../application-command-composition-contract'
 import { ApplicationEventHub } from '../application-events'
+import { ArtifactProvenanceRepository } from '../artifacts/provenance-repository'
 import { createProvenanceTestFixture } from '../artifacts/provenance-test-fixtures'
 import {
   dataContentApplicationCommands,
@@ -19,6 +21,7 @@ import {
 import { englishNativeTranslator } from '../locale/main-process-messages'
 import { SessionRepository } from '../session-persistence/repository'
 import { initDataRoot } from '../storage-root'
+import { TaskRunJournal } from '../tasks/task-run-journal'
 import { startWebHttpServer } from '../web-service/http-server'
 import { HeadlessTaskApi } from '../web-service/task-api'
 import { SessionPackageDesktop } from './desktop'
@@ -27,6 +30,9 @@ import { SessionPackageService } from './service'
 const cli = resolve('packages/open-science/cli.mjs')
 const exec = promisify(execFile)
 const source = { projectId: 'project', sessionId: 'session' }
+const artifactPackage = resolve(
+  'src/main/session-package/fixtures/session-package-v0.31.1-artifact.science'
+)
 const resetOwnership = configureTestRuntimeMetadata()
 type CliResult = Promise<{ stdout: string; stderr: string }>
 
@@ -46,12 +52,18 @@ async function withPackageService(
     afterAdmission?: () => Promise<void>
     sensitive?: boolean
     advertisePackageOperations?: boolean
+    seedSource?: boolean
   } = {}
 ): Promise<void> {
   const fixture = await createProvenanceTestFixture()
   const root = fixture.storageRoot
   const events = new ApplicationEventHub()
   initDataRoot(root)
+  const sessions = new SessionRepository(root)
+  const provenance = new ArtifactProvenanceRepository({
+    ...fixture.repositoryOptions,
+    loadSession: (projectId, sessionId) => sessions.loadSession(projectId, sessionId)
+  })
   const service = new SessionPackageService({
     storageRoot: root,
     getClient: async () => fixture.client
@@ -78,7 +90,7 @@ async function withPackageService(
         ...invocation,
         args: invocation.args as [PackageOperationRequest]
       })
-      if ((invocation.args[0] as { action?: string }).action === 'agent-export')
+      if (['agent-export', 'agent-import'].includes((invocation.args[0] as PackageOperationRequest).action))
         await options.afterAdmission?.()
       return response
     }
@@ -86,8 +98,9 @@ async function withPackageService(
   const sdk = new Client({ name: 'package-test', version: '1' })
   let server: Awaited<ReturnType<typeof startWebHttpServer>> | undefined
   try {
-    await fixture.client.project.create({ data: { id: source.projectId, name: 'Research' } })
-    await new SessionRepository(root).saveSession({
+    if (options.seedSource !== false)
+      await fixture.client.project.create({ data: { id: source.projectId, name: 'Research' } })
+    if (options.seedSource !== false) await sessions.saveSession({
       id: source.sessionId,
       projectId: source.projectId,
       title: 'Retained research',
@@ -123,22 +136,19 @@ async function withPackageService(
       tasks: new HeadlessTaskApi({
         commands: {
           commandNames: () => ['projects:list'],
-          invoke: async (name) => {
+          invoke: async (name, { args }) => {
+            if (name === 'sessions:load-all') return sessions.loadAll()
+            if (name === 'artifacts:resolve-version-descriptors')
+              return provenance.resolveVersionDescriptors(args[0] as ResolveArtifactVersionDescriptorsRequest)
             if (name !== 'projects:list') throw new Error(`Unexpected task command: ${name}`)
-            return [
-              {
-                id: source.projectId,
-                name: 'Research',
-                description: '',
-                isExample: false,
-                createdAt: 1,
-                updatedAt: 1
-              }
-            ]
+            const projects = await fixture.client.project.findMany({ select: { id: true, name: true } })
+            return projects.map((project) => ({
+              ...project, description: '', isExample: false, createdAt: 1, updatedAt: 1
+            }))
           }
         },
         agent: {} as never
-      }),
+      }, { runJournal: new TaskRunJournal(root), submissionRoot: root }),
       bootstrap: {
         appName: 'Open-Science',
         appVersion: 'test',
@@ -216,6 +226,127 @@ it('asks the user to update a service without Agent package support before writi
       }
     }
   )
+})
+
+it('imports an attached archive into a fresh profile and inspects the read-only Session', async () => {
+  await withPackageService(async ({ root, sdk, callCli }) => {
+    const sourcePath = join(root, 'attached.science')
+    await copyFile(artifactPackage, sourcePath)
+    const imported = await sdk.callTool({
+      name: 'import_session',
+      arguments: { sourcePath, newProjectName: 'From package' }
+    })
+    expect(imported.isError, JSON.stringify(content(imported))).not.toBe(true)
+    const result = content(imported).result as {
+      session: { projectId: string; sessionId: string }
+      operationId: string
+      correlationId: string
+    }
+    expect(result).toMatchObject({
+      kind: 'import',
+      sourcePath,
+      newProjectName: 'From package',
+      operationId: expect.any(String),
+      correlationId: expect.any(String),
+      completionStatus: 'completed',
+      waitMs: 30_000,
+      session: { projectId: expect.any(String), sessionId: expect.any(String), readOnly: true },
+      packageSummary: { title: 'Artifact research', fileCount: 2 }
+    })
+    expect(result.session.sessionId).not.toBe('session-1')
+    const scope = { projectId: result.session.projectId, sessionId: result.session.sessionId }
+    expect(JSON.parse((await callCli('get_session', scope)).stdout)).toMatchObject({
+      result: {
+        id: scope.sessionId,
+        projectId: scope.projectId,
+        title: 'Artifact research',
+        status: 'idle',
+        artifactCount: 1,
+        readOnly: true,
+        packageOrigin: { sourceProjectId: 'project-1', sourceSessionId: 'session-1' }
+      }
+    })
+    const listed = await sdk.callTool({ name: 'list_sessions', arguments: {} })
+    expect(content(listed).result).toHaveLength(1)
+    const artifacts = await sdk.callTool({ name: 'list_artifacts', arguments: { sessionId: scope.sessionId } })
+    expect(content(artifacts).result).toEqual([
+      expect.objectContaining({ name: 'plot.png', downloadId: expect.any(String), sizeBytes: 29 })
+    ])
+    const lookup = JSON.parse((await callCli('get_package_operation', {
+      kind: 'import', sourcePath, correlationId: result.correlationId, newProjectName: 'From package'
+    })).stdout)
+    expect(lookup.result).toMatchObject({
+      operationId: result.operationId,
+      completionStatus: 'completed',
+      session: { ...scope, readOnly: true },
+      packageSummary: { fileCount: 2 }
+    })
+    for (const [name, args] of [
+      ['start_run', { ...scope, requestId: 'read-only-import', prompt: 'Continue this history' }],
+      ['update_session_configuration', { ...scope, expectedRevision: 0, memoryEnabled: false }]
+    ] as const) {
+      const write = await sdk.callTool({ name, arguments: args })
+      expect(write.isError).toBe(true)
+      expect(content(write).error).toMatchObject({ code: 'session_read_only', retryable: false })
+    }
+  }, { seedSource: false })
+})
+
+it('recovers the original import after a lost admission response and does not confuse a later import', async () => {
+  const releaseResponse = Promise.withResolvers<void>()
+  let holdResponse = true
+  await withPackageService(async ({ root, sdk, callCli }) => {
+    const sourcePath = join(root, 'restore.science')
+    await copyFile(artifactPackage, sourcePath)
+    const placement = { sourcePath, newProjectName: 'Restored' }
+    try {
+      const call = await sdk.callTool({ name: 'import_session', arguments: { ...placement, waitMs: 150 } })
+      expect(call.isError).not.toBe(true)
+      const first = content(call).result as { correlationId: string }
+      expect(first).toMatchObject({ ...placement, completionStatus: 'unconfirmed', retryable: false })
+      const query = { ...placement, kind: 'import', correlationId: first.correlationId }
+      await expect.poll(async () => (content(await sdk.callTool({
+        name: 'get_package_operation', arguments: query
+      })).result), { timeout: 5000 }).toMatchObject({
+        completionStatus: 'completed', session: { readOnly: true }
+      })
+      const listed = await sdk.callTool({ name: 'list_sessions', arguments: {} })
+      expect(content(listed).result).toHaveLength(1)
+      holdResponse = false
+      const second = JSON.parse((await callCli('import_session', placement)).stdout)
+      expect(second.result).toMatchObject({
+        ...placement, completionStatus: 'completed', waitMs: 30_000, session: { readOnly: true }
+      })
+      expect(second.result.correlationId).not.toBe(first.correlationId)
+      const stale = await sdk.callTool({ name: 'get_package_operation', arguments: query })
+      expect(content(stale).result).toMatchObject({ completionStatus: 'unconfirmed', retryable: false })
+    } finally {
+      releaseResponse.resolve()
+    }
+  }, { seedSource: false, afterAdmission: async () => { if (holdResponse) await releaseResponse.promise } })
+})
+
+it('reports invalid and missing input without creating a Session through either entry point', async () => {
+  await withPackageService(async ({ root, sdk, callCli }) => {
+    const invalid = join(root, 'corrupt.science')
+    await writeFile(invalid, 'Not an Open-Science Session package')
+    for (const [sourcePath, code] of [
+      [invalid, 'package_invalid_archive'],
+      [join(root, 'missing.science'), 'package_source_unavailable']
+    ]) {
+      const call = await sdk.callTool({ name: 'import_session', arguments: { sourcePath } })
+      expect(call.isError).toBe(true)
+      expect(content(call).error).toMatchObject({
+        sourcePath, code, operationId: expect.any(String), completionStatus: 'failed', retryable: false
+      })
+      const failed = await callCli('import_session', { sourcePath }).catch((error) => error)
+      expect(JSON.parse(failed.stderr).error).toMatchObject({
+        sourcePath, code, operationId: expect.any(String), completionStatus: 'failed', retryable: false
+      })
+    }
+    expect(content(await sdk.callTool({ name: 'list_sessions', arguments: {} })).result).toEqual([])
+    expect(content(await sdk.callTool({ name: 'list_projects' })).result).toEqual([])
+  }, { seedSource: false })
 })
 
 it('exports verified archives through real CLI JSON and MCP stdio with exact operation lookup', async () => {

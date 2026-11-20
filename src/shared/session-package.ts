@@ -167,9 +167,11 @@ export type BrowserPackageTransfer = {
   totalBytes: number
 }
 
+const agentPackageSourcePathSchema = z.string().min(1).max(32768).regex(/\.science$/i)
 const agentPackageOperationReferenceSchema = z
   .object({
     correlationId: z.uuid(),
+    sourcePath: agentPackageSourcePathSchema.optional(),
     destinationPath: z
       .string()
       .min(1)
@@ -179,6 +181,15 @@ const agentPackageOperationReferenceSchema = z
   })
   .strict()
 export type AgentPackageOperationReference = z.infer<typeof agentPackageOperationReferenceSchema>
+
+const agentPackageFailureSchema = z.enum([
+  'destination-conflict',
+  'requires-user',
+  'invalid-archive',
+  'source-unavailable',
+  'requires-update',
+  'import-unconfirmed'
+])
 
 const packageFileDigestSchema = z
   .object({ sizeBytes: z.number().int().nonnegative(), checksum })
@@ -191,7 +202,7 @@ export type PackageOperationSnapshot = {
   session?: SessionPackageRequest
   sessionTitle?: string
   exportDestination?: 'local' | 'org-case'
-  agent?: AgentPackageOperationReference & { failure?: 'destination-conflict' | 'requires-user' }
+  agent?: AgentPackageOperationReference & { failure?: z.infer<typeof agentPackageFailureSchema> }
   importTarget?: SessionPackageImportRequest
   presentationRevision?: number
   importRequestId?: string
@@ -212,6 +223,7 @@ export type PackageOperationSnapshot = {
     webOmissions?: PackageWebOmission[]
     uploadedCase?: OrgCaseUploadedSummary
     imported?: SessionPackageRequest
+    packageSummary?: SessionPackageSummary
     recovery?: SessionPackageRequest & { operationId: string; outcome: 'committed' | 'unconfirmed' }
   }
   error?: string
@@ -233,6 +245,14 @@ export const packageOperationRequestSchema = z
           .min(1)
           .max(32768)
           .regex(/\.science$/i)
+      })
+      .strict(),
+    z
+      .object({
+        action: z.literal('agent-import'),
+        correlationId: z.uuid(),
+        sourcePath: agentPackageSourcePathSchema,
+        target: sessionPackageImportRequestSchema
       })
       .strict(),
     z.object({ action: z.literal('cancel'), operationId: identity }).strict(),
@@ -386,6 +406,14 @@ export const sessionPackagePreviewSchema = z
   .strict()
 export type SessionPackagePreview = z.infer<typeof sessionPackagePreviewSchema>
 
+const sessionPackageSummarySchema = sessionPackagePreviewSchema
+  .omit({ omissions: true, webOmissions: true })
+  .extend({
+    omissionCount: z.number().int().nonnegative(),
+    externalOmissionCount: z.number().int().nonnegative()
+  })
+export type SessionPackageSummary = z.infer<typeof sessionPackageSummarySchema>
+
 export const sessionPackageReceiptSchema = packageOriginSchema
   .extend({
     schemaVersion: z.literal(1),
@@ -428,7 +456,7 @@ const packageOperationSnapshotSchema: z.ZodType<PackageOperationSnapshot> = z
     sessionTitle: z.string().max(1000).optional(),
     exportDestination: z.enum(['local', 'org-case']).optional(),
     agent: agentPackageOperationReferenceSchema
-      .extend({ failure: z.enum(['destination-conflict', 'requires-user']).optional() })
+      .extend({ failure: agentPackageFailureSchema.optional() })
       .optional(),
     importTarget: sessionPackageImportRequestSchema.optional(),
     presentationRevision: z.number().int().nonnegative().optional(),
@@ -544,6 +572,7 @@ const packageOperationSnapshotSchema: z.ZodType<PackageOperationSnapshot> = z
         webOmissions: z.array(packageWebOmissionSchema).max(100).optional(),
         uploadedCase: orgCaseUploadedSummarySchema.optional(),
         imported: sessionPackageRequestSchema.optional(),
+        packageSummary: sessionPackageSummarySchema.optional(),
         recovery: sessionPackageRequestSchema
           .extend({ operationId: identity, outcome: z.enum(['committed', 'unconfirmed']) })
           .optional()

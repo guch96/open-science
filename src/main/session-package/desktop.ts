@@ -21,7 +21,8 @@ import type {
   SensitiveContentEvidence,
   SessionPackageExportResult,
   SessionPackageImportResult,
-  SessionPackageRequest
+  SessionPackageRequest,
+  SessionPackageSummary
 } from '../../shared/session-package'
 import { sanitizeExportFilename } from '../../shared/conversation-export'
 import type { NativeTranslator } from '../locale/main-process-messages'
@@ -360,6 +361,27 @@ export class SessionPackageDesktop {
   respond(
     request: PackageOperationRequest
   ): PackageOperationSnapshot | null | Promise<PackageOperationSnapshot | null> {
+    if (request.action === 'agent-import') {
+      const { sourcePath, target, correlationId } = request
+      if (!isAbsolute(sourcePath) || sourcePath.includes('\0'))
+        throw new ApplicationCommandError('invalid-command-arguments', 'Use an absolute package path.')
+      const current = this.operations.snapshot
+      if (
+        this.operations.active ||
+        this.lastImportFile?.recovery ||
+        current?.result?.recovery ||
+        current?.agent?.correlationId === correlationId
+      )
+        throw new ApplicationCommandError(
+          'session-package-operation-conflict',
+          'Resolve the current package operation before importing.'
+        )
+      void this.import(undefined, undefined, target, sourcePath, false, {
+        nonInteractive: true,
+        agent: { correlationId, sourcePath }
+      }).catch(() => undefined)
+      return this.operations.snapshot
+    }
     if (request.action === 'agent-export') {
       const { session, destinationPath, correlationId } = request
       if (!isAbsolute(destinationPath))
@@ -746,21 +768,26 @@ export class SessionPackageDesktop {
       ...(safeFailureMessages.has(detail) ? { error: { message: detail } } : {})
     })
     const translate = this.options.translate
-    if (detail === PACKAGE_REQUIRES_UPDATE)
+    if (detail === PACKAGE_REQUIRES_UPDATE) {
+      this.operations.setAgentFailure('requires-update')
       throw new Error(
         translate(
           'This Session package requires a newer version of Open Science. Update Open Science, then try importing it again.'
         ),
         { cause: error }
       )
-    if (isInvalidPackageArchive(error))
+    }
+    if (isInvalidPackageArchive(error)) {
+      this.operations.setAgentFailure('invalid-archive')
       throw new ApplicationCommandError(
         'session-package-invalid-archive',
         translate('The selected file is not a valid Session package.'),
         undefined,
         { cause: error }
       )
-    if (error instanceof PackageSourceUnavailableError)
+    }
+    if (error instanceof PackageSourceUnavailableError) {
+      this.operations.setAgentFailure('source-unavailable')
       throw new ApplicationCommandError(
         'session-package-source-unavailable',
         translate(
@@ -769,6 +796,7 @@ export class SessionPackageDesktop {
         undefined,
         { cause: error }
       )
+    }
     if (error instanceof PackageCapacityError)
       throw new Error(
         translate(
@@ -1120,7 +1148,11 @@ export class SessionPackageDesktop {
     target: import('../../shared/session-package').SessionPackageImportRequest = {},
     source?: string | UseCaseSource,
     validateBeforeTarget = false,
-    options?: { readonly nonInteractive?: true; readonly onReleased?: () => Promise<void> }
+    options?: {
+      readonly nonInteractive?: true
+      readonly onReleased?: () => Promise<void>
+      readonly agent?: AgentPackageOperationReference
+    }
   ): Promise<SessionPackageImportResult> {
     let sourcePath = typeof source === 'string' ? source : undefined
     const useCase = typeof source === 'object' ? source.useCase : undefined
@@ -1131,6 +1163,7 @@ export class SessionPackageDesktop {
       : undefined
     let operationSignal: AbortSignal | undefined
     let importFile: NativeImportFile | undefined
+    let packageSummary: SessionPackageSummary | undefined
     const rememberSource = (path: string): void => {
       const id = this.operations.snapshot?.importRequestId ?? this.activeFile?.id ?? randomUUID()
       if (this.lastImportFile?.path !== path) this.lastImportFile?.onReleased?.()
@@ -1163,7 +1196,10 @@ export class SessionPackageDesktop {
     const completeImport = async (
       result: SessionPackageRequest
     ): Promise<SessionPackageRequest> => {
-      this.operations.completeResult({ imported: result })
+      this.operations.completeResult({
+        imported: result,
+        ...(packageSummary ? { packageSummary } : {})
+      })
       try {
         await this.options.afterImport(result, originClientId, !target.projectId)
       } catch (error) {
@@ -1288,7 +1324,7 @@ export class SessionPackageDesktop {
             : undefined
           try {
             return await this.staged(async (directory) => {
-              const options = {
+              const pickerOptions = {
                 title: this.options.translate('Import Session package'),
                 properties: ['openFile'] as ['openFile'],
                 filters: [{ name: 'Open-Science Session', extensions: ['science'] }]
@@ -1296,7 +1332,7 @@ export class SessionPackageDesktop {
               const selected = sourcePath
                 ? { canceled: false, filePaths: [sourcePath] }
                 : await this.nativeDialog(
-                    desktopFileInteraction().chooseFiles(options, callerId),
+                    desktopFileInteraction().chooseFiles(pickerOptions, callerId),
                     signal
                   )
               if (selected.canceled || !selected.filePaths[0]) {
@@ -1340,9 +1376,16 @@ export class SessionPackageDesktop {
                               }
                             : {})
                         }),
-                      // Headless import has no renderer to approve the preview; the caller's
-                      // explicit --non-interactive flag is the confirmation.
-                      nonInteractive
+                      options?.agent
+                        ? async ({ omissions, webOmissions, ...summary }) => {
+                            confirmed = true
+                            packageSummary = {
+                              ...summary,
+                              omissionCount: omissions.length + (webOmissions?.length ?? 0),
+                              externalOmissionCount: omissions.filter(({ kind }) => kind === 'external').length
+                            }
+                          }
+                        : nonInteractive
                         ? undefined
                         : async (preview, budgetSignal) => {
                             await this.operations.waitForImport(
@@ -1355,8 +1398,10 @@ export class SessionPackageDesktop {
                       target
                     )
                     .catch((error: unknown) => {
-                      if (error instanceof PackageImportRecoveryRequiredError)
+                      if (error instanceof PackageImportRecoveryRequiredError) {
                         importFile!.recovery = error
+                        this.operations.setAgentFailure('import-unconfirmed')
+                      }
                       throw error
                     })
                 )
@@ -1369,7 +1414,9 @@ export class SessionPackageDesktop {
         },
         target,
         () => Boolean(importFile?.recovery),
-        useCase
+        useCase,
+        undefined,
+        options?.agent
       )
       .then(async (result) => {
         await importFile?.onReleased?.()
