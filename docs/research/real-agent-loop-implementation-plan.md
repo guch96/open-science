@@ -14,6 +14,7 @@
 | 路径 | 可复用入口 | 本轮契约 |
 | --- | --- | --- |
 | 发现与准备 | SDK `doctor`、`bootstrap`、现有登录和配置流程 | CLI/MCP 共用能力定义、Schema、默认值、Handler 和错误；分别判断适配器已注册、服务是否支持、Agent/Notebook 是否就绪。服务未启动也可读本地指南。 |
+| 资源选择与配置 | Task API 的 Project/Session Owner、Literature SDK | CLI/MCP 共用 Project、Session 和 Literature 能力。用返回的 ID 明确指定资源；可校验 Session 归属。配置使用扁平字段及现有版本检查。导入 Session 公开只读及来源字段，Owner 拒绝修改配置和恢复研究，无需变更持久格式。 |
 | 研究提交与恢复 | `submitRun`、`getSubmission`、`waitForSubmission` 和服务端 TaskSubmissions | 显式 `projectId`；无 `sessionId` 新建。MCP 发送前持有并传入 `requestId`；CLI 自动生成时先落恢复记录。超时只结束观察，重连或重启后查原回执。 |
 | Notebook | 现有 runtime、memory policy 和 execution intent | 外层 Run 状态独立于 dispatch、执行和人工停止。停止态只提供定位和用户继续入口，无自动重试或规避动作；检查 readiness 不创建执行域。 |
 | Artifact | SDK 列举与内容响应、Artifact Owner | 显式区分 lineage、version 和 downloadId；MCP 与 CLI 共用无覆盖的本地交付。报告和结果表需对应当前研究；可信源端的大小与 SHA-256 匹配时才可验证交付。 |
@@ -34,6 +35,9 @@
    `readiness.agent` 根据已有服务端检查投影，Notebook 状态目前保留 `unconfirmed`。
 2. [#56–#61](https://github.com/guch96/open-science/issues/54) 接入资源、runtime/provider、Notebook readiness、持久研究、执行状态及 Artifact。
    在两个公开入口对齐语义；复用 Owner 测试验证重启、审批边界及源端文件校验。
+   [#56](https://github.com/guch96/open-science/issues/56) 已用真实 MCP stdio 和 CLI JSON 调用同一个认证 HTTP
+   夹具验证资源选择、配置版本检查、导入 Session 的只读拒绝和 Literature 默认值；
+   TaskRunner 测试验证 Owner 的归属与只读限制。此处的导入 Session 使用测试记录，真实包迁移另行验收。
 3. [#62–#65](https://github.com/guch96/open-science/issues/54) 接入包导出、导入、Fork、查询和敏感确认。
    以真实 `.science` 和原操作关联证据区分可验证交付、待确认和未知结果。
 4. [#66–#67](https://github.com/guch96/open-science/issues/54) 以实际构建的 npm 包运行 README 两条验收路径。

@@ -37,10 +37,10 @@ const cases = [
   ],
   [
     'update_project',
-    { projectId: 'p/1', agentContext: null },
+    { projectId: 'p/1', expectedUpdatedAt: 4, agentContext: null },
     '/api/v1/projects/p%2F1',
     'PATCH',
-    { agentContext: null }
+    { expectedUpdatedAt: 4, agentContext: '' }
   ],
   ['list_sessions', { projectId: 'p/1' }, '/api/v1/sessions?project=p%2F1', 'GET', undefined],
   ['get_session', { sessionId: 's/1' }, '/api/v1/sessions/s%2F1', 'GET', undefined],
@@ -200,8 +200,9 @@ describe('research MCP tools', () => {
   })
 
   it.each(cases)('%s preserves the SDK HTTP contract', async (name, args, path, method, body) => {
+    const artifactList = name === 'list_artifacts'
     const fetch = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
-      Response.json({ data: { example: 'result' } })
+      Response.json({ data: artifactList ? [{ id: 'version-1' }] : { example: 'result' } })
     )
     const sdk = new OpenScienceClient({
       baseUrl: 'http://127.0.0.1:44100',
@@ -212,7 +213,9 @@ describe('research MCP tools', () => {
     const { client } = await harness(connect)
     const response = await client.callTool({ name, arguments: args })
     expect(response.isError).not.toBe(true)
-    expect(response.structuredContent).toEqual({ result: { example: 'result' } })
+    expect(response.structuredContent).toEqual({
+      result: artifactList ? [{ downloadId: 'version-1' }] : { example: 'result' }
+    })
     expect(response.content).toEqual([
       { type: 'text', text: JSON.stringify(response.structuredContent) }
     ])
@@ -360,7 +363,7 @@ describe('research MCP tools', () => {
     ],
     ['start_run', { projectId: 'p1', prompt: ' ' }],
     ['start_run', { projectId: 'p1', prompt: 'Go', permissionProfile: 'unknown' }],
-    ['search_literature', { limit: 21 }],
+    ['search_literature', { limit: 101 }],
     ['format_references', { itemIds: [], styleId: 'apa' }],
     ['import_literature', { mode: 'commit' }],
     ['import_literature', { mode: 'preview', content: 'x', projectId: 'p1' }],

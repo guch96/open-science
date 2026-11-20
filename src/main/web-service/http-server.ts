@@ -610,7 +610,12 @@ const readJsonBody = async (
 
 const taskErrorStatus = (error: TaskApiError): number => {
   if (error.code === 'submission_unavailable') return 503
-  if (error.code === 'submission_conflict' || error.code === 'session_read_only') return 409
+  if (
+    error.code === 'submission_conflict' ||
+    error.code === 'session_read_only' ||
+    error.code === 'session_project_mismatch'
+  )
+    return 409
   if (error.code === 'invalid_request') return 400
   if (error.code === 'invalid_configuration') return 400
   if (
@@ -1336,7 +1341,10 @@ const handleTaskApiRequest = async (
       if (sessionConfigMatch && request.method === 'GET' && tasks.getSessionConfiguration) {
         assertExternalAuthorizationCurrent(externalAuthorization)
         reply(200, {
-          data: await tasks.getSessionConfiguration(decodeURIComponent(sessionConfigMatch[1]))
+          data: await tasks.getSessionConfiguration(
+            decodeURIComponent(sessionConfigMatch[1]),
+            url.searchParams.get('project') ?? undefined
+          )
         })
         return true
       }
@@ -1359,7 +1367,12 @@ const handleTaskApiRequest = async (
       const sessionMatch = url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)$/)
       if (sessionMatch && request.method === 'GET') {
         assertExternalAuthorizationCurrent(externalAuthorization)
-        reply(200, { data: await tasks.getSession(decodeURIComponent(sessionMatch[1])) })
+        reply(200, {
+          data: await tasks.getSession(
+            decodeURIComponent(sessionMatch[1]),
+            url.searchParams.get('project') ?? undefined
+          )
+        })
         return true
       }
       const artifactMatch = url.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/content$/)
@@ -1617,6 +1630,7 @@ const startWebHttpServer = async (options: WebServerOptions): Promise<RunningWeb
           taskCapabilities: options.tasks
             ? [
                 'permission-prompts-none',
+                'task-artifacts',
                 ...(options.tasks.doctor ? ['doctor'] : []),
                 ...(!externalAuthorization && options.tasks.bootstrap ? ['runtime-bootstrap'] : []),
                 ...(!externalAuthorization && options.tasks.supportsSubmissions?.()

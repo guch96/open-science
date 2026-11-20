@@ -2563,33 +2563,52 @@ describe('TaskRunner', () => {
     }
   })
 
-  it('rejects imported history before attaching an Agent or saving a turn', async () => {
+  it('exposes imported history for inspection and rejects configuration changes and turns', async () => {
+    const origin = {
+      importId: 'import-1',
+      sourceProjectId: 'source-project',
+      sourceSessionId: 'source-session',
+      importedAt: 1,
+      manifestChecksum: 'checksum'
+    }
+    const imported = { ...session, packageOrigin: { ...origin, excludedFiles: [] } }
+    const forked = { ...session, id: 'fork-1', forkOrigin: imported.packageOrigin }
     const resumeSession = vi.fn()
     const save = vi.fn()
+    const updateConfiguration = vi.fn()
     const runner = createRunner({
       sessions: {
-        list: async () => [
-          {
-            ...session,
-            packageOrigin: {
-              importId: 'import-1',
-              sourceProjectId: 'source-project',
-              sourceSessionId: 'source-session',
-              importedAt: 1,
-              manifestChecksum: 'checksum',
-              excludedFiles: []
-            }
-          }
-        ],
-        save
+        list: async () => [imported, forked],
+        save,
+        updateConfiguration
       },
       agent: { resumeSession }
     })
+    const inspected = await runner.getSession(imported.id, project.id)
+    expect(inspected).toMatchObject({ id: imported.id, projectId: project.id, readOnly: true })
+    expect(inspected.packageOrigin).toEqual(origin)
+    await expect(runner.getSession(forked.id, project.id)).resolves.toMatchObject({
+      id: forked.id,
+      readOnly: false,
+      forkOrigin: origin
+    })
+    await expect(runner.getSession(imported.id, origin.sourceProjectId)).rejects.toMatchObject({
+      code: 'session_project_mismatch'
+    })
+    await expect(
+      runner.updateSessionConfiguration(imported.id, {
+        projectId: project.id,
+        expectedRevision: imported.revision ?? 0,
+        memoryEnabled: false
+      })
+    ).rejects.toMatchObject({ code: 'session_read_only' })
     await expect(
       runner.startRun({ project: project.id, sessionId: session.id, prompt: 'Continue' })
     ).rejects.toMatchObject({ code: 'session_read_only' })
     expect(resumeSession).not.toHaveBeenCalled()
     expect(save).not.toHaveBeenCalled()
+    expect(updateConfiguration).not.toHaveBeenCalled()
+    await expect(runner.getSession(imported.id)).resolves.toEqual(inspected)
     await runner.dispose()
   })
 

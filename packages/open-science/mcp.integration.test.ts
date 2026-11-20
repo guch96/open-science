@@ -1,7 +1,17 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { createServer } from 'node:http'
-import { lstat, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  symlink,
+  writeFile
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -49,6 +59,334 @@ async function cliError(
   }
   throw new Error('Expected the CLI to fail')
 }
+
+async function resourceAgents(
+  handle: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
+) {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-agent-resources-'))
+  cleanup.push(() => rm(profile, { recursive: true, force: true }))
+  const token = 'resource-fixture-token'
+  const service = createServer((request, response) => {
+    if (request.headers.authorization !== `Bearer ${token}`) {
+      response.writeHead(401).end()
+      return
+    }
+    response.setHeader('content-type', 'application/json')
+    if (request.url === '/api/bootstrap') {
+      response.end(JSON.stringify({ taskCapabilities: [] }))
+      return
+    }
+    void Promise.resolve(handle(request, response)).catch(() => response.writeHead(500).end())
+  })
+  service.listen(0, '127.0.0.1')
+  await once(service, 'listening')
+  cleanup.push(async () => {
+    service.closeAllConnections()
+    await new Promise<void>((done) => service.close(() => done()))
+  })
+  await writeFile(
+    join(profile, 'web-service.json'),
+    JSON.stringify({
+      pid: process.pid,
+      port: (service.address() as { port: number }).port,
+      startedAt: new Date().toISOString()
+    })
+  )
+  await writeFile(join(profile, 'web-token'), token)
+  const client = await connectMcp(profile)
+  const cliArgs = (name: string): string[] => [
+    'tools',
+    'call',
+    name,
+    '--profile',
+    profile,
+    '--json'
+  ]
+  return {
+    async cli(name: string, args: Record<string, unknown> = {}) {
+      return JSON.parse((await runCli(cliArgs(name), JSON.stringify(args))).stdout) as {
+        result: unknown
+      }
+    },
+    mcp: (name: string, args: Record<string, unknown> = {}) =>
+      client.callTool({ name, arguments: args }),
+    cliError: (name: string, args: Record<string, unknown>) =>
+      cliError(cliArgs(name), JSON.stringify(args))
+  }
+}
+
+it('creates and discovers explicit Project IDs through both Agent entry points', async () => {
+  const projects = [{ id: 'p1', name: 'Original', updatedAt: 1 }]
+  const agent = await resourceAgents(async (request, response) => {
+    if (request.url !== '/api/v1/projects') {
+      response.writeHead(404).end()
+      return
+    }
+    if (request.method === 'POST') {
+      let body = ''
+      for await (const chunk of request) body += chunk
+      const input = JSON.parse(body)
+      const number = projects.length + 1
+      const data = { id: `p${number}`, name: input.name, updatedAt: number }
+      projects.push(data)
+      response.writeHead(201).end(JSON.stringify({ data }))
+    } else {
+      response.end(JSON.stringify({ data: projects }))
+    }
+  })
+  expect(await agent.cli('create_project', { name: 'CLI Study' })).toEqual({
+    result: { id: 'p2', name: 'CLI Study', updatedAt: 2 }
+  })
+  expect((await agent.mcp('create_project', { name: 'MCP Study' })).structuredContent).toEqual({
+    result: { id: 'p3', name: 'MCP Study', updatedAt: 3 }
+  })
+  const listed = await agent.cli('list_projects')
+  expect(listed.result).toEqual([
+    { id: 'p1', name: 'Original', updatedAt: 1 },
+    { id: 'p2', name: 'CLI Study', updatedAt: 2 },
+    { id: 'p3', name: 'MCP Study', updatedAt: 3 }
+  ])
+  expect((await agent.mcp('list_projects')).structuredContent).toEqual(listed)
+})
+
+it('checks Session ownership and allows read-only inspection without changing imported history', async () => {
+  const packageOrigin = {
+    importId: 'import-1',
+    sourceProjectId: 'source-p',
+    sourceSessionId: 'source-s',
+    importedAt: 20,
+    manifestChecksum: 'a'.repeat(64)
+  }
+  const session = { id: 'imported', projectId: 'destination', readOnly: true, packageOrigin }
+  const agent = await resourceAgents(async (request, response) => {
+    const url = new URL(request.url!, 'http://localhost')
+    const error = (status: number, code: string): void => {
+      response.writeHead(status).end(JSON.stringify({ error: { code, message: 'private detail' } }))
+    }
+    if (url.pathname === '/api/v1/sessions' && url.searchParams.get('project') === 'destination') {
+      response.end(JSON.stringify({ data: [session] }))
+    } else if (url.pathname === '/api/v1/sessions/imported' && request.method === 'GET') {
+      if (url.searchParams.get('project') !== 'destination') {
+        error(409, 'session_project_mismatch')
+        return
+      }
+      response.end(JSON.stringify({ data: session }))
+    } else if (url.pathname === '/api/v1/sessions/imported/config' && request.method === 'PATCH') {
+      let body = ''
+      for await (const chunk of request) body += chunk
+      if (JSON.parse(body).projectId !== 'destination') {
+        error(409, 'session_project_mismatch')
+        return
+      }
+      error(409, 'session_read_only')
+    } else {
+      error(404, 'session_not_found')
+    }
+  })
+  const scope = { sessionId: 'imported', projectId: 'destination' }
+  expect(await agent.cli('list_sessions', { projectId: scope.projectId })).toEqual({
+    result: [session]
+  })
+  expect((await agent.mcp('get_session', scope)).structuredContent).toMatchObject({
+    result: session
+  })
+  expect(await agent.cli('get_session', scope)).toEqual(
+    (await agent.mcp('get_session', scope)).structuredContent
+  )
+
+  for (const [name, args, code] of [
+    ['get_session', { ...scope, projectId: 'other' }, 'session_project_mismatch'],
+    ['get_session', { ...scope, sessionId: 'missing' }, 'session_not_found'],
+    [
+      'update_session_configuration',
+      { ...scope, expectedRevision: 0, memoryEnabled: false },
+      'session_read_only'
+    ]
+  ] as const) {
+    const result = await agent.mcp(name, args)
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent).toEqual({ error: (await agent.cliError(name, args)).error })
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code,
+        retryable: false,
+        next: [expect.objectContaining({ action: expect.any(String) })]
+      }
+    })
+    expect(JSON.stringify(result)).not.toContain('private detail')
+  }
+  expect(await agent.cli('get_session', scope)).toMatchObject({ result: session })
+})
+
+it('applies flat Project and Session settings using the configuration versions returned by the service', async () => {
+  let project = { id: 'p1', name: 'Original', updatedAt: 10 }
+  let defaults = { projectId: 'p1', updatedAt: 10, configured: { memoryEnabled: true } }
+  let configuration = {
+    projectId: 'p1',
+    sessionId: 's1',
+    revision: 4,
+    persisted: {},
+    effective: { permissionProfile: 'ask', memoryEnabled: true }
+  }
+  const agent = await resourceAgents(async (request, response) => {
+    const url = new URL(request.url!, 'http://localhost')
+    let body = ''
+    for await (const chunk of request) body += chunk
+    const input = body ? JSON.parse(body) : undefined
+    const error = (status: number, code: string): void => {
+      response.writeHead(status).end(JSON.stringify({ error: { code } }))
+    }
+    if (url.pathname === '/api/v1/projects/p1' && request.method === 'PATCH') {
+      if (input.expectedUpdatedAt !== project.updatedAt) {
+        error(409, 'project_conflict')
+        return
+      }
+      project = { ...project, name: input.name, updatedAt: 11 }
+      response.end(JSON.stringify({ data: project }))
+    } else if (url.pathname === '/api/v1/projects/p1/session-defaults') {
+      if (request.method === 'PATCH') {
+        if (input.expectedUpdatedAt !== defaults.updatedAt) {
+          error(409, 'project_conflict')
+          return
+        }
+        defaults = {
+          ...defaults,
+          updatedAt: 11,
+          configured: { ...defaults.configured, ...input.patch }
+        }
+      }
+      response.end(JSON.stringify({ data: defaults }))
+    } else if (url.pathname === '/api/v1/sessions/s1/config') {
+      if (request.method === 'PATCH') {
+        if (input.expectedRevision !== configuration.revision) {
+          error(409, 'session_revision_conflict')
+          return
+        }
+        if (input.agentConfiguration?.providerId !== 'configured-provider') {
+          error(400, 'invalid_configuration')
+          return
+        }
+        const settings = {
+          agentConfiguration: input.agentConfiguration,
+          computeHosts: input.computeHosts
+        }
+        configuration = {
+          ...configuration,
+          revision: 5,
+          persisted: settings,
+          effective: { ...configuration.effective, ...settings }
+        }
+      }
+      response.end(JSON.stringify({ data: configuration }))
+    } else {
+      error(404, 'not_found')
+    }
+  })
+  expect(
+    (await agent.mcp('update_project', { projectId: 'p1', expectedUpdatedAt: 10, name: 'Updated' }))
+      .structuredContent
+  ).toMatchObject({ result: { id: 'p1', name: 'Updated', updatedAt: 11 } })
+  const previous = await agent.cli('get_project_session_defaults', { projectId: 'p1' })
+  expect(previous).toMatchObject({ result: { configured: { memoryEnabled: true } } })
+  const updated = await agent.cli('update_project_session_defaults', {
+    projectId: 'p1',
+    expectedUpdatedAt: 10,
+    providerId: 'configured-provider',
+    model: null
+  })
+  expect(updated).toMatchObject({
+    result: {
+      projectId: 'p1',
+      updatedAt: 11,
+      configured: { agentConfiguration: { providerId: 'configured-provider', model: null } }
+    }
+  })
+  expect(
+    (await agent.mcp('get_project_session_defaults', { projectId: 'p1' })).structuredContent
+  ).toEqual(updated)
+  const selection = { projectId: 'p1', sessionId: 's1' }
+  const current = await agent.cli('get_session_configuration', selection)
+  expect(current).toMatchObject({
+    result: { ...selection, revision: 4, effective: { permissionProfile: 'ask' } }
+  })
+  const args = {
+    ...selection,
+    expectedRevision: 4,
+    providerId: 'configured-provider',
+    model: 'model-1',
+    enabledComputeHostIds: ['host-1'],
+    selectedComputeHostIds: ['host-1']
+  }
+  const invalid = { ...args, providerId: 'unknown-provider' }
+  const rejected = await agent.mcp('update_session_configuration', invalid)
+  expect(rejected.isError).toBe(true)
+  expect(rejected.structuredContent).toMatchObject({ error: { code: 'invalid_configuration' } })
+  expect(rejected.structuredContent).toEqual({
+    error: (await agent.cliError('update_session_configuration', invalid)).error
+  })
+  const changed = await agent.mcp('update_session_configuration', args)
+  expect(changed.structuredContent).toMatchObject({
+    result: {
+      ...selection,
+      revision: 5,
+      persisted: {
+        agentConfiguration: { providerId: 'configured-provider', model: 'model-1' },
+        computeHosts: { enabled: ['host-1'], selected: ['host-1'] }
+      }
+    }
+  })
+  expect(await agent.cli('get_session_configuration', selection)).toEqual(changed.structuredContent)
+  const stale = await agent.mcp('update_session_configuration', args)
+  expect(stale.structuredContent).toEqual({
+    error: (await agent.cliError('update_session_configuration', args)).error
+  })
+  expect(stale.structuredContent).toMatchObject({ error: { code: 'session_revision_conflict' } })
+})
+
+it('shares Literature search defaults and reports unsupported services without falling back to other commands', async () => {
+  const page = { entries: [{ id: 'item-atlas', item: { title: 'Sample Atlas' } }], nextOffset: 20 }
+  let supported = true
+  const agent = await resourceAgents(async (request, response) => {
+    if (!supported || request.url !== '/rpc/literature%3Asearch') {
+      response.writeHead(404).end(
+        JSON.stringify({
+          ok: false,
+          error: { code: 'method_not_found', message: 'private command detail' }
+        })
+      )
+      return
+    }
+    let body = ''
+    for await (const chunk of request) body += chunk
+    const [input] = JSON.parse(body).args
+    response.end(
+      JSON.stringify({
+        ok: true,
+        result: input.projectId === 'p1' && input.limit === 20 ? page : { entries: [] }
+      })
+    )
+  })
+  const described = await agent.cli('describe_capability', { name: 'search_literature' })
+  expect(described).toMatchObject({
+    result: {
+      exposure: { cli: true, mcp: true },
+      inputSchema: { properties: { limit: { default: 20 } } }
+    }
+  })
+  const input = { projectId: 'p1' }
+  expect(await agent.cli('search_literature', input)).toEqual({ result: page })
+  expect((await agent.mcp('search_literature', input)).structuredContent).toEqual({ result: page })
+  supported = false
+  const failure = await agent.mcp('search_literature', input)
+  expect(failure.isError).toBe(true)
+  expect(failure.structuredContent).toEqual({
+    error: (await agent.cliError('search_literature', input)).error
+  })
+  expect(failure.structuredContent).toMatchObject({
+    error: { code: 'unsupported_capability', owner: 'deployment', retryable: false }
+  })
+  expect(JSON.stringify(failure)).not.toContain('private command detail')
+})
 
 it('discovers the same local guide and capability schemas without a running service', async () => {
   const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-offline-'))
@@ -616,12 +954,164 @@ it('serves a real stdio run/poll/artifact workflow through authenticated HTTP an
   expect(
     (await client.callTool({ name: 'list_artifacts', arguments: { sessionId: 's1' } }))
       .structuredContent
-  ).toEqual({ result: [{ id: 'a1', name: 'report.md' }] })
+  ).toEqual({ result: [{ downloadId: 'a1', name: 'report.md' }] })
   await client.close()
   expect(requests.some((request) => request.url.includes('cancel'))).toBe(false)
   expect(stderr).not.toContain(token)
   expect(http.listening).toBe(true)
 }, 15000)
+
+it('delivers a pinned Artifact through either entry point without overwriting local files', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-artifact-delivery-'))
+  cleanup.push(() => rm(profile, { recursive: true, force: true }))
+  const token = 'artifact-fixture-secret'
+  const report = {
+    id: 'report-version',
+    artifactId: 'report-lineage',
+    versionId: 'report-version',
+    producerRunId: 'notebook-run',
+    name: 'report.md',
+    kind: 'managed-file',
+    mimeType: 'text/markdown',
+    size: 3,
+    sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+  }
+  const table = { ...report, id: 'table-version', versionId: 'table-version', name: 'results.csv' }
+  const unrelated = { ...table, id: 'old-version', versionId: 'old-version', name: 'other.csv' }
+  const run = { id: 'r1', sessionId: 's1', status: 'completed', artifacts: [report, table] }
+  let content = 'abc'
+  const service = createServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${token}`) return res.writeHead(401).end()
+    if (req.url?.endsWith('/content')) {
+      return res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(content)
+    }
+    res.setHeader('content-type', 'application/json')
+    if (req.url === '/api/bootstrap') return res.end('{}')
+    if (req.url === '/api/v1/sessions/s1/artifacts') {
+      return res.end(JSON.stringify({ data: [report, table, unrelated] }))
+    }
+    if (req.url === '/api/v1/runs/r1') return res.end(JSON.stringify({ data: run }))
+    return res.writeHead(404).end()
+  })
+  service.listen(0, '127.0.0.1')
+  await once(service, 'listening')
+  cleanup.push(async () => {
+    service.closeAllConnections()
+    await new Promise<void>((done) => service.close(() => done()))
+  })
+  await writeFile(
+    join(profile, 'web-service.json'),
+    JSON.stringify({
+      pid: process.pid,
+      port: (service.address() as { port: number }).port,
+      startedAt: new Date().toISOString()
+    })
+  )
+  await writeFile(join(profile, 'web-token'), token)
+  const mcp = await connectMcp(profile)
+  const cliArgs = (name: string): string[] => [
+    'tools',
+    'call',
+    name,
+    '--profile',
+    profile,
+    '--json'
+  ]
+  const call = (name: string, args: Record<string, unknown>): ReturnType<Client['callTool']> =>
+    mcp.callTool({ name, arguments: args })
+  const both = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    const remote = await call(name, args)
+    expect(remote.isError, JSON.stringify(remote.structuredContent)).not.toBe(true)
+    expect(remote.structuredContent).toEqual(
+      JSON.parse((await runCli(cliArgs(name), JSON.stringify(args))).stdout)
+    )
+    return (remote.structuredContent as { result: unknown }).result
+  }
+  const bothFail = async (args: Record<string, unknown>, code: string): Promise<void> => {
+    const remote = await call('download_artifact', args)
+    expect(remote.isError).toBe(true)
+    const cli = await cliError(cliArgs('download_artifact'), JSON.stringify(args))
+    expect(remote.structuredContent).toEqual({ error: cli.error })
+    expect(cli.error).toMatchObject({ code })
+  }
+  const listed = await both('list_artifacts', { sessionId: 's1', runId: 'r1' })
+  expect(listed).toEqual([
+    expect.objectContaining({
+      downloadId: 'report-version',
+      artifactId: 'report-lineage',
+      versionId: 'report-version',
+      producerRunId: 'notebook-run',
+      runId: 'r1',
+      name: 'report.md',
+      bytes: 3,
+      sha256: report.sha256
+    }),
+    expect.objectContaining({ downloadId: 'table-version' })
+  ])
+  const expected = { runId: 'r1', reportName: 'report.md', tableName: 'results.csv' }
+  expect(await both('get_delivery_status', { ...expected, tableName: 'other.csv' })).toMatchObject({
+    delivery: { status: 'partial', verified: false }
+  })
+  expect(await both('get_delivery_status', expected)).toMatchObject({
+    delivery: { status: 'available', verified: false }
+  })
+
+  const reportPath = join(profile, 'agent-delivery', 'report-version', 'report.md')
+  const request = { sessionId: 's1', downloadId: 'report-version' }
+  expect((await call('download_artifact', request)).structuredContent).toMatchObject({
+    result: { path: reportPath, bytes: 3, sha256: report.sha256, verified: true, timeoutMs: 300000 }
+  })
+  expect(await readFile(reportPath, 'utf8')).toBe('abc')
+  const tablePath = join(profile, 'results.csv')
+  const tableRequest = { sessionId: 's1', downloadId: 'table-version', outputPath: tablePath }
+  expect(
+    JSON.parse((await runCli(cliArgs('download_artifact'), JSON.stringify(tableRequest))).stdout)
+  ).toMatchObject({
+    result: { path: tablePath, bytes: 3, sha256: report.sha256, verified: true }
+  })
+  expect(await readFile(tablePath, 'utf8')).toBe('abc')
+  expect(await both('get_delivery_status', { ...expected, tablePath })).toMatchObject({
+    delivery: { status: 'verified', verified: true }
+  })
+
+  await bothFail(request, 'delivery_target_exists')
+  await bothFail({ ...request, downloadId: 'report-lineage' }, 'artifact_not_found')
+  const directory = join(profile, 'directory')
+  await mkdir(directory)
+  await bothFail({ ...request, outputPath: directory }, 'delivery_target_exists')
+  if (process.platform !== 'win32') {
+    const link = join(profile, 'link')
+    await symlink(reportPath, link)
+    await bothFail({ ...request, outputPath: link }, 'delivery_target_exists')
+    expect(await readlink(link)).toBe(reportPath)
+  }
+  expect(await readFile(reportPath, 'utf8')).toBe('abc')
+
+  const badPath = join(directory, 'bad.md')
+  for (const changed of ['ab', 'xyz']) {
+    content = changed
+    await bothFail({ ...request, outputPath: badPath }, 'delivery_integrity_mismatch')
+    expect(await readdir(directory)).toEqual([])
+  }
+  delete (report as Partial<typeof report>).sha256
+  const unverified = await call('download_artifact', { ...request, outputPath: badPath })
+  expect(unverified.structuredContent).toMatchObject({
+    result: { path: badPath, bytes: 3, verified: false }
+  })
+  expect(await readFile(badPath, 'utf8')).toBe('xyz')
+
+  const collisionPath = join(profile, 'collision.md')
+  const concurrent = await Promise.all(
+    [1, 2].map(() => call('download_artifact', { ...request, outputPath: collisionPath }))
+  )
+  expect(concurrent.map((result) => result.structuredContent)).toEqual(
+    expect.arrayContaining([
+      { result: expect.objectContaining({ path: collisionPath }) },
+      { error: expect.objectContaining({ code: 'delivery_target_exists' }) }
+    ])
+  )
+  expect(await readFile(collisionPath, 'utf8')).toBe('xyz')
+}, 20000)
 
 it.each(['EOF', 'SIGTERM', 'SIGINT'] as const)(
   'terminates on %s without writing non-protocol stdout',

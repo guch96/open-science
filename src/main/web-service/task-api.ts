@@ -19,7 +19,6 @@ import type {
   UpdateProjectSessionDefaultsRequest,
   UpdateSessionConfigurationRequest
 } from '../../shared/session-configuration'
-import type { PersistedArtifact } from '../../shared/session-message-contract'
 import type { PersistedChatSession } from '../../shared/session-persistence'
 import type { ActivePlanProjection, PlanResponseCommand } from '../../shared/session-plan/contract'
 import type {
@@ -384,12 +383,15 @@ class HeadlessTaskApi {
     return this.runner.listSessions(projectId)
   }
 
-  getSession(sessionId: string): Promise<TaskSessionSummary> {
-    return this.runner.getSession(sessionId)
+  getSession(sessionId: string, projectId?: string): Promise<TaskSessionSummary> {
+    return this.runner.getSession(sessionId, projectId)
   }
 
-  getSessionConfiguration(sessionId: string): Promise<TaskSessionConfiguration> {
-    return this.runner.getSessionConfiguration(sessionId)
+  getSessionConfiguration(
+    sessionId: string,
+    projectId?: string
+  ): Promise<TaskSessionConfiguration> {
+    return this.runner.getSessionConfiguration(sessionId, projectId)
   }
 
   updateSessionConfiguration(
@@ -596,7 +598,7 @@ class HeadlessTaskApi {
     return this.runner.resolveActiveRun(sessionId, promptMessageId)
   }
 
-  listArtifacts(sessionId: string): Promise<PersistedArtifact[]> {
+  listArtifacts(sessionId: string): ReturnType<TaskRunner['listArtifacts']> {
     return this.runner.listArtifacts(sessionId)
   }
 
