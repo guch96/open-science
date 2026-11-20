@@ -49,10 +49,15 @@
    并使用排他发布。Adapter 用 Owner 提供的大小和摘要核对本地文件；丢响应、快照被替换或文件不匹配时
    返回 `unconfirmed`。查询仅匹配当前快照，不提供研究提交级别的持久回执。真实 CLI JSON、MCP stdio 与 Package Owner 集成覆盖
    文件内容、目标冲突、回执关联、超时和敏感阻断。
+   [#63](https://github.com/guch96/open-science/issues/63) 通过同一 Package Owner 的本地导入入口，
+   从绝对路径导入 `.science`，将已校验包的摘要和新建只读 Session 关联到原操作。使用实际 Project/Session ID
+   查阅 Session、历史回答和已发布 Artifact。测试只迁移包字节到另一个空数据目录，验证拒绝写入、
+   丢失回执后查询原操作以及快照被覆盖时保留 `unconfirmed`；独立机器或容器验收留给 #67。
    [#65](https://github.com/guch96/open-science/issues/65) 检出敏感内容后在服务的私有暂存保留候选包，
    用原操作返回 `pending` 和 `requiresUser`。同 profile 的 Desktop 显示脱敏证据和目标位置；
    原生对话框默认取消，批准绑定候选归档大小与 SHA-256，发布时再次核对。拒绝或十分钟未确认即取消并清理；
    本地 Web 可显示此操作，但浏览器、CLI、MCP 的认证不能批准。Agent 通过原操作查询结果。
+   Electron 验收使用真实服务、MCP、界面和 IPC，仅替换 OS 对话框选择；另有候选归档变更、过期、拒绝和伪造测试。
 4. [#66–#67](https://github.com/guch96/open-science/issues/54) 以实际构建的 npm 包运行 README 两条验收路径。
    只给提示语时，准备好后等用户研究指令；给包时在无源数据库、Notebook 工作目录或凭据的独立环境先只读检查。
 5. [#68](https://github.com/guch96/open-science/issues/68) 在目标版本发布后从 registry 复验。

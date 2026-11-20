@@ -331,6 +331,7 @@ export class SessionPackageOperation {
     if (request.action === 'snapshot') return this.snapshot
     if (
       request.action === 'agent-export' ||
+      request.action === 'agent-import' ||
       [
         'reveal',
         'retry-cleanup',
