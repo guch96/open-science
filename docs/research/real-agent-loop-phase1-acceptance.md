@@ -5,6 +5,35 @@ and [the original Chinese implementation note](real-agent-loop-implementation-pl
 [spec #54](https://github.com/guch96/open-science/issues/54). An installed package, an Agent
 turn, a Notebook dispatch, and verified files are separate observations.
 
+## Final packaged MCP handoff: macOS arm64, November 20, 2026
+
+- Final build: `2d2fbba9abba0d20e43e0a7af4974c7cdb88541a`, Node `24.22.2`, npm `11.19.1`.
+  `npm run stage:backend`, `npm run pack:npm-release`, and `npm run test:npm-installed`
+  passed on this commit. The latter confirmed real npm resolution, the npx entry point,
+  native loading, and an Electron-free install.
+- SHA-256 of the final CLI tarball:
+  `49b6bca1d5187e58bc4f673381615526363fad129d47d19abe596f46311f670a`.
+- SHA-256 of the matching macOS arm64 tarball:
+  `8f3bfbeea258f7aef3fb192395eeda357b4f046e35e9ddec0c23ab0a2b9f1964`.
+- A clean temporary npm install launched the installed `open-science mcp --profile` executable
+  over real stdio. The client read `openscience://agent/guide`, discovered the package tools,
+  and used the repository's `session-package-v0.31.1-minimal.science` fixture. The first attempt
+  was blocked by a stale development process holding port `44100`; after that process was stopped,
+  the same packaged flow completed on a fresh profile without changing product code.
+- Import operation `411a9ad1-d98c-432a-89d7-98de9e57ec58` created Project
+  `import-9511f28a-2f69-407f-94e7-08186f4825fe` and read-only Session
+  `import-53c9938b-afd3-4aae-b58f-3594a1638b76`. A matching `get_package_operation` lookup
+  confirmed the completed import, and `get_session` confirmed `readOnly: true`.
+- Fork operation `f3261550-f55d-4e15-9b87-a547c416c91d` returned writable Session
+  `f3586e5e-f2d0-4fe3-b1f3-4e600baaf47f`; its original operation lookup also completed.
+- Export operation `5cf2de97-9eb7-4d6e-a6f4-d3ac0e531d7a` published `final-fork.science`.
+  The delivery was `verified`, the file was 2325 bytes, and its independently checked SHA-256
+  was `71679574e24930ccb7db96d5da153662daf438ff7360e8fe69fdfc302e324178`. The archive inventory
+  contained `README.md`, `manifest.json`, `records.json`, `ro-crate-metadata.json`, and `session.json`.
+- This is packaged protocol and Session-package evidence only. The fixture has no research result
+  artifacts, real provider/model call, or Notebook dispatch, so it does not close the first-research,
+  independent-migration, or registry gates below.
+
 ## Packaged preview: macOS arm64, November 20, 2026
 
 - Build: `02497ab0e350c9a33cef4bcbe875ba2d7ea9185e`, Node `24.22.2`, npm `11.19.1`.
