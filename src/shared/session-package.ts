@@ -194,6 +194,7 @@ export type AgentPackageOperationReference = z.infer<typeof agentPackageOperatio
 const agentPackageFailureSchema = z.enum([
   'destination-conflict',
   'requires-user',
+  'content-changed',
   'invalid-archive',
   'source-unavailable',
   'requires-update',
@@ -206,6 +207,13 @@ const packageFileDigestSchema = z
   .object({ sizeBytes: z.number().int().nonnegative(), checksum })
   .strict()
 export type PackageFileDigest = z.infer<typeof packageFileDigestSchema>
+const sensitiveExportReviewSchema = z
+  .object({
+    expiresAt: z.number().int().positive(),
+    destination: z.string().max(32768).optional(),
+    fileDigest: packageFileDigestSchema
+  })
+  .strict()
 
 export type PackageOperationSnapshot = {
   id: string
@@ -239,6 +247,7 @@ export type PackageOperationSnapshot = {
   }
   error?: string
   sensitiveContent?: SensitiveContentEvidence[]
+  sensitiveExportReview?: z.infer<typeof sensitiveExportReviewSchema>
   cleanupPending?: boolean
   transferBytesPerSecond?: number
   ioBytesPerSecond?: number
@@ -593,6 +602,7 @@ const packageOperationSnapshotSchema: z.ZodType<PackageOperationSnapshot> = z
       .strict()
       .optional(),
     error: z.string().optional(),
+    sensitiveExportReview: sensitiveExportReviewSchema.optional(),
     sensitiveContent: z
       .array(
         z

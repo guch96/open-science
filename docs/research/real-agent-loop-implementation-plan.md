@@ -38,6 +38,12 @@
    [#56](https://github.com/guch96/open-science/issues/56) 已用真实 MCP stdio 和 CLI JSON 调用同一个认证 HTTP
    夹具验证资源选择、配置版本检查、导入 Session 的只读拒绝和 Literature 默认值；
    TaskRunner 测试验证 Owner 的归属与只读限制。此处的导入 Session 使用测试记录，真实包迁移另行验收。
+   [#60](https://github.com/guch96/open-science/issues/60) 用 Task Run 已记录的 prompt 标识，读取同一 Session
+   中精确归属于该 prompt 的 Python/R Notebook Run。`execution` 独立于外层 Run；缺失派发证据时保留
+   `unconfirmed`。人工停止时有原 refusal/branch 和 Compute 的继续入口；用户完成后用原 Session 的
+   `continuedFromRefusalId` 观察新意图，原 Run 保留原事实。此关联只存在于当前服务，不更改任务或 `.science`
+   持久格式。自动化覆盖 CLI/MCP 查询与等待、服务端拒绝、错 branch 和旧回调、以及既有 Compute 按钮；
+   真实产品人工点击与模型派发另行验收。
    [#59](https://github.com/guch96/open-science/issues/59) 复用 TaskSubmissions 和 Run Owner；
    `start_run` 返回持久回执，`get_submission` / `wait_submission` 和 `get_run` / `wait_run`
    查询原任务。Agent 等待默认 10 秒、上限 30 秒，超时不取消。CLI `run` 自动分配 ID 时先将定位信息
@@ -47,8 +53,7 @@
    以真实 `.science` 和原操作关联证据区分可验证交付、待确认和未知结果。
    [#62](https://github.com/guch96/open-science/issues/62) 导出由 Package Owner 在受理时记录 operation/correlation，
    并使用排他发布。Adapter 用 Owner 提供的大小和摘要核对本地文件；丢响应、快照被替换或文件不匹配时
-   返回 `unconfirmed`。查询仅匹配当前快照，不提供研究提交级别的持久回执。导出入口会阻断未经确认的敏感包；
-   同一操作与具体内容绑定的人工确认由 #65 补齐。真实 CLI JSON、MCP stdio 与 Package Owner 集成覆盖
+   返回 `unconfirmed`。查询仅匹配当前快照，不提供研究提交级别的持久回执。真实 CLI JSON、MCP stdio 与 Package Owner 集成覆盖
    文件内容、目标冲突、回执关联、超时和敏感阻断。
    [#63](https://github.com/guch96/open-science/issues/63) 通过同一 Package Owner 的本地导入入口，
    从绝对路径导入 `.science`，将已校验包的摘要和新建只读 Session 关联到原操作。使用实际 Project/Session ID
@@ -57,6 +62,11 @@
    [#64](https://github.com/guch96/open-science/issues/64) Fork 复用已有发布与权限检查。操作回执的顶层 ID
    指向本次直接来源，嵌套 `session` 指向可写副本；副本的 `forkOrigin` 保留包来源。只在用户同意后 Fork，
    另行授权的二次研究使用新 Session 和新 `requestId`。源 Session 有 Notebook 拒绝时仍须回到原处继续。
+   [#65](https://github.com/guch96/open-science/issues/65) 检出敏感内容后在服务的私有暂存保留候选包，
+   用原操作返回 `pending` 和 `requiresUser`。同 profile 的 Desktop 显示脱敏证据和目标位置；
+   原生对话框默认取消，批准绑定候选归档大小与 SHA-256，发布时再次核对。拒绝或十分钟未确认即取消并清理；
+   本地 Web 可显示此操作，但浏览器、CLI、MCP 的认证不能批准。Agent 通过原操作查询结果。
+   Electron 验收使用真实服务、MCP、界面和 IPC，仅替换 OS 对话框选择；另有候选归档变更、过期、拒绝和伪造测试。
 4. [#66–#67](https://github.com/guch96/open-science/issues/54) 以实际构建的 npm 包运行 README 两条验收路径。
    只给提示语时，准备好后等用户研究指令；给包时在无源数据库、Notebook 工作目录或凭据的独立环境先只读检查。
 5. [#68](https://github.com/guch96/open-science/issues/68) 在目标版本发布后从 registry 复验。

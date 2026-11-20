@@ -1567,6 +1567,84 @@ class NotebookRuntimeService {
     return this.resourceReleases.project(request.projectId)
   }
 
+  async inspectTaskExecution(
+    request: NotebookExecutionIntentScope
+  ): Promise<import('../../shared/task-api').TaskNotebookExecution> {
+    const { projectId, sessionId } = request
+    const scope = { projectId, sessionId }
+    const current = this.executionIntents.current(scope)
+    const promptMessageId = request.promptMessageId ?? current?.scope.promptMessageId
+    const intent =
+      request.promptMessageId && request.promptMessageId !== current?.scope.promptMessageId
+        ? this.executionIntents.resolve(scope, request.promptMessageId)
+        : current
+    const origin = {
+      ...scope,
+      ...(promptMessageId ? { promptMessageId } : {}),
+      ...(intent?.scope.messageBranchId ? { messageBranchId: intent.scope.messageBranchId } : {}),
+      ...(intent?.scope.continuedFromRefusalId
+        ? { continuedFromRefusalId: intent.scope.continuedFromRefusalId }
+        : {})
+    }
+    if (intent?.refusalId && intent === current) {
+      return {
+        ...origin,
+        status: 'waiting_for_user',
+        reasonCode: 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION',
+        refusalId: intent.refusalId,
+        owner: 'user',
+        requiresUser: true,
+        retryable: false,
+        next: {
+          action: 'continue_notebook_in_app',
+          message:
+            'Resolve the cause, then have the user return to the affected Session and conversation branch and choose Continue Notebook work in Open-Science Compute. Recheck the same Session afterward.'
+        }
+      }
+    }
+    const lastRun = promptMessageId
+      ? (await this.repository.readSessionRuns(projectId, sessionId)).findLast(
+          (run) =>
+            run.source === 'agent' &&
+            run.promptMessageId === promptMessageId &&
+            (run.kernelKind === 'python' || run.kernelKind === 'r')
+        )
+      : undefined
+    if (!lastRun) {
+      return {
+        ...origin,
+        status: 'unconfirmed',
+        reasonCode: intent?.refusalId ? 'notebook_intent_stopped' : 'notebook_evidence_unavailable'
+      }
+    }
+    const status = lastRun.status
+    const evidence = {
+      ...origin,
+      ...(lastRun.messageBranchId ? { messageBranchId: lastRun.messageBranchId } : {}),
+      notebookRunId: lastRun.runId,
+      ...(lastRun.kernelDispatched === undefined
+        ? {}
+        : { kernelDispatched: lastRun.kernelDispatched })
+    }
+    if (status === 'queued') return { ...evidence, status: 'preparing' }
+    if (status === 'running') return { ...evidence, status }
+    if (status === 'completed') {
+      return lastRun.kernelDispatched === true
+        ? { ...evidence, status }
+        : { ...evidence, status: 'unconfirmed', reasonCode: 'notebook_dispatch_unconfirmed' }
+    }
+    return {
+      ...evidence,
+      status: 'failed',
+      reasonCode:
+        status !== 'failed'
+          ? `notebook_${status}`
+          : lastRun.kernelDispatched === false
+            ? 'notebook_pre_dispatch_failed'
+            : 'notebook_execution_failed'
+    }
+  }
+
   async releaseSessionResources(
     request: ReleaseNotebookSessionResourcesRequest,
     assertCurrent: () => void

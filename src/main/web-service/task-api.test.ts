@@ -3,6 +3,9 @@ import {
   rebaseTaskTurnOntoLatestSession
 } from '../session-persistence/task-admission'
 import { describe, expect, it, vi, type MockedFunction } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import type { AcpRuntimeEvent } from '../../shared/acp'
 import type { PersistedChatSession } from '../../shared/session-persistence'
@@ -19,6 +22,9 @@ import {
 } from '../compute/session-compute-host-access'
 import { SessionEnabledComputeHostsOwner } from '../compute/session-enabled-hosts-owner'
 import type { TaskAgentPort, TaskSessionPort } from '../tasks/task-runner'
+import { NotebookRuntimeService } from '../notebook/runtime-service'
+import { NotebookRunRepository } from '../notebook/repository'
+import { createFrameNotebookLane } from '../notebook/lane-identity'
 import { HeadlessTaskApi } from './task-api'
 
 const project = {
@@ -271,6 +277,91 @@ const createComputePreferenceHarness = (
 }
 
 describe('HeadlessTaskApi adapter', () => {
+  it('does not report successful Notebook execution from a completed Run or a historical cell', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'task-notebook-observation-'))
+    const repository = new NotebookRunRepository(root)
+    const notebook = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: project.id,
+      repository
+    })
+    const commands = commandsFrom(async (channel, _caller, args) => {
+      if (channel === 'projects:list') return [project]
+      if (channel === 'sessions:load-all') return { sessions: [] }
+      if (channel === 'sessions:save-session') return args[0]
+      throw new Error(`Unexpected Task command: ${channel}`)
+    })
+    const owner = { projectId: project.id, sessionId: 'session-created' }
+    const lane = createFrameNotebookLane(
+      owner.projectId,
+      owner.sessionId,
+      'root-frame-session-created'
+    )
+    const agent = createAgent({
+      prompt: vi.fn(async ({ promptMessageId }) => {
+        const evidence = {
+          cellId: 'cell-1',
+          source: 'agent' as const,
+          kernelKind: 'python' as const,
+          script: 'print(42)',
+          text: { stdout: '', stderr: '', traceback: '', plain: [] },
+          outputs: [],
+          workingFiles: []
+        }
+        await repository.loadOrCreate({ ...owner, lane, workspaceCwd: root })
+        await repository.appendRun({
+          ...owner,
+          lane,
+          run: {
+            ...evidence,
+            runId: 'notebook-unrelated',
+            status: 'completed',
+            kernelDispatched: true,
+            startedAt: 3,
+            promptMessageId: 'user-other'
+          }
+        })
+        await repository.appendRun({
+          ...owner,
+          lane,
+          run: {
+            ...evidence,
+            runId: 'notebook-current',
+            status: 'failed',
+            kernelDispatched: false,
+            startedAt: 2,
+            promptMessageId,
+            messageBranchId: 'branch-current'
+          }
+        })
+      })
+    })
+    const api = new HeadlessTaskApi({ commands, agent, notebook })
+    try {
+      const run = await api.startRun({ project: project.id, prompt: 'Compute the result.' })
+      const expected = {
+        status: 'completed',
+        execution: {
+          status: 'failed',
+          notebookRunId: 'notebook-current',
+          kernelDispatched: false,
+          reasonCode: 'notebook_pre_dispatch_failed',
+          messageBranchId: 'branch-current',
+          ...owner
+        }
+      }
+      const finished = await api.waitForRun(run.id)
+      expect(finished.error).toBeUndefined()
+      expect(finished).toMatchObject(expected)
+      await expect(api.getRun(run.id)).resolves.toMatchObject(expected)
+    } finally {
+      await api.dispose()
+      await notebook.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('projects the registered Agent runtimes without exposing executable paths', async () => {
     const settings = {
       ...taskSettings,

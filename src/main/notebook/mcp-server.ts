@@ -545,6 +545,14 @@ const callNotebookRpc = async (
 // one next step chosen by the RPC status so the Agent neither abandons the tool nor loops on it.
 const notebookRpcErrorGuidance = (status: number, error: unknown): string | undefined => {
   const detail = asRecord(error)
+  const code = typeof error === 'string' ? error.split(':', 1)[0] : detail?.code
+  if (
+    code === 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION' ||
+    code === 'NOTEBOOK_MEMORY_PRESSURE' ||
+    code === 'NOTEBOOK_MEMORY_UNAVAILABLE'
+  ) {
+    return 'Notebook work is stopped. Do not retry, change tools, language, environment or Session, or delegate it. Ask the user to choose Continue Notebook work in Open-Science Compute after resolving the cause.'
+  }
   if (detail && ['recovery', 'retryable', 'hint', 'guidance'].some((key) => key in detail))
     return undefined
   if (status === 400) return TOOL_ARGUMENT_RECOVERY

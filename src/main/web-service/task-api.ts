@@ -53,8 +53,11 @@ import type {
   UpdateTaskProjectRequest
 } from '../../shared/task-api'
 import { createApplicationCommandClient } from '../application-command-client'
+import { createLogger } from '@aipoch/diagnostics/node'
 import type { ApplicationCommandByNameDispatcher } from '../application-command-composition-contract'
 import { createTaskCallerContext, type CallerContext } from '../caller-context'
+import type { NotebookRuntimeService } from '../notebook/runtime-service'
+import type { NotebookExecutionIntentScope } from '../notebook/execution-intent'
 import type { PlanResponseResult } from '../session-plan/plan-service'
 import type { TaskControlPorts } from '../tasks/task-control-ports'
 import { TaskSubmissions } from '../tasks/task-submissions'
@@ -70,10 +73,12 @@ import {
 import { readTaskNotebookReadiness } from './task-notebook-readiness'
 
 const TASK_CALLER_CONTEXT = createTaskCallerContext()
+const log = createLogger('web-service:task-api')
 
 type TaskApiPorts = {
   commands: ApplicationCommandByNameDispatcher
   agent: TaskAgentPort
+  notebook?: Pick<NotebookRuntimeService, 'inspectTaskExecution'>
   controls?: TaskControlPorts
   computePreferences?: TaskComputePreferencePort
   detectActiveSessions?: () => ReadonlyArray<{ projectId: string; sessionId: string }>
@@ -383,8 +388,9 @@ class HeadlessTaskApi {
     return this.runner.listSessions(projectId)
   }
 
-  getSession(sessionId: string, projectId?: string): Promise<TaskSessionSummary> {
-    return this.runner.getSession(sessionId, projectId)
+  async getSession(sessionId: string, projectId?: string): Promise<TaskSessionSummary> {
+    const session = await this.runner.getSession(sessionId, projectId)
+    return this.withNotebookExecution(session, { projectId: session.projectId, sessionId })
   }
 
   getSessionConfiguration(
@@ -575,12 +581,48 @@ class HeadlessTaskApi {
     return this.runner.startRun(request)
   }
 
-  getRun(runId: string): TaskRun {
-    return this.runner.getRun(runId)
+  async getRun(runId: string): Promise<TaskRun> {
+    return this.withRunExecution(this.runner.getRun(runId))
   }
 
-  waitForRun(runId: string): Promise<TaskRun> {
-    return this.runner.waitForRun(runId)
+  async waitForRun(runId: string): Promise<TaskRun> {
+    return this.withRunExecution(await this.runner.waitForRun(runId))
+  }
+
+  private withRunExecution(run: TaskRun): Promise<TaskRun> | TaskRun {
+    const promptMessageId = this.runner.getRunPromptMessageId(run.id)
+    if (!promptMessageId) return run
+    return this.withNotebookExecution(run, {
+      projectId: run.projectId,
+      sessionId: run.sessionId,
+      promptMessageId
+    })
+  }
+
+  private async withNotebookExecution<T extends TaskRun | TaskSessionSummary>(
+    value: T,
+    scope: NotebookExecutionIntentScope
+  ): Promise<T> {
+    if (!this.ports.notebook) return value
+    try {
+      return { ...value, execution: await this.ports.notebook.inspectTaskExecution(scope) }
+    } catch {
+      const { projectId, sessionId, promptMessageId } = scope
+      log.debug('Could not read Notebook execution evidence', {
+        projectId,
+        sessionId,
+        promptMessageId
+      })
+      return {
+        ...value,
+        execution: {
+          projectId,
+          sessionId,
+          status: 'unconfirmed',
+          reasonCode: 'notebook_evidence_unavailable'
+        }
+      }
+    }
   }
 
   cancelRun(runId: string): Promise<TaskRun> {

@@ -272,8 +272,10 @@ type PackageOptions = {
 }
 
 type PackageExportOptions = {
-  // Per-attempt policy; the desktop owner requires explicit acknowledgement of a failed export.
+  // Internal fixture/consumer policy; no application command accepts it.
   allowSensitiveContent?: boolean
+  // Only for a candidate written to private staging, before any external publication.
+  onSensitiveContent?: (finding: PackageSensitiveContentError) => void
   selectFiles?: (
     files: PackageSelectableFile[],
     signal: AbortSignal,
@@ -933,6 +935,16 @@ export class SessionPackageService {
     if (!loaded.session.packageOrigin) assertSettledHistory(loaded.session)
     // Remove local selectors before collecting annotation file dependencies as well.
     const session = withoutPrivateAuthority(loaded.session)
+    const checkSensitive = async (scan: () => Promise<void>): Promise<void> => {
+      if (options.consumeSnapshot || options.allowSensitiveContent) return
+      try {
+        await scan()
+      } catch (error) {
+        if (!(error instanceof PackageSensitiveContentError) || !options.onSensitiveContent)
+          throw error
+        options.onSensitiveContent(error)
+      }
+    }
     const filmOrigin =
       session.packageOrigin || session.forkOrigin ? await this.readOrigin(request) : undefined
     const capturedFilms = await captureResearchFilms(
@@ -971,17 +983,17 @@ export class SessionPackageService {
         onProgress: options.onProgress,
         checkFile: async (path, storageKey, checksum) => {
           await assertWebShareableFile(path, webProjection, this.signal)
-          if (!options.consumeSnapshot && !options.allowSensitiveContent)
-            await assertShareableFile(path, this.signal, storageKey, storageKey, {
+          await checkSensitive(() =>
+            assertShareableFile(path, this.signal, storageKey, storageKey, {
               storageKey,
               root: directory,
               relativePath: `objects/${checksum}`,
               checksum
             })
+          )
         }
       })
-      if (!options.consumeSnapshot && !options.allowSensitiveContent)
-        await assertShareable(records, this.signal, 'records.json')
+      await checkSensitive(() => assertShareable(records, this.signal, 'records.json'))
     }
     if (session.packageOrigin && !filmOrigin?.nativeLogOrigin) {
       diagnostic.phase('validate-retained-package')
@@ -1006,8 +1018,7 @@ export class SessionPackageService {
       )
       if (manifest.source.projectId !== origin.sourceManifest.source.projectId)
         throw new Error('Session package source identity mismatch.')
-      if (!options.consumeSnapshot && !options.allowSensitiveContent)
-        await assertShareable(manifest, this.signal, 'manifest.json')
+      await checkSensitive(() => assertShareable(manifest, this.signal, 'manifest.json'))
       const sourceSessionEnvelope = await readPackageJson(join(source, 'session.json'))
       const sourceSession = await readSession(source)
       let forwardedSession = withoutPrivateAuthority(
@@ -1028,8 +1039,7 @@ export class SessionPackageService {
       )
       if (forwardedWeb) forwardedSession = projectWebSessionCopies(forwardedWeb)
       const records = projectWebRecords(sourceRecords, forwardedWeb)
-      if (!options.consumeSnapshot && !options.allowSensitiveContent)
-        await assertShareable(forwardedSession, this.signal, 'session.json')
+      await checkSensitive(() => assertShareable(forwardedSession, this.signal, 'session.json'))
       // Inspect the raw envelope so malformed legacy Side Chat data dropped by the Session
       // sanitizer cannot bypass the rewrite and be copied into the forwarded package.
       const forwardedSessionJson =
@@ -1050,8 +1060,7 @@ export class SessionPackageService {
           [...capturedFilms.files].map(([key, file]) => [remapStorageKey(key, inverseIds), file])
         )
       }
-      if (!options.consumeSnapshot && !options.allowSensitiveContent)
-        await assertShareable(records, this.signal, 'records.json')
+      await checkSensitive(() => assertShareable(records, this.signal, 'records.json'))
       const alreadyExcluded = validateExcludedFiles(records, manifest.excludedFiles)
       const notebooks = await Promise.all(
         manifest.inventory
@@ -1199,8 +1208,8 @@ export class SessionPackageService {
             }
             if (!options.consumeSnapshot)
               await assertWebShareableFile(join(source, entry.path), forwardedWeb, this.signal)
-            if (!options.consumeSnapshot && !options.allowSensitiveContent)
-              await assertShareableFile(
+            await checkSensitive(() =>
+              assertShareableFile(
                 join(source, entry.path),
                 this.signal,
                 entry.storageKey ?? entry.path,
@@ -1214,6 +1223,7 @@ export class SessionPackageService {
                     }
                   : undefined
               )
+            )
             await copyFileWithinBudget(
               join(source, entry.path),
               join(staging, entry.path),
@@ -1494,8 +1504,7 @@ export class SessionPackageService {
     if (excludedKeys.size !== excludedFiles.length)
       throw new Error('Invalid package content selection.')
     validateExcludedFiles(records, excludedFiles)
-    if (!options.consumeSnapshot && !options.allowSensitiveContent)
-      await assertShareable(sharedSession, this.signal, 'session.json')
+    await checkSensitive(() => assertShareable(sharedSession, this.signal, 'session.json'))
     const directory = await mkdtemp(
       join(
         options.consumeSnapshot ? this.options.storageRoot : tmpdir(),
@@ -1523,8 +1532,7 @@ export class SessionPackageService {
         const sourcePath = (key: string): string =>
           notebookSources.get(key) ?? resolveStorageKey(this.options.storageRoot, sourceKey(key))
         diagnostic.phase('copy-content')
-        if (!options.consumeSnapshot && !options.allowSensitiveContent)
-          await assertShareable(publicRecords, this.signal, 'records.json')
+        await checkSensitive(() => assertShareable(publicRecords, this.signal, 'records.json'))
         const totalBytes = metadataBytes
         const storageKeys = [
           ...new Set([
@@ -1669,8 +1677,8 @@ export class SessionPackageService {
               webProjection,
               this.signal
             )
-            if (!options.allowSensitiveContent)
-              await assertShareableFile(
+            await checkSensitive(() =>
+              assertShareableFile(
                 join(directory, objectPathForEntry),
                 this.signal,
                 storageKey,
@@ -1682,6 +1690,7 @@ export class SessionPackageService {
                   checksum: copied.checksum
                 }
               )
+            )
           }
           inventory.push({
             path: objectPathForEntry,

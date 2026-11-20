@@ -640,8 +640,22 @@ open-science run \
   does not cancel, hide, or prevent collection/messaging of children admitted earlier.
 
 Ordinary `--wait` retains its terminal-only behavior. Add `--return-on-attention` to return a
-still-running Run when its Plan needs approval. Plan approval is the only structured Run attention
-in this release; permission and delegated-question events do not cause an attention return.
+still-running Run when its Plan needs approval or Notebook work is stopped pending human
+continuation. Permission and delegated-question events do not cause an attention return.
+
+`get_run` and `wait_run` report Notebook `execution` independently from the outer Run. Execution
+describes the latest Python or R Notebook Run attributed to the exact research prompt: `preparing`,
+`running`, `completed`, `failed`, `unconfirmed`, or `waiting_for_user`. A completed outer Run,
+an unverified kernel dispatch, or a successful cell from a previous prompt does not establish
+Notebook success. A missing `kernelDispatched` is unknown. Check output delivery separately.
+
+For `waiting_for_user`, keep the refusal, Session, and branch references. Once the cause has
+been resolved, the user opens that conversation branch and chooses **Continue Notebook work**
+in **Compute**. CLI and MCP do not expose this action. Do not retry or switch tools, language,
+environment, or Session to bypass it. After the user acts, `get_session` can observe the live
+Notebook execution intent in the same Session; `execution.continuedFromRefusalId` associates the
+new prompt with the original refusal. This association lives in the running service. The
+original Run keeps its own outcome, and opening a fresh Session is not recovery.
 
 Inspect and respond to an active Plan with its exact version and revision:
 
@@ -709,8 +723,19 @@ local path, including its size and SHA-256. If the service has restarted, a newe
 replaced the original, or the file cannot be verified, expect `completionStatus: "unconfirmed"`.
 Keep the original references and check the destination; do not repeat the export automatically.
 Package operations do not offer the durable receipts that research submissions provide.
-If Open-Science detects sensitive content, the export is blocked and returned with
-`requiresUser: true`; the Agent has no confirmation or force option.
+If the package contains flagged content, the CLI/MCP export reports `package_sensitive_content`,
+`requiresUser: true` and `completionStatus: "pending"`. Nothing has been published. Open
+Open-Science Desktop on the same machine and profile to find the pending package operation.
+Review the redacted evidence and destination, acknowledge the risk, then confirm in the native
+dialog. The dialog identifies the staged package by its size and SHA-256. It defaults to Cancel.
+The approval is for those exact bytes and that operation, and expires after ten minutes. Local
+Web can show the request, but approval requires Desktop; a browser-only or headless environment
+can cancel the export or remove the flagged content before requesting a new export.
+
+After the user responds, query the original `operationId` or `correlationId`; the export call
+does not need to be repeated. Cancellation or expiration publishes no file. If the staged bytes
+change, Open-Science refuses publication even when the size is unchanged. There is no CLI/MCP
+confirmation or force option.
 
 Import an attached `.science` package with the shared `import_session` capability. Pass the
 absolute `sourcePath` on the local shared filesystem and optionally `targetProjectId` for an

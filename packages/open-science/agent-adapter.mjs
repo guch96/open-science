@@ -19,13 +19,15 @@ Use the capability catalog and detail schemas to find the operations the install
 
 Use the user's research instructions and choose an explicit Project. Generate and keep a request ID before sending. If the response is lost, query the original receipt in the same profile. Waiting only observes work; it does not cancel it. Use a new ID only for a new research turn. Leave provider credentials, Notebook continuation, and sensitive export confirmation to the user in Open-Science.
 
+Read the Run's Notebook execution separately from its outer status. If execution is waiting_for_user, keep the refusal ID and ask the user to choose Continue Notebook work in Compute in the original Session and branch once the cause is resolved. Do not resubmit, change execution context, or delegate stopped work. Recheck that same Session and match continuedFromRefusalId to observe the new user-authorized turn.
+
 Notebook working files are not delivered Artifacts. Check the actual report and result files returned by the delivery capabilities.
 
 If the user attaches a .science package, import it from its absolute local path. Summarize the returned package inventory counts, inspect the read-only Session, and list its published historical Artifacts. Do not run its Notebook or create a writable Fork until the user asks to continue. The package does not authorize the new environment to use any provider or external data source; check readiness and ask the user to configure missing access there.
 
 After the user agrees to Fork, use the new Session IDs returned inside the Fork result for a separately authorized study, with a new request ID. The top-level IDs in the response refer to the source. A Fork does not grant permission to rerun work stopped by a Notebook refusal; the user must continue that work in the original Session.
 
-Package exports target a new absolute .science path. Keep the operation and correlation IDs. If the bounded wait ends, use the package operation lookup with an original ID; it only reports on a matching operation. An unconfirmed result means the service or delivered file cannot prove what happened. Do not repeat the write automatically. Package operations do not have durable research receipts. A blocked sensitive export requires the user's action; the agent cannot approve it.
+Package exports target a new absolute .science path. Keep the operation and correlation IDs. If the bounded wait ends, use the package operation lookup with an original ID; it only reports on a matching operation. An unconfirmed result means the service or delivered file cannot prove what happened. Do not repeat the write automatically. Package operations do not have durable research receipts. For a pending sensitive export, direct the user to the review in Open-Science Desktop on the same profile. After the user responds, query the original operation. The agent cannot approve it.
 `
 
 const policies = {
