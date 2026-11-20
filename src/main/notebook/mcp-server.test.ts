@@ -1124,16 +1124,14 @@ describe('notebook_execute tool', () => {
     })
     const client = new ModelContextProtocolClient({ name: 'notebook-stop', version: '1.0.0' })
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-    const fetchRpc = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            error: 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION: Execution was stopped.'
-          }),
-          { status: 500 }
-        )
+    const fetchRpc = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION: Execution was stopped.'
+        }),
+        { status: 500 }
       )
+    )
     try {
       await server.connect(serverTransport)
       await client.connect(clientTransport)
