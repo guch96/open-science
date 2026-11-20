@@ -247,6 +247,84 @@ run driven entirely by the same external Agent. The shared guide now calls for c
 `get_delivery_status` before reporting success. A separate internal Notebook tool regression
 removes technical retry advice after a code or runtime approval was declined.
 
+### Same-Agent replay on the final package build
+
+- A fresh receiving profile and OpenCode home in the Debian 13 arm64 container installed the
+  `1.3.1` npm CLI and matching native runtime built from
+  `fa81f644def35e1231039122b6e09f31d8cf60f8`. The CLI and native tarballs had SHA-256
+  `2d581e9e51b1d6260dd40031474d8b1d9e38a743c6ecafb6120e7760aa634434` and
+  `20a3b9748fa799aceae20c815906e144343ff14d45286961ebe1ccdf821dc713`. The container mounted no
+  host directories. OpenCode `1.19.5`, stdio MCP, and the service ran inside it as the same
+  unprivileged user with Node `24.22.3`, npm `11.19.1`, and an unlocked Secret Service. The
+  nested bubblewrap check passed. Only `first-study.science` crossed over as research state;
+  the receiver independently matched the source SHA-256 above.
+- OpenCode received the exact README quote and attachment path. It called `import_session`,
+  `get_session`, `list_artifacts`, and `get_setup_status` over MCP. Import
+  `06a03b1c-e0c2-471d-9d6d-ebb49528ea6e` (correlation
+  `bb5de8c7-3ad3-4547-a3d6-14406f08bbd8`) created Project
+  `import-42e536e8-84ba-4e96-8889-b68b2f3d8513` and read-only Session
+  `import-f86556c2-18f8-4232-81e5-9da2544d6edd`. It summarized the two historical Artifacts
+  and did not call Fork or submit research. The Notebook evidence in the read-only Session
+  describes the imported history; there was no receiver dispatch in this turn.
+- The operator provisioned managed Python `3.12.16` through Web onboarding and independently
+  configured and validated a keyless local Qwen3.5-9B provider on the receiving profile. The
+  llama.cpp inference endpoint had a 65,536-token context and did not access either profile.
+  Readiness changed from blocked to ready for both the Agent and Notebook. A separate user
+  turn in the same OpenCode conversation then authorized the Fork and specified the follow-up
+  statistics and files. It supplied no Python code, expected values, or workflow instructions.
+- Fork `6aca19a7-80bd-4f81-abef-7bcedddef7db` (correlation
+  `4e9c74f7-bbb1-4914-a2ee-5a074fe8989f`) created writable Session
+  `1cd9d46d-9632-4394-8cbb-3b6b407f18ab`. Independent MCP operation lookups confirmed both
+  the import and Fork while their snapshots were current. OpenCode followed `start_run` with
+  `wait_submission` on `fork-stats-study-20261120`, receiving accepted Run
+  `2c35324f-56d4-4772-8075-f865720de86e`. A bounded `wait_run` timed out; the next `get_run`
+  queried the same Run and returned `waiting_for_user`, `kernelDispatched: false`, and
+  `review_notebook_runtime_in_app`. OpenCode told the user which Session to open and stopped.
+  The operator confirmed the prepared environment in the original Web Session and told the
+  same OpenCode conversation to continue observing the same study.
+- The first generated Python cell had an `ImportError` because `min` and `max` are Python
+  built-ins, not members of `statistics`. The inner Agent corrected the code within the
+  original Run, without a new submission or a supplied cell. Notebook Run
+  `notebook-run-1795183594293-3` reported `completed` and `kernelDispatched: true`; its real
+  output was `6,90,15,10,20`. The migrated input had the same SHA-256 as the source both in
+  the read-only Session and the Fork.
+- The Run completed and published two new Artifacts. A Run-scoped MCP listing linked both to
+  the successful Notebook Run, separately from the two historical Artifacts. OpenCode called
+  `download_artifact` twice and `export_session` itself; the CLI was used only for local
+  startup and read-only comparisons. Its final reply separately reported the successful Python
+  run and all three verified files. `get_delivery_status` returned the same result through
+  MCP and CLI JSON: `execution.status: completed`, `kernelDispatched: true`,
+  `delivery.status: verified`, and `handoffStatus: complete`.
+
+| File                         | Download or operation ID               |  Bytes | SHA-256                                                            |
+| ---------------------------- | -------------------------------------- | -----: | ------------------------------------------------------------------ |
+| `stats_report_new.md`        | `19a2d5ac-cabb-4dca-9033-d4b020918c90` |    550 | `6ecbd52e2908ecd86c8d5f40903489d3b87a0130551e0e0e28611f34e7de0643` |
+| `stats_results_new.csv`      | `158491c1-74eb-4d5e-b476-79f0b8bba0ac` |     37 | `f4187714b0db6da4b0ab5e46562b34385273d6ebf84fd0b26c72db2472990af0` |
+| `first-study-forked.science` | `e500fa2b-b226-4418-997d-192bac2cd281` | 499302 | `cbba4a8211b963cc9712ee85c160cf2b02f5ca2f7556ea4d28c406cebec13513` |
+
+The export lookup (correlation `efc2aed2-a096-4473-9006-d9cb4ddd4142`) returned the same verified
+package. The downloaded bytes matched the source Artifacts and export receipt. All 32 inventory
+records and 23 unique archive entries verified, including the new Notebook record and both new
+files. The archive contained no credential files. Independent recomputation and inspection of the
+report and CSV confirmed the results. The original Session remained read-only, and its input,
+report, and CSV stayed unchanged in both Sessions. The source-to-Fork study and delivery satisfy
+the pre-release migration gate in #67.
+
+An additional verification turn exposed a misleading default: OpenCode omitted the custom paths,
+got `delivery.status: available`, and incorrectly expected a background check. The shared adapter
+now explains that the default directory was checked and tells the Agent to use the actual paths
+from the download receipts. The underlying integrity and completion rules are unchanged. The
+CLI/MCP regression reproduced the missing instruction before the fix; all 389 package tests passed
+after it. The `64ac6bbd88cdfb29695d3c53da7a421638b53df7` Linux npm build passed the install check.
+Its CLI tarball SHA-256 was `a7c3183c8868bd7f38853d5c95d75139d95458ace45dc095e242a6f0f4f0d0f0`;
+the native tarball SHA-256 was `4bff8452c7230d0726f8e0ab018f59245e45b937c132d5a7a417f0bb2c89468c`.
+On the same real Run and files, the installed adapter returned identical CLI JSON and MCP
+responses for both the omitted-path case and the complete handoff with the original paths.
+The local OpenCode model still misread the first response as a pending check despite the explicit
+instruction. When the operator asked it to verify the two existing files by their local paths,
+the same Agent called `get_delivery_status` with both paths and received `handoffStatus: complete`
+and `delivery.status: verified`. It did not repeat the research, downloads, or export.
+
 ### Repaired runtime handoff in the installed build
 
 - macOS and Linux npm builds from `16ed98260` passed `test:npm-installed`. The Linux CLI and
@@ -351,10 +429,19 @@ dialog; it verifies that the app defaults to Cancel and publishes the exact revi
 
 ## Remaining gates
 
-| Gate | Evidence required |
-| --- | --- |
-| Clean same-Agent migration ([#67](https://github.com/guch96/open-science/issues/67)) | Repeat the attached-package flow without a supplied calculation cell and with `handoffStatus: complete` in the same Agent conversation. The independent receiving environment and verified delivery evidence above are already recorded. |
-| Registry ([#68](https://github.com/guch96/open-science/issues/68)) | Repeat on the officially published target version after release. No registry result is inferred from local tarballs. |
+The two pre-release README gates are complete: installation-only research in #66 and independent
+same-Agent migration in #67. Registry verification ([#68](https://github.com/guch96/open-science/issues/68))
+is blocked until an official npm release contains Phase 1. Both README paths must then be repeated
+from that published build.
+
+The public npm registry was checked on November 20, 2026. `@aipoch/open-science` had `latest`
+at `1.3.2`; both `1.3.1` and `1.3.2` were downloadable from the registry. Their official release
+tags resolve to `9861032aa449009449e913188f8bd73a131df908` and
+`10f93481f73bdc7cbb95b1116aab9e663ebfa662` respectively. Neither includes the Phase 1 branch.
+Both registry CLI archives lack its shared Agent Adapter and capability modules. The local
+`1.3.1` package used in the acceptance runs is a different build despite the matching version
+number. The registry archives were checked for provenance only; no registry acceptance run is
+claimed.
 
 Record the build and environment, IDs linking requests to Runs and package operations, the actual
 MCP calls, user decisions, Notebook dispatch, and file paths, byte counts and checksums. Omit

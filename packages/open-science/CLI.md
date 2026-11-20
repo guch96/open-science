@@ -1229,9 +1229,11 @@ existing file, directory or symbolic link is refused. A download returns the act
 SHA-256 and verification result. Verification requires the size and checksum of the source version.
 
 For `get_delivery_status`, pass the Run ID and exact requested `reportName` and `tableName`, plus
-`reportPath` or `tablePath` if custom paths were used. Only Artifacts associated with this Run
-count. `missing` and `partial` describe how many requested outputs are available. `available` means
-both outputs exist at the source. `verified` means both local files match their source versions;
+`reportPath` or `tablePath` from the download receipts if custom paths were used. Omitted paths
+are checked only in the default delivery directory. Only Artifacts associated with this Run count.
+`missing` and `partial` describe how many requested outputs are available. `available` means both
+outputs exist at the source and at least one local file did not verify at the checked path. No
+background verification is pending. `verified` means both local files match their source versions;
 it does not validate the scientific result.
 
 Successful calls return `structuredContent: { "result": ... }` plus the same JSON in text content.
