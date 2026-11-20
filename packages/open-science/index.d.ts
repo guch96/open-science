@@ -530,6 +530,11 @@ export type AgentRouting = {
 
 export type Artifact = {
   id: string
+  artifactId?: string
+  versionId?: string
+  versionNumber?: number
+  artifactRunId?: string
+  producerRunId?: string
   kind: 'workspace-file' | 'external-file' | 'managed-file'
   path: string
   name?: string

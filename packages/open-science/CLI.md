@@ -1109,7 +1109,9 @@ service on the same machine with access to the input and delivery files.
 | `cancel_run`                   | Explicitly cancel a run without undoing previous effects |
 | `get_plan`                     | Read the plan and its version/revision                   |
 | `respond_plan`                 | Approve/reject a reviewed version or request changes     |
-| `list_artifacts`               | List artifact metadata without downloading files         |
+| `list_artifacts`               | List published Artifact versions and download IDs        |
+| `download_artifact`            | Deliver one listed version to a new local file           |
+| `get_delivery_status`         | Check report and result table delivery for one Run       |
 | `search_literature`            | Search or browse Literature library records              |
 | `get_literature_item`          | Read one Literature record                               |
 | `list_citation_styles`         | List citation styles available for formatting            |
@@ -1124,7 +1126,21 @@ service on the same machine with access to the input and delivery files.
 | `set_literature_lifecycle`     | Move records to the trash or restore them                |
 
 A typical workflow calls `list_projects`, `start_run` with `{ "projectId": "…", "prompt": "…" }`,
-then polls `get_run` with the returned run ID and calls `list_artifacts` with the session ID.
+then polls `get_run` with the returned run ID and calls `list_artifacts` with the session and Run IDs.
+Notebook working files must be published as Artifacts before they can be downloaded. For each
+Artifact, pass its `downloadId` and `sessionId` to `download_artifact`; `artifactId` identifies
+the lineage and `versionId` identifies the immutable version. Files default to
+`<profile>/agent-delivery/<downloadId>/<Artifact name>`. An explicit `outputPath` is an absolute
+local path in an existing directory. The destination filesystem must support hard links. An
+existing file, directory or symbolic link is refused. A download returns the actual path, bytes,
+SHA-256 and verification result. Verification requires the size and checksum of the source version.
+
+For `get_delivery_status`, pass the Run ID and exact requested `reportName` and `tableName`, plus
+`reportPath` or `tablePath` if custom paths were used. Only Artifacts associated with this Run
+count. `missing` and `partial` describe how many requested outputs are available. `available` means
+both outputs exist at the source. `verified` means both local files match their source versions;
+it does not validate the scientific result.
+
 Successful calls return `structuredContent: { "result": ... }` plus the same JSON in text content.
 Tool failures set `isError: true` and return `{ "error": ... }` with `code`, `message`, `owner`,
 `requiresUser`, `retryable`, `next`, and available recovery references. CLI Agent calls use the

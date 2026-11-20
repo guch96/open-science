@@ -2,6 +2,7 @@
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { existingMcpCapabilities } from './agent-capabilities.mjs'
+import { artifactCapabilities } from './agent-artifacts.mjs'
 import { getAgentPackageCapabilities } from './agent-package-capabilities.mjs'
 import { connectToOpenScience } from './index.mjs'
 
@@ -465,6 +466,7 @@ const definitions = [
     handler: prepareRuntime
   },
   ...existingMcpCapabilities,
+  ...artifactCapabilities,
   ...getAgentPackageCapabilities(AgentError)
 ]
 const capabilities = new Map(definitions.map((entry) => [entry.name, entry]))
