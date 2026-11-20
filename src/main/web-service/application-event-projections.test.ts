@@ -142,4 +142,40 @@ describe('application event projections', () => {
     })
     expect(projectPublicTaskEvent(compute)).toBeUndefined()
   })
+
+  it('keeps Notebook code review payloads in the application event stream', () => {
+    const card = {
+      sessionId: activeRun.sessionId,
+      requestId: 'review-1',
+      toolCallId: 'app-approval:review-1',
+      title: 'Review potentially destructive code',
+      appOwned: true as const,
+      rawInput: { code: 'private source', notebookCodeRisk: { runId: 'notebook-1', risks: [] } },
+      options: []
+    }
+    const activity = {
+      id: 'event-1',
+      timestamp: 1,
+      level: 'info' as const,
+      sessionId: card.sessionId,
+      toolCallId: card.toolCallId
+    }
+    const events: ApplicationEvent[] = [
+      { channel: 'acp:permission-request', payload: card },
+      {
+        channel: 'acp:event',
+        payload: [
+          { ...activity, kind: 'permission', permissionRequestId: card.requestId, raw: card }
+        ]
+      },
+      {
+        channel: 'acp:event',
+        payload: [{ ...activity, kind: 'tool', appOwned: true, rawInput: card.rawInput }]
+      }
+    ]
+    for (const event of events) {
+      expect(projectPublicTaskEvent(event, () => activeRun)).toBeUndefined()
+      expect(projectWebRendererEvent(event)?.payload).toBe(event.payload)
+    }
+  })
 })

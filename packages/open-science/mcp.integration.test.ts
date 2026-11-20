@@ -358,6 +358,43 @@ it('returns the stopped Notebook and user action without waiting for the outer R
   )
 })
 
+it('returns the live Notebook code review handoff on both external surfaces', async () => {
+  const run = {
+    id: 'run-review',
+    projectId: 'p1',
+    sessionId: 's1',
+    status: 'running',
+    execution: {
+      status: 'waiting_for_user',
+      reasonCode: 'notebook_code_review_required',
+      projectId: 'p1',
+      sessionId: 's1',
+      notebookRunId: 'notebook-1',
+      promptMessageId: 'prompt-1',
+      messageBranchId: 'branch-1',
+      kernelDispatched: false,
+      owner: 'user',
+      requiresUser: true,
+      retryable: false,
+      next: { action: 'review_notebook_code_in_app', message: 'Decide the review in Open-Science.' }
+    }
+  }
+  const agent = await resourceAgents((request, response) => {
+    if (request.method === 'GET' && request.url === `/api/v1/runs/${run.id}`) {
+      response.end(JSON.stringify({ data: run }))
+    } else response.writeHead(404).end()
+  })
+  const key = { runId: run.id }
+  const args = { ...key, timeoutMs: 500 }
+  expect((await agent.mcp('get_run', key)).structuredContent).toEqual({ result: run })
+  const expected = { result: { timeoutMs: args.timeoutMs, run } }
+  expect((await agent.mcp('wait_run', args)).structuredContent).toEqual(expected)
+  expect(await agent.cli('wait_run', args)).toEqual(expected)
+  const guide = await agent.cli('get_agent_guide')
+  expect((await agent.mcp('get_agent_guide')).structuredContent).toEqual(guide)
+  expect(guide.result).toContain('review_notebook_code_in_app')
+})
+
 it('persists a generated CLI request before it can be admitted and refuses to submit without the record', async () => {
   let requestId: string | undefined
   let recordAtAdmission: unknown

@@ -371,7 +371,7 @@ registerResource(
 registerResource(
   'wait_run',
   'research',
-  'Wait for a Run to finish or need attention, including a stopped Notebook. Timeout only stops observation.',
+  'Wait for a Run to finish or need attention, including Notebook code review or continuation. Timeout only stops observation.',
   { runId, timeoutMs: waitTimeoutMs },
   read,
   async (client, { runId, timeoutMs }, options) => ({

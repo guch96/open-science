@@ -87,7 +87,10 @@ export type TaskNotebookExecution = {
   owner?: 'user'
   requiresUser?: true
   retryable?: false
-  next?: { action: 'continue_notebook_in_app'; message: string }
+  next?: {
+    action: 'continue_notebook_in_app' | 'review_notebook_code_in_app'
+    message: string
+  }
 }
 
 export type TaskRunProgressPhase =

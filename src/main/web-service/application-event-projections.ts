@@ -1,4 +1,5 @@
 import type { AcpRuntimeEvent } from '../../shared/acp'
+import { isAppOwnedNotebookCodeReview } from '../../shared/acp-permission-contract'
 import { WEB_RPC_PROTOCOL_VERSION, isWebRpcEventChannel } from '../../shared/web-rpc-contract'
 import type { TaskRunIdentity, TaskRunProgressEvent } from '../../shared/task-api'
 import type { ApplicationEvent } from '../application-events'
@@ -39,6 +40,12 @@ const projectPublicTaskEvents = (
 ): PublicTaskEvent[] => {
   if (event.channel === 'acp:event') {
     return event.payload.flatMap((item) => {
+      if (
+        isAppOwnedNotebookCodeReview(item) ||
+        (item.kind === 'permission' && isAppOwnedNotebookCodeReview(item.raw))
+      ) {
+        return []
+      }
       const run = item.sessionId
         ? resolveActiveRun(item.sessionId, item.promptMessageId)
         : undefined
@@ -46,6 +53,7 @@ const projectPublicTaskEvents = (
     })
   }
   if (event.channel === 'acp:permission-request') {
+    if (isAppOwnedNotebookCodeReview(event.payload)) return []
     const run = resolveActiveRun(event.payload.sessionId)
     return run ? [{ ...run, type: 'permission.requested', data: event.payload }] : []
   }

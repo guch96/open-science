@@ -47,6 +47,22 @@ export type AcpPermissionRequest = {
   }>
 }
 
+export function isAppOwnedNotebookCodeReview(
+  value: unknown
+): value is { appOwned: true; rawInput: { notebookCodeRisk: { runId?: unknown } } } {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    !('appOwned' in value) ||
+    value.appOwned !== true
+  )
+    return false
+  const rawInput = 'rawInput' in value ? value.rawInput : undefined
+  if (rawInput === null || typeof rawInput !== 'object' || !('notebookCodeRisk' in rawInput))
+    return false
+  return rawInput.notebookCodeRisk !== null && typeof rawInput.notebookCodeRisk === 'object'
+}
+
 // An Open-Science-owned tool grant. `categoryKey` is the broker's opaque matcher key;
 // `label`/`kind` are the display projection and `scope` reserves future project/global ownership.
 export type AcpPermissionGrant = {

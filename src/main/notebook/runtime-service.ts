@@ -771,11 +771,16 @@ class NotebookRuntimeService {
     })
   }
   private executionApproval: NotebookExecutionApproval | undefined
+  private pendingCodeReviewRunIds: ((sessionId: string) => readonly string[]) | undefined
   private runtimeBindingApproval: NotebookRuntimeBindingApproval | undefined
   private readonly runtimeBindingPermissionPolicies = new WeakMap<AbortSignal, 'none'>()
 
-  setExecutionApproval(approve: NotebookExecutionApproval): void {
+  setExecutionApproval(
+    approve: NotebookExecutionApproval,
+    pendingCodeReviewRunIds?: (sessionId: string) => readonly string[]
+  ): void {
     this.executionApproval = approve
+    this.pendingCodeReviewRunIds = pendingCodeReviewRunIds
   }
 
   setRuntimeBindingApproval(approve: NotebookRuntimeBindingApproval): void {
@@ -1602,14 +1607,44 @@ class NotebookRuntimeService {
         }
       }
     }
-    const lastRun = promptMessageId
-      ? (await this.repository.readSessionRuns(projectId, sessionId)).findLast(
-          (run) =>
-            run.source === 'agent' &&
-            run.promptMessageId === promptMessageId &&
-            (run.kernelKind === 'python' || run.kernelKind === 'r')
+    const runs = promptMessageId
+      ? (await this.repository.readSessionRuns(projectId, sessionId)).filter(
+          (run) => run.source === 'agent' && run.promptMessageId === promptMessageId
         )
+      : []
+    const branch = request.messageBranchId ?? intent?.scope.messageBranchId
+    const activeRuns = runs.filter(
+      (run) =>
+        (run.status === 'queued' || run.status === 'running') &&
+        (!branch || run.messageBranchId === branch)
+    )
+    const pendingCodeReviews = activeRuns.length
+      ? this.pendingCodeReviewRunIds?.(sessionId)
       : undefined
+    const awaitingReview = pendingCodeReviews?.length
+      ? activeRuns.findLast((run) => pendingCodeReviews.includes(run.runId))
+      : undefined
+    if (awaitingReview) {
+      return {
+        ...origin,
+        ...(awaitingReview.messageBranchId
+          ? { messageBranchId: awaitingReview.messageBranchId }
+          : {}),
+        notebookRunId: awaitingReview.runId,
+        kernelDispatched: false,
+        status: 'waiting_for_user',
+        reasonCode: 'notebook_code_review_required',
+        owner: 'user',
+        requiresUser: true,
+        retryable: false,
+        next: {
+          action: 'review_notebook_code_in_app',
+          message:
+            'Ask the user to open the original Session and branch in Open-Science on the same profile and decide the pending Notebook code review. Recheck this Run after the user responds.'
+        }
+      }
+    }
+    const lastRun = runs.findLast((run) => run.kernelKind === 'python' || run.kernelKind === 'r')
     if (!lastRun) {
       return {
         ...origin,
