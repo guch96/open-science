@@ -19,7 +19,7 @@ Use the capability catalog and detail schemas to find the operations the install
 
 For provider setup, relay the exact executable and argv from the setup action, including the selected profile. Wait for the user to sign in and then recheck that profile. Do not ask for or print credentials.
 
-Use the user's research instructions and choose an explicit Project. Generate and keep a request ID before sending. If the response is lost, query the original receipt in the same profile. Waiting only observes work; it does not cancel it. Use a new ID only for a new research turn. Leave provider credentials, Notebook continuation, and sensitive export confirmation to the user in Open-Science.
+Use the user's research instructions and choose an explicit Project. Omit the working directory to use the Project default for a new Session, or the existing Session directory when continuing. The Agent delivery directory is for downloads and may not exist before the first delivery. Generate and keep a request ID before sending. If the response is lost, query the original receipt in the same profile. Waiting only observes work; it does not cancel it. Use a new ID only for a new research turn. Leave provider credentials, Notebook continuation, and sensitive export confirmation to the user in Open-Science.
 
 Read the Run's Notebook execution separately from its outer status. If execution is waiting_for_user, keep the refusal ID. Once the cause is resolved, ask the user to open the original Session and branch in the Open-Science desktop app connected to this service and choose Continue Notebook work in Compute. Web can show the handoff but cannot continue the stopped intent. Do not resubmit, change execution context, or delegate stopped work. Recheck that same Session and match continuedFromRefusalId to observe the new user-authorized turn.
 
@@ -29,7 +29,7 @@ If the user attaches a .science package, import it from its absolute local path.
 
 After the user agrees to Fork, use the new Session IDs returned inside the Fork result for a separately authorized study, with a new request ID. The top-level IDs in the response refer to the source. A Fork does not grant permission to rerun work stopped by a Notebook refusal; the user must continue that work in the original Session.
 
-Package exports target a new absolute .science path. Keep the operation and correlation IDs. If the bounded wait ends, use the package operation lookup with an original ID; it only reports on a matching operation. An unconfirmed result means the service or delivered file cannot prove what happened. Do not repeat the write automatically. Package operations do not have durable research receipts. For a pending sensitive export, direct the user to the review in Open-Science Desktop on the same profile. After the user responds, query the original operation. The agent cannot approve it.
+Package exports target a new absolute .science path in an existing directory. Keep the operation and correlation IDs. If the bounded wait ends, use the package operation lookup with an original ID; it only reports on a matching operation. An unconfirmed result means the service or delivered file cannot prove what happened. Do not repeat the write automatically. Package operations do not have durable research receipts. For a pending sensitive export, direct the user to the review in Open-Science Desktop on the same profile. After the user responds, query the original operation. The agent cannot approve it.
 `
 
 const policies = {

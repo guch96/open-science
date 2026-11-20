@@ -68,7 +68,10 @@ Python/R Notebook runtime. For terminal setup and a first task, see the
 npm selects a matching optional platform package for macOS ARM64/x64, glibc Linux ARM64/x64
 or Windows x64. The package includes backend resources and native dependencies; it uses your
 installed Node and does not require Electron. Linux musl and Windows ARM64 are unsupported.
-The [Linux prerequisites](#linux-prerequisites) still apply. Do not omit optional dependencies;
+The [Linux prerequisites](#linux-prerequisites) include the C++ runtime required by the native
+helpers. The npm build is validated on Ubuntu 24.04 on ARM64 and x64; older glibc or libstdc++
+versions can fail to load a helper even when npm successfully selects the platform package.
+Do not omit optional dependencies;
 reinstall with `npm install --global @aipoch/open-science --include=optional` if the matching
 native package is missing. Use the public entry package rather than installing a platform
 package directly; the CLI requires its platform package to have the same version.

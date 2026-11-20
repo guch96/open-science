@@ -289,7 +289,9 @@ registerResource(
     projectId,
     prompt: id('Research instructions.'),
     sessionId: sessionId.optional(),
-    cwd: id('Working directory on the Open-Science host.').optional(),
+    cwd: id(
+      'An existing working directory on the Open-Science host. Omit to use the Project or existing Session default.'
+    ).optional(),
     ...agentConfiguration.shape,
     ...sessionPreferences,
     permissionPrompts: z.literal('none').describe('Deny requests that still need a person.').optional(),
@@ -303,7 +305,11 @@ registerResource(
     enabledComputeHostIds: z.array(id('Enabled Compute Host ID for a new session.')).optional()
   },
   { ...write, idempotentHint: true },
-  async (client, { requestId, projectId, providerId, model, reasoningEffort, ...request }, options) =>
+  async (
+    client,
+    { requestId, projectId, providerId, model, reasoningEffort, ...request },
+    options
+  ) =>
     projectSubmissionReceipt(
       await client.submitRun(
         requestId,
@@ -331,7 +337,10 @@ registerResource(
   { requestId },
   read,
   async (client, args, options) =>
-    projectSubmissionReceipt(await client.getSubmission(args.requestId, options), client.configRoot),
+    projectSubmissionReceipt(
+      await client.getSubmission(args.requestId, options),
+      client.configRoot
+    ),
   undefined,
   { serviceCapability: 'durable-submissions' }
 )

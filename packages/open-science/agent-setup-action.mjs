@@ -34,7 +34,8 @@ export const setupAction = ({ code, argv }, profile) => {
 }
 
 export const projectSubmissionReceipt = (receipt, profile) => {
-  if (receipt.status !== 'failed' || receipt.error?.code !== 'provider_auth_required') return receipt
+  if (receipt.status !== 'failed' || receipt.error?.code !== 'provider_auth_required')
+    return receipt
   const { code } = receipt.error
   return {
     ...receipt,

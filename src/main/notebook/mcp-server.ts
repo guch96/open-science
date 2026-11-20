@@ -283,7 +283,7 @@ const LIST_NOTEBOOK_RUNTIMES_DOC = [
 
 const BIND_RUNTIME_DOC = [
   'Bind one enabled runtimeId per language for this session. Disabled/unknown IDs are refused.',
-  'Use bind when no binding exists; otherwise switch. notebook_execute uses it automatically; no per-call runtime.'
+  'Use notebook_execute directly when the installed, enabled app-managed default meets the request. If explicit selection is needed, bind when no binding exists; otherwise switch.'
 ].join('\n')
 
 const SWITCH_RUNTIME_DOC = [

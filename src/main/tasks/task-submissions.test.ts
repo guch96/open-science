@@ -71,10 +71,10 @@ it('persists admission before slow preparation and deduplicates across retry and
 it('recovers a sanitized provider sign-in failure on the original request after restart', async () => {
   const path = await root()
   const startRun = vi.fn(async () => {
-    throw Object.assign(new Error('Authentication required', { cause: 'private provider detail' }), {
-      name: 'RequestError',
-      code: -32000
-    })
+    throw Object.assign(
+      new Error('Authentication required', { cause: 'private provider detail' }),
+      { name: 'RequestError', code: -32000 }
+    )
   })
   const owner = new TaskSubmissions(path, { loadRuns: async () => [], startRun })
   await owner.submit('request-1', request)
