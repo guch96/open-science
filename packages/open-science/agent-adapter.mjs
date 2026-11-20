@@ -2,6 +2,8 @@
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { existingMcpCapabilities } from './agent-capabilities.mjs'
+import { inspectAgentDeliveryDirectory } from './agent-delivery-directory.mjs'
+import { projectAgentNotebookReadiness, readinessActions } from './agent-notebook-readiness.mjs'
 import { connectToOpenScience } from './index.mjs'
 
 export const agentGuideUri = 'openscience://agent/guide'
@@ -317,7 +319,11 @@ const setupAction = ({ code, argv }, profile) => {
 async function doctor(_args, { getClient, configRoot, signal }) {
   const client = await getClient()
   const profile = client.configRoot ?? configRoot
-  const report = await client.doctor({ signal })
+  const [report, deliveryDirectory] = await Promise.all([
+    client.doctor({ signal }),
+    inspectAgentDeliveryDirectory(profile)
+  ])
+  const notebook = projectAgentNotebookReadiness(report?.checks?.notebook, profile)
   const runtime = report?.checks?.runtime
   const provider = report?.checks?.provider
   const agent =
@@ -328,7 +334,7 @@ async function doctor(_args, { getClient, configRoot, signal }) {
         : 'unconfirmed'
   return {
     ...(profile ? { profile } : {}),
-    readiness: { service: 'ready', agent, notebook: 'unconfirmed' },
+    readiness: { service: 'ready', agent, notebook: notebook.status },
     checks: {
       runtime: {
         status: readinessStatus(runtime?.status),
@@ -337,13 +343,19 @@ async function doctor(_args, { getClient, configRoot, signal }) {
       provider: {
         status: readinessStatus(provider?.status),
         ...(providerReasons.includes(provider?.reason) ? { reason: provider.reason } : {})
-      }
+      },
+      notebook: notebook.checks,
+      deliveryDirectory
     },
-    next: Array.isArray(report?.next)
-      ? report.next
-          .filter((item) => setupCodes.includes(item?.code))
-          .map((item) => setupAction(item, profile))
-      : []
+    next: [
+      ...(Array.isArray(report?.next)
+        ? report.next
+            .filter((item) => setupCodes.includes(item?.code))
+            .map((item) => setupAction(item, profile))
+        : []),
+      ...notebook.next,
+      ...readinessActions([deliveryDirectory], profile)
+    ]
   }
 }
 
@@ -369,7 +381,7 @@ const setupStatus = {
   name: 'doctor',
   group: 'setup',
   description:
-    'Check Agent runtime and provider readiness. User actions identify the exact installed CLI and profile.',
+    'Read Agent and Notebook readiness and the default local delivery directory. Actions identify who should handle a blocker and how to recheck this profile.',
   inputSchema: z.strictObject({}),
   annotations: readOnly,
   exposure: { cli: true, mcp: true },

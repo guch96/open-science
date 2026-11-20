@@ -68,6 +68,7 @@ import {
   type TaskComputePreferencePort,
   type TaskRunnerDependencies
 } from '../tasks/task-runner'
+import { readTaskNotebookReadiness } from './task-notebook-readiness'
 
 const TASK_CALLER_CONTEXT = createTaskCallerContext()
 
@@ -329,10 +330,11 @@ class HeadlessTaskApi {
   }
 
   async doctor(): Promise<TaskDoctorReport> {
-    const [preflight, skills, bootstrap] = await Promise.all([
+    const [preflight, skills, bootstrap, notebook] = await Promise.all([
       this.invoke('settings:get-preflight') as Promise<ReadinessPreflight>,
       this.invoke('settings:list-skills') as Promise<SkillView[]>,
-      this.invoke('settings:bootstrap', { action: 'status' }) as Promise<BootstrapResult>
+      this.invoke('settings:bootstrap', { action: 'status' }) as Promise<BootstrapResult>,
+      readTaskNotebookReadiness((channel, ...args) => this.invoke(channel, ...args))
     ])
     const { runtimeReadiness, providerReadiness } = preflight
     const next: TaskDoctorReport['next'][number][] = []
@@ -357,6 +359,7 @@ class HeadlessTaskApi {
           framework: preflight.agentFrameworkId
         },
         provider: providerReadiness,
+        ...(notebook ? { notebook } : {}),
         skills: {
           status: 'ready',
           enabled: skills

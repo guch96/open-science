@@ -6,6 +6,8 @@
     "packages/open-science/README.md",
     "packages/open-science/agent-adapter.mjs",
     "packages/open-science/agent-capabilities.mjs",
+    "packages/open-science/agent-delivery-directory.mjs",
+    "packages/open-science/agent-notebook-readiness.mjs",
     "packages/open-science/cli.mjs",
     "packages/open-science/cli.test.ts",
     "packages/open-science/client-discovery.test.ts",
