@@ -358,42 +358,60 @@ it('returns the stopped Notebook and user action without waiting for the outer R
   )
 })
 
-it('returns the live Notebook code review handoff on both external surfaces', async () => {
-  const run = {
-    id: 'run-review',
-    projectId: 'p1',
-    sessionId: 's1',
-    status: 'running',
-    execution: {
-      status: 'waiting_for_user',
-      reasonCode: 'notebook_code_review_required',
+it.each(['code', 'runtime'] as const)(
+  'returns the live Notebook %s review handoff on both external surfaces',
+  async (kind) => {
+    const action = `review_notebook_${kind}_in_app`
+    let pending = true
+    const run = {
+      id: 'run-review',
       projectId: 'p1',
       sessionId: 's1',
-      notebookRunId: 'notebook-1',
-      promptMessageId: 'prompt-1',
-      messageBranchId: 'branch-1',
-      kernelDispatched: false,
-      owner: 'user',
-      requiresUser: true,
-      retryable: false,
-      next: { action: 'review_notebook_code_in_app', message: 'Decide the review in Open-Science.' }
+      status: 'running',
+      execution: {
+        status: 'waiting_for_user',
+        reasonCode: `notebook_${kind}_review_required`,
+        projectId: 'p1',
+        sessionId: 's1',
+        ...(kind === 'code' ? { notebookRunId: 'notebook-1' } : {}),
+        promptMessageId: 'prompt-1',
+        messageBranchId: 'branch-1',
+        kernelDispatched: false,
+        owner: 'user',
+        requiresUser: true,
+        retryable: false,
+        next: { action, message: 'Decide the review in Open-Science.' }
+      }
+    }
+    const agent = await resourceAgents((request, response) => {
+      if (request.method === 'GET' && request.url === `/api/v1/runs/${run.id}`) {
+        response.end(
+          JSON.stringify({ data: pending ? run : { ...run, execution: { status: 'unconfirmed' } } })
+        )
+      } else response.writeHead(404).end()
+    })
+    const key = { runId: run.id }
+    const args = { ...key, timeoutMs: 500 }
+    expect((await agent.mcp('get_run', key)).structuredContent).toEqual({ result: run })
+    const expected = { result: { timeoutMs: args.timeoutMs, run } }
+    expect((await agent.mcp('wait_run', args)).structuredContent).toEqual(expected)
+    expect(await agent.cli('wait_run', args)).toEqual(expected)
+    const guide = await agent.cli('get_agent_guide')
+    expect((await agent.mcp('get_agent_guide')).structuredContent).toEqual(guide)
+    expect(guide.result).toContain(action)
+    if (kind === 'runtime') {
+      pending = false
+      const bounded = { ...key, timeoutMs: 120 }
+      const expired = await agent.mcp('wait_run', bounded)
+      expect(expired.structuredContent).toMatchObject({
+        error: { code: 'timeout', ...bounded, next: [{ action: 'get_run', ...key }] }
+      })
+      expect(expired.structuredContent).toEqual({
+        error: (await agent.cliError('wait_run', bounded)).error
+      })
     }
   }
-  const agent = await resourceAgents((request, response) => {
-    if (request.method === 'GET' && request.url === `/api/v1/runs/${run.id}`) {
-      response.end(JSON.stringify({ data: run }))
-    } else response.writeHead(404).end()
-  })
-  const key = { runId: run.id }
-  const args = { ...key, timeoutMs: 500 }
-  expect((await agent.mcp('get_run', key)).structuredContent).toEqual({ result: run })
-  const expected = { result: { timeoutMs: args.timeoutMs, run } }
-  expect((await agent.mcp('wait_run', args)).structuredContent).toEqual(expected)
-  expect(await agent.cli('wait_run', args)).toEqual(expected)
-  const guide = await agent.cli('get_agent_guide')
-  expect((await agent.mcp('get_agent_guide')).structuredContent).toEqual(guide)
-  expect(guide.result).toContain('review_notebook_code_in_app')
-})
+)
 
 it('persists a generated CLI request before it can be admitted and refuses to submit without the record', async () => {
   let requestId: string | undefined

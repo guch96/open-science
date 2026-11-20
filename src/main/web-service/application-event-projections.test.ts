@@ -193,4 +193,65 @@ describe('application event projections', () => {
       }
     }
   })
+
+  it('keeps the Notebook environment and approval options out of public Task events', () => {
+    const card = {
+      sessionId: activeRun.sessionId,
+      requestId: 'review-runtime-1',
+      toolCallId: 'app-approval:review-runtime-1',
+      title: 'Confirm Notebook kernel and environment',
+      appOwned: true as const,
+      rawInput: {
+        notebookRuntimeSelection: {
+          projectId: activeRun.projectId,
+          promptMessageId: 'prompt-1',
+          messageBranchId: 'branch-1',
+          interpreterPath: '/private/runtime/python'
+        }
+      },
+      options: [{ optionId: 'private-option-id', kind: 'allow_once', name: 'Approve' }]
+    }
+    const resolveRun = (
+      _sessionId: string,
+      promptMessageId?: string
+    ): typeof activeRun | undefined => (promptMessageId === 'prompt-1' ? activeRun : undefined)
+    const notice = {
+      ...activeRun,
+      type: 'permission.requested',
+      data: {
+        sessionId: card.sessionId,
+        title: 'Notebook runtime review is pending in this Session.',
+        reasonCode: 'notebook_runtime_review_required'
+      }
+    }
+    const permission: ApplicationEvent = { channel: 'acp:permission-request', payload: card }
+    expect(projectPublicTaskEvent(permission, resolveRun)).toEqual(notice)
+    expect(projectPublicTaskEvent(permission, () => undefined)).toBeUndefined()
+    const trimmed = projectPermissionRequest({
+      ...card,
+      rawInput: { ...card.rawInput, extra: 'x'.repeat(10_000) }
+    })
+    expect(trimmed.rawInput).toBeUndefined()
+    expect(
+      projectPublicTaskEvent({ ...permission, payload: trimmed }, () => activeRun)
+    ).toBeUndefined()
+    const activity: ApplicationEvent<'acp:event'> = {
+      channel: 'acp:event',
+      payload: [
+        {
+          id: 'event-1',
+          timestamp: 1,
+          level: 'info',
+          kind: 'permission',
+          sessionId: card.sessionId,
+          permissionRequestId: card.requestId,
+          toolCallId: card.toolCallId,
+          promptMessageId: 'prompt-1',
+          raw: trimmed
+        }
+      ]
+    }
+    expect(projectPublicTaskEvent(activity, resolveRun)).toBeUndefined()
+    expect(projectWebRendererEvent(permission)?.payload).toBe(card)
+  })
 })

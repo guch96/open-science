@@ -5,8 +5,10 @@ import { createLogger } from '@aipoch/diagnostics/node'
 import type { AcpPermissionResponse, AcpPermissionSettlementState } from '../../shared/acp'
 import {
   isAppOwnedNotebookCodeReview,
+  isAppOwnedNotebookRuntimeReview,
   type AcpPermissionGrant,
-  type AcpPermissionRequest
+  type AcpPermissionRequest,
+  type PendingNotebookReview
 } from '../../shared/acp-permission-contract'
 import type {
   PermissionCapability,
@@ -926,11 +928,27 @@ class AcpPermissionBroker {
       .map(({ request }) => request)
   }
 
-  pendingNotebookCodeReviewRunIds(sessionId: string): string[] {
-    return this.getPendingRequests().flatMap((request) => {
-      if (request.sessionId !== sessionId || !isAppOwnedNotebookCodeReview(request)) return []
-      const { runId } = request.rawInput.notebookCodeRisk
-      return typeof runId === 'string' ? [runId] : []
+  pendingNotebookReviews(sessionId: string): PendingNotebookReview[] {
+    return this.getPendingRequests().flatMap<PendingNotebookReview>((request) => {
+      if (request.sessionId !== sessionId) return []
+      if (isAppOwnedNotebookCodeReview(request)) {
+        const { runId } = request.rawInput.notebookCodeRisk
+        return typeof runId === 'string' ? [{ kind: 'code', runId }] : []
+      }
+      if (isAppOwnedNotebookRuntimeReview(request)) {
+        const { projectId, promptMessageId, messageBranchId } =
+          request.rawInput.notebookRuntimeSelection
+        if (
+          typeof projectId === 'string' &&
+          projectId &&
+          typeof promptMessageId === 'string' &&
+          promptMessageId &&
+          typeof messageBranchId === 'string' &&
+          messageBranchId
+        )
+          return [{ kind: 'runtime', projectId, promptMessageId, messageBranchId }]
+      }
+      return []
     })
   }
 

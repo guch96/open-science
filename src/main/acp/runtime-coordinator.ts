@@ -273,10 +273,8 @@ class AcpRuntimeCoordinator {
     )
   }
 
-  pendingNotebookCodeReviewRunIds(sessionId: string): string[] {
-    return Array.from(this.runtimes).flatMap((runtime) =>
-      runtime.pendingNotebookCodeReviewRunIds(sessionId)
-    )
+  pendingNotebookReviews(sessionId: string): ReturnType<AcpRuntime['pendingNotebookReviews']> {
+    return Array.from(this.runtimes).flatMap((runtime) => runtime.pendingNotebookReviews(sessionId))
   }
 
   getSnapshot(): AcpStateSnapshot {

@@ -330,7 +330,8 @@ export type NotebookExecution = {
   requiresUser?: true
   retryable?: false
   next?: {
-    action: 'continue_notebook_in_app' | 'review_notebook_code_in_app'
+    action:
+      'continue_notebook_in_app' | 'review_notebook_code_in_app' | 'review_notebook_runtime_in_app'
     message: string
   }
 }

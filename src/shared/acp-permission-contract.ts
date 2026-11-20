@@ -21,6 +21,7 @@ export type AcpPermissionRequest = {
   appOwned?: true
   // The renderer projection retains the review kind even when its evidence cannot be shown.
   notebookCodeReview?: true
+  notebookRuntimeReview?: true
   // Renderer lifecycle hint only. Main sets this after the request authority reaches Session
   // storage; restored authority is still reloaded and validated independently before use.
   durable?: true
@@ -64,6 +65,30 @@ export function isAppOwnedNotebookCodeReview(
     return false
   return rawInput.notebookCodeRisk !== null && typeof rawInput.notebookCodeRisk === 'object'
 }
+
+export function isAppOwnedNotebookRuntimeReview(value: unknown): value is {
+  appOwned: true
+  rawInput: {
+    notebookRuntimeSelection: {
+      projectId?: unknown
+      promptMessageId?: unknown
+      messageBranchId?: unknown
+    }
+  }
+} {
+  if (!value || typeof value !== 'object' || !('appOwned' in value) || value.appOwned !== true)
+    return false
+  const rawInput = 'rawInput' in value ? value.rawInput : undefined
+  if (!rawInput || typeof rawInput !== 'object' || !('notebookRuntimeSelection' in rawInput))
+    return false
+  return Boolean(
+    rawInput.notebookRuntimeSelection && typeof rawInput.notebookRuntimeSelection === 'object'
+  )
+}
+
+export type PendingNotebookReview =
+  | { kind: 'code'; runId: string }
+  | { kind: 'runtime'; projectId: string; promptMessageId: string; messageBranchId: string }
 
 // An Open-Science-owned tool grant. `categoryKey` is the broker's opaque matcher key;
 // `label`/`kind` are the display projection and `scope` reserves future project/global ownership.

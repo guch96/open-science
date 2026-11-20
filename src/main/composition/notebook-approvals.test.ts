@@ -35,10 +35,10 @@ function harness(saved: () => Promise<PermissionProfileId | undefined>): {
       ({
         getState: () => ({ permissionProfiles: profiles }),
         requestAppApproval,
-        pendingNotebookCodeReviewRunIds: () => []
+        pendingNotebookReviews: () => []
       }) as unknown as Pick<
         AcpRuntimeCoordinator,
-        'getState' | 'requestAppApproval' | 'pendingNotebookCodeReviewRunIds'
+        'getState' | 'requestAppApproval' | 'pendingNotebookReviews'
       >,
     read
   )

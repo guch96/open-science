@@ -84,6 +84,7 @@ import {
   analyzeNotebookSourceOffMainThread
 } from './source-analysis-worker'
 import type { GrantedLocalRoot } from '../../shared/local-fs'
+import type { PendingNotebookReview } from '../../shared/acp-permission-contract'
 import type { PackageMirror } from '../../shared/mirror'
 import type {
   AbortNotebookCodeCellRequest,
@@ -771,16 +772,17 @@ class NotebookRuntimeService {
     })
   }
   private executionApproval: NotebookExecutionApproval | undefined
-  private pendingCodeReviewRunIds: ((sessionId: string) => readonly string[]) | undefined
+  private pendingNotebookReviews:
+    ((sessionId: string) => readonly PendingNotebookReview[]) | undefined
   private runtimeBindingApproval: NotebookRuntimeBindingApproval | undefined
   private readonly runtimeBindingPermissionPolicies = new WeakMap<AbortSignal, 'none'>()
 
   setExecutionApproval(
     approve: NotebookExecutionApproval,
-    pendingCodeReviewRunIds?: (sessionId: string) => readonly string[]
+    pendingNotebookReviews?: (sessionId: string) => readonly PendingNotebookReview[]
   ): void {
     this.executionApproval = approve
-    this.pendingCodeReviewRunIds = pendingCodeReviewRunIds
+    this.pendingNotebookReviews = pendingNotebookReviews
   }
 
   setRuntimeBindingApproval(approve: NotebookRuntimeBindingApproval): void {
@@ -835,8 +837,15 @@ class NotebookRuntimeService {
     binding: NotebookSessionRuntimeBinding,
     operation: 'bind' | 'switch',
     signal?: AbortSignal,
-    requireHostDecision = false,
-    permissionPrompts?: 'none'
+    {
+      requireHostDecision = false,
+      permissionPrompts,
+      provenanceContext
+    }: {
+      requireHostDecision?: boolean
+      permissionPrompts?: 'none'
+      provenanceContext?: NotebookSessionRequest['provenanceContext']
+    } = {}
   ): Promise<void> {
     signal?.throwIfAborted()
     const target = await this.runtimeBindingOwner.resolveBindingTarget(language, binding.runtimeId)
@@ -904,7 +913,14 @@ class NotebookRuntimeService {
           label: binding.label,
           interpreterPath: binding.interpreterPath,
           previousRuntimeId: current?.runtimeId,
-          previousLabel: current?.label
+          previousLabel: current?.label,
+          ...(provenanceContext
+            ? {
+                projectId: session.projectId,
+                promptMessageId: provenanceContext.promptMessageId,
+                messageBranchId: provenanceContext.messageBranchId
+              }
+            : {})
         }
       },
       signal,
@@ -961,6 +977,7 @@ class NotebookRuntimeService {
   private async prepareRuntimeSelection(
     session: RuntimeSession,
     language: NotebookLanguage,
+    request: RunNotebookCellRequest,
     signal?: AbortSignal
   ): Promise<void> {
     if (
@@ -1001,15 +1018,12 @@ class NotebookRuntimeService {
           language,
           selected.runtimeId,
           (binding) =>
-            this.reviewRuntimeBinding(
-              session,
-              language,
-              binding,
-              'bind',
-              signal,
-              false,
-              signal ? this.runtimeBindingPermissionPolicies.get(signal) : undefined
-            ),
+            this.reviewRuntimeBinding(session, language, binding, 'bind', signal, {
+              permissionPrompts: signal
+                ? this.runtimeBindingPermissionPolicies.get(signal)
+                : undefined,
+              provenanceContext: request.provenanceContext
+            }),
           () => signal?.throwIfAborted()
         )
         if ('error' in result) throw new Error(result.error)
@@ -1624,17 +1638,39 @@ class NotebookRuntimeService {
         )
       : []
     const branch = request.messageBranchId ?? intent?.scope.messageBranchId
+    const pendingReviews = promptMessageId ? this.pendingNotebookReviews?.(sessionId) : undefined
+    const runtimeReview = pendingReviews?.find(
+      (review) =>
+        review.kind === 'runtime' &&
+        review.projectId === projectId &&
+        review.promptMessageId === promptMessageId &&
+        (branch === undefined || review.messageBranchId === branch)
+    )
+    if (runtimeReview?.kind === 'runtime') {
+      return {
+        ...origin,
+        messageBranchId: runtimeReview.messageBranchId,
+        kernelDispatched: false,
+        status: 'waiting_for_user',
+        reasonCode: 'notebook_runtime_review_required',
+        owner: 'user',
+        requiresUser: true,
+        retryable: false,
+        next: {
+          action: 'review_notebook_runtime_in_app',
+          message:
+            'Ask the user to open the original Session and branch in Open-Science on the same profile and respond to Confirm Notebook kernel and environment. Recheck this Run after the user responds.'
+        }
+      }
+    }
     const activeRuns = runs.filter(
       (run) =>
         (run.status === 'queued' || run.status === 'running') &&
         (!branch || run.messageBranchId === branch)
     )
-    const pendingCodeReviews = activeRuns.length
-      ? this.pendingCodeReviewRunIds?.(sessionId)
-      : undefined
-    const awaitingReview = pendingCodeReviews?.length
-      ? activeRuns.findLast((run) => pendingCodeReviews.includes(run.runId))
-      : undefined
+    const awaitingReview = activeRuns.findLast((run) =>
+      pendingReviews?.some((review) => review.kind === 'code' && review.runId === run.runId)
+    )
     if (awaitingReview) {
       return {
         ...origin,
@@ -1976,8 +2012,11 @@ class NotebookRuntimeService {
                     binding,
                     operation,
                     signal ? AbortSignal.any([signal, deletionSignal]) : deletionSignal,
-                    requireHostDecision,
-                    readTrustedNotebookBindingPermissionPrompts(request)
+                    {
+                      requireHostDecision,
+                      permissionPrompts: readTrustedNotebookBindingPermissionPrompts(request),
+                      provenanceContext: request.provenanceContext
+                    }
                   )
                 }
                 if (operation === 'bind') {

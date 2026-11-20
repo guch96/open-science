@@ -382,7 +382,9 @@ describe('HeadlessTaskApi adapter', () => {
       role: 'user',
       content: id,
       status: 'complete',
-      createdAt: 1
+      eventIds: [],
+      createdAt: 1,
+      updatedAt: 1
     })
     let session = materializeSessionConversationGraph({
       id: owner.sessionId,

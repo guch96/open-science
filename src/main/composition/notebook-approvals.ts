@@ -7,10 +7,7 @@ import type { PermissionProfileId } from '../../shared/permission-profiles'
 export function bindNotebookApprovals(
   notebook: Pick<NotebookRuntimeService, 'setExecutionApproval' | 'setRuntimeBindingApproval'>,
   runtimeForApproval: () =>
-    | Pick<
-        AcpRuntimeCoordinator,
-        'getState' | 'requestAppApproval' | 'pendingNotebookCodeReviewRunIds'
-      >
+    | Pick<AcpRuntimeCoordinator, 'getState' | 'requestAppApproval' | 'pendingNotebookReviews'>
     | undefined,
   readSessionProfile?: (
     projectId: string,
@@ -43,7 +40,7 @@ export function bindNotebookApprovals(
       if (request.permissionPrompts === 'none') return false
       return runtime().requestAppApproval(request)
     },
-    (sessionId) => runtimeForApproval()?.pendingNotebookCodeReviewRunIds(sessionId) ?? []
+    (sessionId) => runtimeForApproval()?.pendingNotebookReviews(sessionId) ?? []
   )
   notebook.setRuntimeBindingApproval(async (request) => {
     const profile = await profileFor(request)

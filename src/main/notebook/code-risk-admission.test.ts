@@ -237,6 +237,85 @@ async function productionKernelHarness(language: 'python' | 'r' | 'repl'): Promi
 }
 
 describe('host-owned one-shot execution admission', () => {
+  it.each(['ask', 'auto'] as const)(
+    'reports pre-dispatch Notebook runtime review only for a pending decision in %s',
+    async (profile) => {
+      const { service, request, execute, runtimes } = await harness(1)
+      Object.assign(runtimes[0], { provenance: 'app-managed', condaEnv: 'default-python' })
+      const requested = Promise.withResolvers<AcpPermissionRequest>()
+      const broker = new AcpPermissionBroker((approval) => requested.resolve(approval))
+      bindNotebookApprovals(
+        service,
+        () => ({
+          getState: () => ({ permissionProfiles: {} }) as AcpRuntimeState,
+          requestAppApproval: (input) => broker.requestAppApproval(input),
+          pendingNotebookReviews: (sessionId) => broker.pendingNotebookReviews(sessionId)
+        }),
+        async () => profile
+      )
+      const scope = {
+        projectId: request.projectId,
+        sessionId: request.sessionId,
+        promptMessageId: 'study-prompt',
+        messageBranchId: 'study-branch'
+      }
+      const execution = service.execute({
+        ...request,
+        code: 'print(42)',
+        provenanceContext: {
+          promptMessageId: scope.promptMessageId,
+          messageBranchId: scope.messageBranchId,
+          rootFrameId: 'root-frame-session',
+          agentFrameId: 'root-frame-session',
+          runtimeSegmentId: 'segment'
+        }
+      })
+      try {
+        if (profile === 'ask') {
+          const permission = await Promise.race([requested.promise, execution])
+          if (!('requestId' in permission)) throw new Error('Runtime approval was not requested.')
+          expect(execute).not.toHaveBeenCalled()
+          expect(await service.inspectTaskExecution(scope)).toEqual({
+            ...scope,
+            kernelDispatched: false,
+            status: 'waiting_for_user',
+            reasonCode: 'notebook_runtime_review_required',
+            owner: 'user',
+            requiresUser: true,
+            retryable: false,
+            next: { action: 'review_notebook_runtime_in_app', message: expect.any(String) }
+          })
+          await expect(
+            service.inspectTaskExecution({ ...scope, messageBranchId: undefined })
+          ).resolves.toMatchObject({ status: 'waiting_for_user', messageBranchId: 'study-branch' })
+          for (const overrides of [
+            { promptMessageId: 'other-prompt' },
+            { messageBranchId: 'other-branch' },
+            { sessionId: 'other-session' },
+            { projectId: 'other-project' }
+          ]) {
+            expect((await service.inspectTaskExecution({ ...scope, ...overrides })).status).toBe(
+              'unconfirmed'
+            )
+          }
+          await broker.respond({
+            requestId: permission.requestId,
+            optionId: permission.options.find(({ kind }) => kind === 'allow_once')!.optionId
+          })
+        }
+        await execution
+        expect(broker.getPendingRequests()).toEqual([])
+        expect(await service.inspectTaskExecution(scope)).toMatchObject({
+          status: 'completed',
+          kernelDispatched: true
+        })
+      } finally {
+        broker.cancelForSession(scope.sessionId)
+        await execution.catch(() => undefined)
+      }
+    }
+  )
+
   it.each([false, true])(
     'reports only the exact pending code review (trimmed=%s)',
     async (trimmed) => {
@@ -268,8 +347,7 @@ describe('host-owned one-shot execution admission', () => {
               ? { rawInput: { ...(input.rawInput as object), code: 'x'.repeat(1024 * 1024 + 1) } }
               : {})
           }),
-        pendingNotebookCodeReviewRunIds: (sessionId) =>
-          broker.pendingNotebookCodeReviewRunIds(sessionId)
+        pendingNotebookReviews: (sessionId) => broker.pendingNotebookReviews(sessionId)
       }))
       const scope = { projectId: request.projectId, sessionId: request.sessionId }
       const origin = { promptMessageId: 'study-prompt', messageBranchId: 'study-branch' }
@@ -8101,7 +8179,10 @@ print(reader("."))`)
             label: runtimes[0].label,
             interpreterPath: runtimes[0].interpreterPath,
             previousRuntimeId: undefined,
-            previousLabel: undefined
+            previousLabel: undefined,
+            projectId: request.projectId,
+            promptMessageId: 'prompt',
+            messageBranchId: 'branch'
           }
         }
       })
@@ -8126,7 +8207,10 @@ print(reader("."))`)
             label: runtimes[1].label,
             interpreterPath: runtimes[1].interpreterPath,
             previousRuntimeId: runtimes[0].envId,
-            previousLabel: runtimes[0].label
+            previousLabel: runtimes[0].label,
+            projectId: request.projectId,
+            promptMessageId: 'prompt',
+            messageBranchId: 'branch'
           }
         }
       })
