@@ -288,6 +288,129 @@ it('uses the authenticated service for doctor and maps invalid or unsupported ca
   }
 })
 
+it('prepares the managed runtime and leaves login to the user in the same profile', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-setup-'))
+  cleanup.push(() => rm(profile, { recursive: true, force: true }))
+  const token = 'setup-fixture-secret'
+  let runtime = 'missing'
+  let provider = 'missing'
+  let installationFails = false
+  const installs: unknown[] = []
+  const service = createServer(async (req, res) => {
+    if (req.headers.authorization !== `Bearer ${token}`) return res.writeHead(401).end()
+    res.setHeader('content-type', 'application/json')
+    if (req.url === '/api/bootstrap') {
+      return res.end(JSON.stringify({ taskCapabilities: ['doctor', 'runtime-bootstrap'] }))
+    }
+    if (req.url === '/api/v1/bootstrap' && req.method === 'POST') {
+      let body = ''
+      for await (const chunk of req) body += chunk
+      installs.push(JSON.parse(body))
+      if (installationFails) {
+        return res
+          .writeHead(503)
+          .end(JSON.stringify({ error: { code: 'runtime_unavailable', message: token } }))
+      }
+      runtime = 'ready'
+      return res.end(JSON.stringify({ data: { ok: true } }))
+    }
+    if (req.url === '/api/v1/doctor') {
+      return res.end(
+        JSON.stringify({
+          data: {
+            ready: runtime === 'ready' && provider === 'ready',
+            checks: {
+              runtime: { status: runtime, framework: 'codex' },
+              provider: { status: provider }
+            },
+            next:
+              provider === 'missing' ? [{ code: 'provider_missing', argv: ['codex', 'login'] }] : []
+          }
+        })
+      )
+    }
+    return res.writeHead(404).end()
+  })
+  service.listen(0, '127.0.0.1')
+  await once(service, 'listening')
+  cleanup.push(async () => {
+    service.closeAllConnections()
+    await new Promise<void>((done) => service.close(() => done()))
+  })
+  await writeFile(
+    join(profile, 'web-service.json'),
+    JSON.stringify({
+      pid: process.pid,
+      port: (service.address() as { port: number }).port,
+      startedAt: new Date().toISOString()
+    })
+  )
+  await writeFile(join(profile, 'web-token'), token)
+  const client = await connectMcp(profile)
+  const cliArgs = (name: string): string[] => [
+    'tools',
+    'call',
+    name,
+    '--profile',
+    profile,
+    '--json'
+  ]
+  const both = async (name: string): Promise<unknown> => {
+    const mcp = await client.callTool({ name })
+    expect(mcp.isError).not.toBe(true)
+    expect(mcp.structuredContent).toEqual(JSON.parse((await runCli(cliArgs(name))).stdout))
+    return mcp.structuredContent?.result
+  }
+  expect(await both('get_setup_status')).toMatchObject({
+    profile,
+    readiness: { service: 'ready', agent: 'blocked' },
+    checks: { runtime: { status: 'missing' }, provider: { status: 'missing' } }
+  })
+  expect(installs).toEqual([])
+  const rejected = await client.callTool({ name: 'prepare_runtime', arguments: { apiKey: token } })
+  expect(rejected.isError).toBe(true)
+  expect(rejected.structuredContent).toMatchObject({ error: { code: 'invalid_request' } })
+  expect(installs).toEqual([])
+
+  installationFails = true
+  const failed = await client.callTool({ name: 'prepare_runtime' })
+  expect(failed.isError).toBe(true)
+  expect(failed.structuredContent).toEqual({
+    error: (await cliError(cliArgs('prepare_runtime'))).error
+  })
+  expect(failed.structuredContent).toMatchObject({
+    error: { code: 'runtime_unavailable', owner: 'deployment', retryable: false }
+  })
+  expect(JSON.stringify(failed)).not.toContain(token)
+
+  installationFails = false
+  const prepared = await both('prepare_runtime')
+  expect(prepared).toMatchObject({
+    profile,
+    checks: { runtime: { status: 'ready' }, provider: { status: 'missing' } },
+    next: [
+      expect.objectContaining({
+        code: 'provider_missing',
+        owner: 'user',
+        executable: process.execPath,
+        argv: [cli, 'codex', 'login', '--profile', profile],
+        requiresUser: true,
+        retryable: false,
+        verify: { capability: 'get_setup_status', profile }
+      })
+    ]
+  })
+  const { stdout } = await runCli(['runtime', 'install', 'codex', '--profile', profile, '--json'])
+  expect(JSON.parse(stdout)).toEqual({ result: prepared })
+  expect(installs).toEqual(Array.from({ length: 5 }, () => ({ action: 'runtime' })))
+  provider = 'ready' // The product's login owns this change, outside the external Agent API.
+  expect(await both('get_setup_status')).toMatchObject({
+    profile,
+    readiness: { agent: 'ready' },
+    next: []
+  })
+})
+
 it('serves a real stdio run/poll/artifact workflow through authenticated HTTP and keeps runs after close', async () => {
   const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-'))
   cleanup.push(() => rm(profile, { recursive: true, force: true }))

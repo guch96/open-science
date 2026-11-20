@@ -1085,6 +1085,7 @@ export const connectToOpenScience = async ({
           requestTimeoutMs
         })
         await candidate.health({ signal })
+        candidate.configRoot = state.configRoot
         client = candidate
         return true
       } catch (error) {
