@@ -469,15 +469,33 @@ export type PackageOperation = {
   kind: 'export' | 'import' | 'fork'
   state: 'running' | 'awaiting-selection' | 'cancelling' | 'succeeded' | 'cancelled' | 'failed'
   session?: { projectId: string; sessionId: string }
+  importTarget?: { projectId?: string; projectName?: string }
   agent?: {
     correlationId: string
     destinationPath?: string
-    failure?: 'destination-conflict' | 'requires-user'
+    sourcePath?: string
+    failure?:
+      | 'destination-conflict'
+      | 'requires-user'
+      | 'invalid-archive'
+      | 'source-unavailable'
+      | 'requires-update'
+      | 'import-unconfirmed'
   }
   result?: {
     filePath?: string
     fileDigest?: { sizeBytes: number; checksum: string }
     imported?: { projectId: string; sessionId: string }
+    packageSummary?: {
+      title: string
+      projectName: string
+      branchCount: number
+      messageCount: number
+      fileCount: number
+      totalBytes: number
+      omissionCount: number
+      externalOmissionCount: number
+    }
     recovery?: {
       projectId: string
       sessionId: string
@@ -772,6 +790,18 @@ export class OpenScienceClient {
     options?: RequestOptions
   ): Promise<PackageOperation>
   getPackageOperation(options?: RequestOptions): Promise<PackageOperation | null>
+  startAgentPackageImport(
+    sourcePath: string,
+    target: { projectId?: string; projectName?: string },
+    correlationId: string,
+    options?: RequestOptions
+  ): Promise<PackageOperation>
+  importSessionPackage(
+    target: { projectId?: string; projectName?: string },
+    sourcePath: string,
+    options: { nonInteractive: true },
+    rpcOptions?: RequestOptions
+  ): Promise<{ projectId: string; sessionId: string } | null>
   submitRun(
     requestId: string,
     request: Parameters<OpenScienceClient['startRun']>[0],

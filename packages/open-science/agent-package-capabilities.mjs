@@ -9,6 +9,7 @@ import { z } from 'zod'
 const defaultWaitMs = 30_000
 const pollIntervalMs = 250
 const serviceCapability = 'agent-package-operations'
+const importCapability = 'agent-package-import'
 const readOnly = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -23,13 +24,18 @@ const pathSchema = z
   .max(32768)
   .regex(/\.science$/i)
   .refine((path) => !path.includes('\0') && isAbsolute(path))
+const projectName = z.string().trim().min(1).max(200)
+const waitMsSchema = z.number().int().min(1).max(300_000).default(defaultWaitMs)
 const references = {
   operationId: referenceId.optional(),
   correlationId: referenceId.optional(),
   kind: z.enum(['export', 'import', 'fork']).optional(),
   projectId: id.optional(),
   sessionId: id.optional(),
-  destinationPath: pathSchema.optional()
+  destinationPath: pathSchema.optional(),
+  sourcePath: pathSchema.optional(),
+  targetProjectId: id.optional(),
+  newProjectName: projectName.optional()
 }
 
 const lookup = (expected) => ({ action: 'get_package_operation', ...expected })
@@ -56,7 +62,10 @@ export const matchesPackageOperation = (snapshot, expected) => {
     (!expected.kind || snapshot.kind === expected.kind) &&
     (!expected.projectId || snapshot.session?.projectId === expected.projectId) &&
     (!expected.sessionId || snapshot.session?.sessionId === expected.sessionId) &&
-    (!expected.destinationPath || snapshot.agent.destinationPath === expected.destinationPath)
+    (!expected.destinationPath || snapshot.agent.destinationPath === expected.destinationPath) &&
+    (!expected.sourcePath || snapshot.agent.sourcePath === expected.sourcePath) &&
+    (!expected.targetProjectId || snapshot.importTarget?.projectId === expected.targetProjectId) &&
+    (!expected.newProjectName || snapshot.importTarget?.projectName === expected.newProjectName)
   )
 }
 
@@ -113,11 +122,20 @@ async function packageStatus(snapshot, expected, signal) {
     operationId: snapshot.id,
     correlationId: snapshot.agent.correlationId,
     ...snapshot.session,
-    ...(snapshot.agent.destinationPath ? { destinationPath: snapshot.agent.destinationPath } : {})
+    ...(snapshot.agent.destinationPath ? { destinationPath: snapshot.agent.destinationPath } : {}),
+    ...(snapshot.agent.sourcePath ? { sourcePath: snapshot.agent.sourcePath } : {}),
+    ...(snapshot.importTarget?.projectId
+      ? { targetProjectId: snapshot.importTarget.projectId }
+      : {}),
+    ...(snapshot.importTarget?.projectName
+      ? { newProjectName: snapshot.importTarget.projectName }
+      : {})
   }
   if (busy(snapshot)) {
     return { ...reference, completionStatus: 'pending', next: [lookup(reference)] }
   }
+  if (snapshot.result?.recovery || snapshot.agent.failure === 'import-unconfirmed')
+    return unconfirmed(reference)
   if (snapshot.state === 'succeeded') {
     if (snapshot.kind === 'export') {
       const file =
@@ -131,13 +149,36 @@ async function packageStatus(snapshot, expected, signal) {
         delivery: { status: 'verified', file }
       }
     }
+    if (snapshot.kind === 'import') {
+      const imported = snapshot.result?.imported
+      if (
+        !imported ||
+        (reference.targetProjectId && imported.projectId !== reference.targetProjectId)
+      )
+        return unconfirmed(reference)
+      return {
+        ...reference,
+        completionStatus: 'completed',
+        session: { ...imported, readOnly: true },
+        ...(snapshot.result.packageSummary
+          ? { packageSummary: snapshot.result.packageSummary }
+          : {}),
+        next: [
+          { action: 'get_session', ...imported },
+          { action: 'list_artifacts', sessionId: imported.sessionId }
+        ]
+      }
+    }
     if (snapshot.result?.imported)
       return { ...reference, completionStatus: 'completed', session: snapshot.result.imported }
   }
-  if (snapshot.result?.recovery) return unconfirmed(reference)
   if (snapshot.state === 'cancelled')
     return { ...reference, completionStatus: 'cancelled', retryable: false }
   if (snapshot.state !== 'failed') return unconfirmed(reference)
+  if (snapshot.kind === 'import') {
+    const failure = importFailureDetails(snapshot.agent.failure)
+    return { ...reference, completionStatus: 'failed', retryable: false, ...failure }
+  }
   if (snapshot.agent.failure === 'requires-user')
     return {
       ...reference,
@@ -173,6 +214,43 @@ async function packageStatus(snapshot, expected, signal) {
   }
 }
 
+function importFailureDetails(failure) {
+  if (failure === 'invalid-archive')
+    return {
+      code: 'package_invalid_archive',
+      message:
+        'The selected file is not a valid .science archive. Check or replace the source file.',
+      owner: 'agent',
+      requiresUser: false,
+      next: [{ action: 'check_package_input' }]
+    }
+  if (failure === 'source-unavailable')
+    return {
+      code: 'package_source_unavailable',
+      message:
+        'The package is missing or unreadable. Check the absolute source path in this profile.',
+      owner: 'agent',
+      requiresUser: false,
+      next: [{ action: 'check_package_input' }]
+    }
+  if (failure === 'requires-update')
+    return {
+      code: 'package_requires_update',
+      message: 'The source package requires a newer version of Open-Science.',
+      owner: 'deployment',
+      requiresUser: true,
+      next: [{ action: 'update_service' }]
+    }
+  return {
+    code: 'package_import_failed',
+    message:
+      'Open-Science could not import this package. Check its contents and the selected Project.',
+    owner: 'service',
+    requiresUser: false,
+    next: [{ action: 'inspect_package_state' }]
+  }
+}
+
 async function waitForPackageOperation(client, snapshot, expected, signal) {
   while (matchesPackageOperation(snapshot, expected) && busy(snapshot)) {
     await setTimeout(pollIntervalMs, undefined, { signal })
@@ -181,10 +259,36 @@ async function waitForPackageOperation(client, snapshot, expected, signal) {
   return packageStatus(snapshot, expected, signal)
 }
 
-async function requirePackageOperations(client, signal, AgentError) {
+async function requirePackageOperations(
+  client,
+  signal,
+  AgentError,
+  capability = serviceCapability
+) {
   const { taskCapabilities } = await client.health({ signal })
-  if (!Array.isArray(taskCapabilities) || !taskCapabilities.includes(serviceCapability))
+  if (!Array.isArray(taskCapabilities) || !taskCapabilities.includes(capability))
     throw new AgentError('unsupported_capability', { requiresUser: true })
+}
+
+async function startPackageOperation(client, expected, waitMs, signal, start, AgentError) {
+  const limit = AbortSignal.timeout(waitMs)
+  const observation = signal ? AbortSignal.any([signal, limit]) : limit
+  let snapshot
+  try {
+    snapshot = await start(observation)
+  } catch (error) {
+    if (error?.status === 404 || error?.code === 'invalid-command-arguments')
+      throw new AgentError('unsupported_capability', { requiresUser: true })
+    if ([400, 401, 403, 409].includes(error?.status)) throw error
+    return { ...unconfirmed(expected), waitMs }
+  }
+  if (matchesPackageOperation(snapshot, expected))
+    expected = { ...expected, operationId: snapshot.id }
+  const result = await waitForPackageOperation(client, snapshot, expected, observation).catch(() =>
+    unconfirmed(expected)
+  )
+  if (result.completionStatus === 'failed') throw new AgentError(result.code, { ...result, waitMs })
+  return { ...result, waitMs }
 }
 
 export const getAgentPackageCapabilities = (AgentError) => [
@@ -199,15 +303,9 @@ export const getAgentPackageCapabilities = (AgentError) => [
       destinationPath: pathSchema.describe(
         'Absolute path for a new .science file on the shared local filesystem. Parent directory must exist.'
       ),
-      waitMs: z
-        .number()
-        .int()
-        .min(1)
-        .max(300_000)
-        .describe(
-          'Maximum time to wait for the operation and verify delivery. The operation continues after this wait.'
-        )
-        .default(defaultWaitMs)
+      waitMs: waitMsSchema.describe(
+        'Maximum time to wait for the operation and verify delivery. The operation continues after this wait.'
+      )
     }),
     annotations: { ...readOnly, readOnlyHint: false, idempotentHint: false },
     exposure: { cli: true, mcp: true },
@@ -215,38 +313,76 @@ export const getAgentPackageCapabilities = (AgentError) => [
     async handler({ projectId, sessionId, destinationPath, waitMs }, { getClient, signal }) {
       const client = await getClient()
       await requirePackageOperations(client, signal, AgentError)
-      const limit = AbortSignal.timeout(waitMs)
-      const observation = signal ? AbortSignal.any([signal, limit]) : limit
-      let expected = {
+      const expected = {
         kind: 'export',
         projectId,
         sessionId,
         destinationPath: normalize(destinationPath),
         correlationId: randomUUID()
       }
-      let snapshot
-      try {
-        snapshot = await client.startAgentPackageExport(
-          projectId,
-          sessionId,
-          expected.destinationPath,
-          expected.correlationId,
-          { signal: observation }
-        )
-      } catch (error) {
-        if (error?.status === 404 || error?.code === 'invalid-command-arguments')
-          throw new AgentError('unsupported_capability', { requiresUser: true })
-        if ([400, 401, 403, 409].includes(error?.status)) throw error
-        return { ...unconfirmed(expected), waitMs }
-      }
-      if (matchesPackageOperation(snapshot, expected))
-        expected = { ...expected, operationId: snapshot.id }
-      const result = await waitForPackageOperation(client, snapshot, expected, observation).catch(
-        () => unconfirmed(expected)
+      return startPackageOperation(
+        client,
+        expected,
+        waitMs,
+        signal,
+        (observation) =>
+          client.startAgentPackageExport(
+            projectId,
+            sessionId,
+            expected.destinationPath,
+            expected.correlationId,
+            { signal: observation }
+          ),
+        AgentError
       )
-      if (result.completionStatus === 'failed')
-        throw new AgentError(result.code, { ...result, waitMs })
-      return { ...result, waitMs }
+    }
+  },
+  {
+    name: 'import_session',
+    group: 'delivery',
+    description:
+      'Import a local .science package as read-only research history. Never executes its Notebook or creates a Fork. Use get_package_operation after an interrupted wait.',
+    inputSchema: z
+      .strictObject({
+        sourcePath: pathSchema.describe('Absolute path to the local .science package.'),
+        targetProjectId: id
+          .describe('Existing Project ID. Do not combine with newProjectName.')
+          .optional(),
+        newProjectName: projectName
+          .describe(
+            'Name of a new Project. Omit both destinations to use the package Project name in a new Project.'
+          )
+          .optional(),
+        waitMs: waitMsSchema.describe(
+          'Maximum time to observe the import. The import may finish afterward.'
+        )
+      })
+      .refine(({ targetProjectId, newProjectName }) => !(targetProjectId && newProjectName)),
+    annotations: { ...readOnly, readOnlyHint: false, idempotentHint: false },
+    exposure: { cli: true, mcp: true },
+    serviceCapability: importCapability,
+    async handler({ sourcePath, targetProjectId, newProjectName, waitMs }, { getClient, signal }) {
+      const client = await getClient()
+      await requirePackageOperations(client, signal, AgentError, importCapability)
+      const expected = {
+        kind: 'import',
+        sourcePath: normalize(sourcePath),
+        correlationId: randomUUID(),
+        ...(targetProjectId ? { targetProjectId } : {}),
+        ...(newProjectName ? { newProjectName } : {})
+      }
+      const target = { projectId: targetProjectId, projectName: newProjectName }
+      return startPackageOperation(
+        client,
+        expected,
+        waitMs,
+        signal,
+        (observation) =>
+          client.startAgentPackageImport(expected.sourcePath, target, expected.correlationId, {
+            signal: observation
+          }),
+        AgentError
+      )
     }
   },
   {
@@ -263,6 +399,7 @@ export const getAgentPackageCapabilities = (AgentError) => [
     probeOnly: true,
     async handler(expected, { getClient, signal }) {
       if (expected.destinationPath) expected.destinationPath = normalize(expected.destinationPath)
+      if (expected.sourcePath) expected.sourcePath = normalize(expected.sourcePath)
       const timeout = AbortSignal.timeout(defaultWaitMs)
       const observation = signal ? AbortSignal.any([signal, timeout]) : timeout
       try {

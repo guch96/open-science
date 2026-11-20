@@ -94,17 +94,19 @@ function memoryCheck(state?: NotebookMemoryPolicyState): TaskNotebookReadiness['
   const check: TaskReadinessCheck =
     state.status === 'healthy'
       ? ready
-      : {
-          status: 'blocked',
-          reason:
-            state.status === 'pressured'
-              ? 'notebook_memory_pressure'
-              : state.diagnostic === 'linux-procfs'
-                ? 'notebook_linux_procfs_unavailable'
-                : state.diagnostic === 'linux-cgroup-visibility'
-                  ? 'notebook_linux_cgroup_unavailable'
-                  : 'notebook_memory_policy_unavailable'
-        }
+      : state.status === 'pressured' && state.reason === 'mac-memory-recovering'
+        ? { status: 'checking', reason: 'notebook_memory_recovering' }
+        : {
+            status: 'blocked',
+            reason:
+              state.status === 'pressured'
+                ? 'notebook_memory_pressure'
+                : state.diagnostic === 'linux-procfs'
+                  ? 'notebook_linux_procfs_unavailable'
+                  : state.diagnostic === 'linux-cgroup-visibility'
+                    ? 'notebook_linux_cgroup_unavailable'
+                    : 'notebook_memory_policy_unavailable'
+          }
   return { ...check, source: state.source, executionScope: state.executionScope }
 }
 

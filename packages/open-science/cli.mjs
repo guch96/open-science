@@ -138,7 +138,7 @@ Options:
   --request-id <id>      Stable submission identity for lookup and safe retries
   --wait                 Wait for the run to finish
   --return-on-attention  With --wait, return when the Plan needs approval
-  --timeout-ms <ms>      Bound startup, run waiting, or package transfer time
+  --timeout-ms <ms>      Bound startup or observation of a Run or package operation
   --output <path>        Destination path (session export, artifacts download)
   --style <style-id>     Citation style (literature format)
   --locale <locale>      Citation locale: en-US (default) or zh-CN (literature format)
@@ -1960,28 +1960,17 @@ export const runTaskCommand = async (parsed, dependencies = {}) => {
   if (command === 'session' && subcommand === 'import') {
     const packagePath = positionals[0]
     if (!packagePath) throw new CliUsageError('Session package path is required.')
-    const resolvedPath = resolve(packagePath)
-    const target = {}
-    if (options.project) target.projectId = await resolveCliProjectId(client, options.project)
-    else if (options.newProject) target.projectName = options.newProject
-    let imported
-    try {
-      imported = await client.importSessionPackage(
-        target,
-        resolvedPath,
-        { nonInteractive: true },
-        { timeoutMs: options.timeoutMs }
-      )
-    } catch (error) {
-      if (error?.code === 'timeout') {
-        error.completionStatus = 'unconfirmed'
-        error.message += ' The import may still complete. Check the destination before retrying.'
-      }
-      throw error
-    }
-    if (imported === null)
-      throw new OpenScienceApiError('Session import was cancelled.', { code: 'cancelled' })
-    outputValue(imported, options, deps)
+    const result = await call('import_session', {
+      sourcePath: resolve(packagePath),
+      ...(options.project
+        ? { targetProjectId: await resolveCliProjectId(client, options.project) }
+        : options.newProject
+          ? { newProjectName: options.newProject }
+          : {}),
+      ...(options.timeoutMs === undefined ? {} : { waitMs: options.timeoutMs })
+    })
+    if (options.json) deps.log(JSON.stringify({ result }))
+    else outputValue(result, options, deps)
     return
   }
   if (command === 'settings' && subcommand === 'agent-routing') {

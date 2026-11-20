@@ -726,24 +726,38 @@ Package operations do not offer the durable receipts that research submissions p
 If Open-Science detects sensitive content, the export is blocked and returned with
 `requiresUser: true`; the Agent has no confirmation or force option.
 
-Import a `.science` package. Import is non-interactive by design and requires an explicit
-confirmation flag. It waits up to one hour by default; use `--timeout-ms <milliseconds>` to
-adjust the request deadline:
+Import an attached `.science` package with the shared `import_session` capability. Pass the
+absolute `sourcePath` on the local shared filesystem and optionally `targetProjectId` for an
+existing Project or `newProjectName` for a new one. Omit both to create a new Project with
+the name from the package. The MCP tool and `tools call import_session --json` take the same
+arguments:
+
+```bash
+printf '%s\n' '{"sourcePath":"/absolute/path/attached.science","newProjectName":"Restored session"}' \
+  | open-science tools call import_session --json
+```
+
+The CLI shortcut accepts relative paths and an unambiguous Project name. It requires
+`--non-interactive` to acknowledge import without an interactive preview:
 
 ```bash
 open-science session import ~/backups/session.science --new-project "Restored session" --non-interactive
 open-science session import ~/backups/session.science --project <id-or-name> --non-interactive
 ```
 
-`--non-interactive` confirms the import preview on the caller's behalf; without it the command
-fails rather than waiting for an approval that a headless caller can never supply. Choose exactly
-one destination: `--project` imports into an existing Project, `--new-project` creates one with
-the given name, and omitting both uses the package's own Project name in a new Project. A cancelled import exits nonzero with
-`code: "cancelled"`. If the import request times out, JSON output includes
-`completionStatus: "unconfirmed"`. The service can still finish the import. Check the destination
-before retrying, since another import can create a second Session. For a rejected local import,
-include the returned `error.correlationId` (when present) when looking up the service log. The
-package file is read directly from disk, so no upload or drag-and-drop step is involved.
+Import accepts the same `waitMs` range and default as export. The shortcut's `--timeout-ms`
+sets this wait. A completed result returns the actual `session.projectId`, `session.sessionId`
+and `session.readOnly: true` along with a summary of the validated package. Inspect the Session
+with `get_session`. List its published history with `list_artifacts` using the imported Session ID.
+Inspect before asking the user whether to Fork. An imported Session cannot accept a new research
+turn or configuration edits, and its provider credentials and external access must be configured
+separately in the new environment.
+
+If the result is `unconfirmed`, query `get_package_operation` with the original operation or
+correlation ID and `kind: "import"`. Add the original `sourcePath`, `targetProjectId`, or
+`newProjectName` when available to check the scope. The service may still complete the import;
+do not submit it again automatically. If the original snapshot has been replaced, a newer
+import of the same file cannot confirm the earlier attempt.
 
 Both commands reuse the Package Owner over the authenticated loopback channel. They are
 unavailable to remote Web sessions: arbitrary-path file reads and writes require local access.
@@ -1141,6 +1155,9 @@ service on the same machine with access to the input and delivery files.
 | `list_artifacts`               | List published Artifact versions and download IDs        |
 | `download_artifact`            | Deliver one listed version to a new local file           |
 | `get_delivery_status`         | Check report and result table delivery for one Run       |
+| `export_session`              | Export one Session to a local `.science` file           |
+| `import_session`              | Import a local `.science` file as a read-only Session     |
+| `get_package_operation`      | Check the outcome of a specific package operation        |
 | `search_literature`            | Search or browse Literature library records              |
 | `get_literature_item`          | Read one Literature record                               |
 | `list_citation_styles`         | List citation styles available for formatting            |

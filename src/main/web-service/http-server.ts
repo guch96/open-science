@@ -1644,6 +1644,9 @@ const startWebHttpServer = async (options: WebServerOptions): Promise<RunningWeb
               : []),
             ...(auth.ok && rpcChannels.includes('sessions:package-operation')
               ? ['agent-package-operations']
+              : []),
+            ...(auth.localBearer && rpcChannels.includes('sessions:package-operation')
+              ? ['agent-package-import']
               : [])
           ],
           rpcProtocolVersion: WEB_RPC_PROTOCOL_VERSION,
@@ -1822,7 +1825,8 @@ const startWebHttpServer = async (options: WebServerOptions): Promise<RunningWeb
         }
         const callerContext = createWebCallerContext(clientId, {
           authorities:
-            auth.localBearer && channel === 'sessions:import-package'
+            auth.localBearer &&
+            (channel === 'sessions:import-package' || channel === 'sessions:package-operation')
               ? ['import-local-package-path']
               : [],
           ...(externalAuthorization
