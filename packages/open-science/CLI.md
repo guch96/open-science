@@ -709,8 +709,19 @@ local path, including its size and SHA-256. If the service has restarted, a newe
 replaced the original, or the file cannot be verified, expect `completionStatus: "unconfirmed"`.
 Keep the original references and check the destination; do not repeat the export automatically.
 Package operations do not offer the durable receipts that research submissions provide.
-If Open-Science detects sensitive content, the export is blocked and returned with
-`requiresUser: true`; the Agent has no confirmation or force option.
+If the package contains flagged content, the CLI/MCP export reports `package_sensitive_content`,
+`requiresUser: true` and `completionStatus: "pending"`. Nothing has been published. Open
+Open-Science Desktop on the same machine and profile to find the pending package operation.
+Review the redacted evidence and destination, acknowledge the risk, then confirm in the native
+dialog. The dialog identifies the staged package by its size and SHA-256. It defaults to Cancel.
+The approval is for those exact bytes and that operation, and expires after ten minutes. Local
+Web can show the request, but approval requires Desktop; a browser-only or headless environment
+can cancel the export or remove the flagged content before requesting a new export.
+
+After the user responds, query the original `operationId` or `correlationId`; the export call
+does not need to be repeated. Cancellation or expiration publishes no file. If the staged bytes
+change, Open-Science refuses publication even when the size is unchanged. There is no CLI/MCP
+confirmation or force option.
 
 Import a `.science` package. Import is non-interactive by design and requires an explicit
 confirmation flag. It waits up to one hour by default; use `--timeout-ms <milliseconds>` to

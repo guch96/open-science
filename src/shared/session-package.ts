@@ -184,6 +184,13 @@ const packageFileDigestSchema = z
   .object({ sizeBytes: z.number().int().nonnegative(), checksum })
   .strict()
 export type PackageFileDigest = z.infer<typeof packageFileDigestSchema>
+const sensitiveExportReviewSchema = z
+  .object({
+    expiresAt: z.number().int().positive(),
+    destination: z.string().max(32768).optional(),
+    fileDigest: packageFileDigestSchema
+  })
+  .strict()
 
 export type PackageOperationSnapshot = {
   id: string
@@ -191,7 +198,9 @@ export type PackageOperationSnapshot = {
   session?: SessionPackageRequest
   sessionTitle?: string
   exportDestination?: 'local' | 'org-case'
-  agent?: AgentPackageOperationReference & { failure?: 'destination-conflict' | 'requires-user' }
+  agent?: AgentPackageOperationReference & {
+    failure?: 'destination-conflict' | 'requires-user' | 'content-changed'
+  }
   importTarget?: SessionPackageImportRequest
   presentationRevision?: number
   importRequestId?: string
@@ -216,6 +225,7 @@ export type PackageOperationSnapshot = {
   }
   error?: string
   sensitiveContent?: SensitiveContentEvidence[]
+  sensitiveExportReview?: z.infer<typeof sensitiveExportReviewSchema>
   cleanupPending?: boolean
   transferBytesPerSecond?: number
   ioBytesPerSecond?: number
@@ -428,7 +438,9 @@ const packageOperationSnapshotSchema: z.ZodType<PackageOperationSnapshot> = z
     sessionTitle: z.string().max(1000).optional(),
     exportDestination: z.enum(['local', 'org-case']).optional(),
     agent: agentPackageOperationReferenceSchema
-      .extend({ failure: z.enum(['destination-conflict', 'requires-user']).optional() })
+      .extend({
+        failure: z.enum(['destination-conflict', 'requires-user', 'content-changed']).optional()
+      })
       .optional(),
     importTarget: sessionPackageImportRequestSchema.optional(),
     presentationRevision: z.number().int().nonnegative().optional(),
@@ -551,6 +563,7 @@ const packageOperationSnapshotSchema: z.ZodType<PackageOperationSnapshot> = z
       .strict()
       .optional(),
     error: z.string().optional(),
+    sensitiveExportReview: sensitiveExportReviewSchema.optional(),
     sensitiveContent: z
       .array(
         z

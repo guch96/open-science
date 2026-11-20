@@ -341,7 +341,12 @@ export function composeCommandDependencies({
         cancelSessionDiagnostics: (invocation) =>
           sessionFoundation.sessionDiagnosticsDesktop.cancel(invocation.args[0]),
         sessionPackageOperation: async (invocation) =>
-          sessionPackageSurfaces.sessionPackageDesktop.respond(invocation.args[0]),
+          sessionPackageSurfaces.sessionPackageDesktop.respond(
+            invocation.args[0],
+            invocation.callerContext.surface === 'electron'
+              ? invocation.callerContext.clientId
+              : undefined
+          ),
         forkSession: (invocation) =>
           sessionPackageSurfaces.sessionPackageDesktop.fork(
             invocation.args[0],

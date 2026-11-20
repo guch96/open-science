@@ -432,6 +432,33 @@ export class SessionPackageOperation {
     this.publish()
   }
 
+  requestSensitiveExportReview(
+    review: NonNullable<PackageOperationSnapshot['sensitiveExportReview']>,
+    evidence: SensitiveContentEvidence[]
+  ): void {
+    if (!this.current || !this.controller) throw new Error('No active export operation.')
+    this.current = {
+      ...this.current,
+      state: 'awaiting-selection',
+      progress: { phase: 'confirming' },
+      sensitiveExportReview: review,
+      sensitiveContent: evidence.slice(0, 20),
+      presentationRevision: (this.current.presentationRevision ?? 0) + 1
+    }
+    this.publish()
+  }
+
+  finishSensitiveExportReview(): void {
+    if (!this.current?.sensitiveExportReview || !this.controller) return
+    this.current = {
+      ...this.current,
+      sensitiveExportReview: undefined,
+      sensitiveContent: undefined,
+      ...(this.current.state === 'awaiting-selection' ? { state: 'running' as const } : {})
+    }
+    this.publish()
+  }
+
   setAgentFailure(failure: NonNullable<PackageOperationSnapshot['agent']>['failure']): void {
     if (this.current?.agent)
       this.current = { ...this.current, agent: { ...this.current.agent, failure } }

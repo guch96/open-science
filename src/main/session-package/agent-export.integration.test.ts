@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { configureTestRuntimeMetadata } from '../../../test/runtime-metadata'
 import type { PackageOperationRequest } from '../../shared/session-package'
 import { createApplicationCommandRouter } from '../application-command-router'
@@ -28,6 +28,11 @@ const cli = resolve('packages/open-science/cli.mjs')
 const exec = promisify(execFile)
 const source = { projectId: 'project', sessionId: 'session' }
 const resetOwnership = configureTestRuntimeMetadata()
+const { confirmNative } = vi.hoisted(() => ({ confirmNative: vi.fn() }))
+vi.mock('../desktop-interaction', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../desktop-interaction')>()),
+  desktopFileInteraction: () => ({ confirm: confirmNative })
+}))
 type CliResult = Promise<{ stdout: string; stderr: string }>
 
 const content = (
@@ -41,6 +46,9 @@ async function withPackageService(
     callCli: (name: string, args: object) => CliResult
     service: SessionPackageService
     invokePackageRpc: (request: PackageOperationRequest) => Promise<Response>
+    respondAsDesktop: (
+      request: PackageOperationRequest
+    ) => ReturnType<SessionPackageDesktop['respond']>
   }) => Promise<void>,
   options: {
     afterAdmission?: () => Promise<void>
@@ -177,7 +185,11 @@ async function withPackageService(
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify({ protocolVersion: 1, args: [request] })
       })
-    await test({ root, sdk, callCli, service, invokePackageRpc })
+    const respondAsDesktop = (
+      request: PackageOperationRequest
+    ): ReturnType<SessionPackageDesktop['respond']> =>
+      owner.respond(request, 'fixture-desktop-client')
+    await test({ root, sdk, callCli, service, invokePackageRpc, respondAsDesktop })
   } finally {
     await sdk.close()
     await server?.close()
@@ -399,9 +411,9 @@ it('refuses existing files, directories and symbolic links without altering the 
   })
 })
 
-it('reports the original blocked export without publishing or accepting any Agent confirmation', async () => {
+it('publishes the reviewed archive only after native confirmation and retains the original operation', async () => {
   await withPackageService(
-    async ({ root, sdk, callCli, invokePackageRpc }) => {
+    async ({ root, sdk, callCli, invokePackageRpc, respondAsDesktop }) => {
       const destinationPath = join(root, 'blocked.science')
       const request = { ...source, destinationPath }
       const attempt = await sdk.callTool({
@@ -422,7 +434,7 @@ it('reports the original blocked export without publishing or accepting any Agen
       const observed = JSON.parse((await callCli('get_package_operation', { operationId })).stdout)
       expect(observed.result).toMatchObject({
         operationId,
-        completionStatus: 'failed',
+        completionStatus: 'pending',
         code: 'package_sensitive_content',
         requiresUser: true
       })
@@ -437,6 +449,51 @@ it('reports the original blocked export without publishing or accepting any Agen
       })
       expect(forged.ok).toBe(false)
       await expect(lstat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' })
+
+      confirmNative.mockClear()
+      expect(() =>
+        respondAsDesktop({ action: 'export-with-sensitive-content', operationId: 'stale' })
+      ).toThrow()
+      expect(confirmNative).not.toHaveBeenCalled()
+      const nativeReply = Promise.withResolvers<{ response: number }>()
+      confirmNative.mockReturnValueOnce(nativeReply.promise)
+      const confirmation = respondAsDesktop({
+        action: 'export-with-sensitive-content',
+        operationId
+      })
+      expect(confirmNative).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cancelId: 0,
+          defaultId: 0,
+          detail: expect.stringContaining(destinationPath)
+        }),
+        'fixture-desktop-client',
+        expect.any(AbortSignal)
+      )
+      await expect(lstat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      const nativeDetail = confirmNative.mock.calls[0]![0].detail as string
+      nativeReply.resolve({ response: 1 })
+      await confirmation
+      await expect
+        .poll(
+          async () =>
+            content(
+              await sdk.callTool({
+                name: 'get_package_operation',
+                arguments: { operationId }
+              })
+            ).result
+        )
+        .toMatchObject({
+          operationId,
+          completionStatus: 'completed',
+          delivery: { status: 'verified', file: { path: destinationPath } }
+        })
+      expect(nativeDetail).toContain(
+        createHash('sha256')
+          .update(await readFile(destinationPath))
+          .digest('hex')
+      )
 
       const aliasPath = join(root, 'alias-blocked.science')
       const alias = exec(
@@ -466,7 +523,99 @@ it('reports the original blocked export without publishing or accepting any Agen
         }
       })
       await expect(lstat(aliasPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      const rejectedId = JSON.parse(rejected.stderr).error.operationId
+      confirmNative.mockResolvedValueOnce({ response: 0 })
+      await respondAsDesktop({ action: 'export-with-sensitive-content', operationId: rejectedId })
+      await expect
+        .poll(
+          async () =>
+            content(
+              await sdk.callTool({
+                name: 'get_package_operation',
+                arguments: { operationId: rejectedId }
+              })
+            ).result
+        )
+        .toMatchObject({ operationId: rejectedId, completionStatus: 'cancelled' })
+      await expect(lstat(aliasPath)).rejects.toMatchObject({ code: 'ENOENT' })
     },
     { sensitive: true }
   )
 })
+
+it.each(['changed', 'expired'] as const)(
+  'does not publish a %s sensitive candidate after the native dialog was opened',
+  async (scenario) => {
+    const expire = new AbortController()
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+    const clock = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation((milliseconds) =>
+        milliseconds === 10 * 60_000 ? expire.signal : realTimeout(milliseconds)
+      )
+    try {
+      await withPackageService(
+        async ({ root, sdk, service, respondAsDesktop }) => {
+          let stagedPath: string | undefined
+          const exportTo = service.exportTo.bind(service)
+          vi.spyOn(service, 'exportTo').mockImplementation((request, path, options) => {
+            stagedPath = path
+            return exportTo(request, path, options)
+          })
+          const destinationPath = join(root, 'review.science')
+          const attempt = await sdk.callTool({
+            name: 'export_session',
+            arguments: { ...source, destinationPath }
+          })
+          expect(content(attempt).error).toMatchObject({ code: 'package_sensitive_content' })
+          const { operationId } = content(attempt).error as { operationId: string }
+          const nativeReply = Promise.withResolvers<{ response: number }>()
+          confirmNative.mockReturnValueOnce(nativeReply.promise)
+          const confirmation = respondAsDesktop({
+            action: 'export-with-sensitive-content',
+            operationId
+          })
+          if (scenario === 'changed') {
+            const bytes = await readFile(stagedPath!)
+            bytes[bytes.length - 1] ^= 1
+            await writeFile(stagedPath!, bytes)
+            nativeReply.resolve({ response: 1 })
+            await confirmation
+          } else {
+            expire.abort(new Error('Test review expired'))
+            nativeReply.resolve({ response: 1 })
+            await expect(confirmation).rejects.toThrow('Test review expired')
+          }
+          await expect
+            .poll(
+              async () =>
+                content(
+                  await sdk.callTool({
+                    name: 'get_package_operation',
+                    arguments: { operationId }
+                  })
+                ).result
+            )
+            .toMatchObject({
+              operationId,
+              ...(scenario === 'changed'
+                ? {
+                    completionStatus: 'failed',
+                    code: 'package_sensitive_export_changed',
+                    retryable: false
+                  }
+                : { completionStatus: 'cancelled' })
+            })
+          await expect(lstat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' })
+          await expect(lstat(stagedPath!)).rejects.toMatchObject({ code: 'ENOENT' })
+          expect(() =>
+            respondAsDesktop({ action: 'export-with-sensitive-content', operationId })
+          ).toThrow()
+        },
+        { sensitive: true }
+      )
+    } finally {
+      clock.mockRestore()
+    }
+  }
+)

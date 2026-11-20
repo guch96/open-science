@@ -1,10 +1,9 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
-import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
-import { lstat, open } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { isAbsolute, normalize } from 'node:path'
 import { setTimeout } from 'node:timers/promises'
 import { z } from 'zod'
+import { verifyLocalFile } from './local-file-delivery.mjs'
 
 const defaultWaitMs = 30_000
 const pollIntervalMs = 250
@@ -62,47 +61,11 @@ export const matchesPackageOperation = (snapshot, expected) => {
 
 const busy = (snapshot) => ['running', 'awaiting-selection', 'cancelling'].includes(snapshot.state)
 
-// Compare the delivered file to the checksum derived from the Owner's private staging bytes.
-// Use a handle and check the path still names that regular file before reporting verification.
 async function verifyLocalPackage(path, digest, signal) {
-  if (!digest || !Number.isSafeInteger(digest.sizeBytes) || !/^[a-f0-9]{64}$/.test(digest.checksum))
-    return undefined
-  const sameFile = (a, b) =>
-    a.isFile() &&
-    b.isFile() &&
-    a.dev === b.dev &&
-    a.ino === b.ino &&
-    a.size === b.size &&
-    a.mtimeNs === b.mtimeNs &&
-    a.ctimeNs === b.ctimeNs
-  let handle
-  try {
-    const original = await lstat(path, { bigint: true })
-    if (!original.isFile() || original.size !== BigInt(digest.sizeBytes)) return undefined
-    handle = await open(
-      path,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
-    )
-    if (!sameFile(original, await handle.stat({ bigint: true }))) return undefined
-    const hash = createHash('sha256')
-    let sizeBytes = 0
-    for await (const bytes of handle.createReadStream({ signal, autoClose: false })) {
-      sizeBytes += bytes.length
-      if (sizeBytes > digest.sizeBytes) return undefined
-      hash.update(bytes)
-    }
-    const sha256 = hash.digest('hex')
-    if (
-      sizeBytes === digest.sizeBytes &&
-      sha256 === digest.checksum &&
-      sameFile(original, await lstat(path, { bigint: true }))
-    )
-      return { path, sizeBytes, sha256 }
-  } catch {
-    // A missing, unreadable or replaced destination cannot prove delivery.
-  } finally {
-    await handle?.close()
-  }
+  if (!digest) return undefined
+  const { sizeBytes, checksum: sha256 } = digest
+  if (await verifyLocalFile(path, { bytes: sizeBytes, sha256 }, signal))
+    return { path, sizeBytes, sha256 }
 }
 
 async function packageStatus(snapshot, expected, signal) {
@@ -114,6 +77,26 @@ async function packageStatus(snapshot, expected, signal) {
     correlationId: snapshot.agent.correlationId,
     ...snapshot.session,
     ...(snapshot.agent.destinationPath ? { destinationPath: snapshot.agent.destinationPath } : {})
+  }
+  if (snapshot.sensitiveExportReview && snapshot.state === 'awaiting-selection') {
+    return {
+      ...reference,
+      completionStatus: 'pending',
+      code: 'package_sensitive_content',
+      message: 'The Session package contains sensitive content and is waiting for review.',
+      owner: 'user',
+      requiresUser: true,
+      retryable: false,
+      next: [
+        {
+          action: 'review_sensitive_export_in_open_science',
+          ...reference,
+          expiresAt: snapshot.sensitiveExportReview.expiresAt,
+          message:
+            'Open Open-Science Desktop on this machine with the same profile. In the package operation, review the flagged content and use Export anyway to open the native confirmation. After the user responds, query this original operation.'
+        }
+      ]
+    }
   }
   if (busy(snapshot)) {
     return { ...reference, completionStatus: 'pending', next: [lookup(reference)] }
@@ -149,6 +132,17 @@ async function packageStatus(snapshot, expected, signal) {
       retryable: false,
       next: [{ action: 'review_sensitive_export_in_open_science', ...reference }]
     }
+  if (snapshot.agent.failure === 'content-changed')
+    return {
+      ...reference,
+      completionStatus: 'failed',
+      code: 'package_sensitive_export_changed',
+      message: 'The staged package changed after review. No file was published.',
+      owner: 'user',
+      requiresUser: true,
+      retryable: false,
+      next: [lookup(reference)]
+    }
   if (snapshot.agent.failure === 'destination-conflict')
     return {
       ...reference,
@@ -174,7 +168,11 @@ async function packageStatus(snapshot, expected, signal) {
 }
 
 async function waitForPackageOperation(client, snapshot, expected, signal) {
-  while (matchesPackageOperation(snapshot, expected) && busy(snapshot)) {
+  while (
+    matchesPackageOperation(snapshot, expected) &&
+    busy(snapshot) &&
+    !snapshot.sensitiveExportReview
+  ) {
     await setTimeout(pollIntervalMs, undefined, { signal })
     snapshot = await client.getPackageOperation({ signal })
   }
@@ -244,7 +242,7 @@ export const getAgentPackageCapabilities = (AgentError) => [
       const result = await waitForPackageOperation(client, snapshot, expected, observation).catch(
         () => unconfirmed(expected)
       )
-      if (result.completionStatus === 'failed')
+      if (result.completionStatus === 'failed' || result.requiresUser)
         throw new AgentError(result.code, { ...result, waitMs })
       return { ...result, waitMs }
     }

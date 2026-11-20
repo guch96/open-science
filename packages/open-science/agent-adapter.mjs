@@ -21,7 +21,7 @@ Use the user's research instructions and choose an explicit Project. Generate an
 
 Notebook working files are not delivered Artifacts. Check the actual report and result files returned by the delivery capabilities. In a new environment, import a .science package and inspect the Session read-only; ask the user before creating a writable Fork.
 
-Package exports target a new absolute .science path. Keep the operation and correlation IDs. If the bounded wait ends, use the package operation lookup with an original ID; it only reports on a matching operation. An unconfirmed result means the service or delivered file cannot prove what happened. Do not repeat the write automatically. Package operations do not have durable research receipts. A blocked sensitive export requires the user's action; the agent cannot approve it.
+Package exports target a new absolute .science path. Keep the operation and correlation IDs. If the bounded wait ends, use the package operation lookup with an original ID; it only reports on a matching operation. An unconfirmed result means the service or delivered file cannot prove what happened. Do not repeat the write automatically. Package operations do not have durable research receipts. For a pending sensitive export, direct the user to the review in Open-Science Desktop on the same profile. After the user responds, query the original operation. The agent cannot approve it.
 `
 
 const policies = {
