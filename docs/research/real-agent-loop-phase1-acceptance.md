@@ -15,7 +15,10 @@ turn, a Notebook dispatch, and verified files are separate observations.
   no package or research data. npm installed from a temporary loopback registry serving the
   staged tarballs. Host configuration writes were denied by the Codex workspace sandbox. With
   the local MCP launch configured for the test session, Codex read the guide and catalog through
-  stdio. Its setup check was blocked by host loopback access; the agent waited without submitting.
+  stdio. The initial host connection could not reach the intended service. Explicitly passing
+  `--profile` to the MCP launcher resolved profile selection; the same Codex conversation then
+  completed capability discovery, Project listing and the setup check. The agent reported the
+  missing provider and Notebook prerequisites, then waited without submitting research.
 - A separate MCP SDK client launched that same installed executable with a new profile. The
   service started, the guide resource and Project listing worked, and `get_setup_status` reported
   the service ready, provider missing, default Python missing, and host memory pressure. The
