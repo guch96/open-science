@@ -241,7 +241,7 @@ test('reviews a pending MCP export in Desktop and publishes the exact candidate'
       name: 'export_session',
       arguments: { projectId, sessionId, destinationPath }
     })
-    const error = attempt.structuredContent?.error as { operationId: string }
+    const { error } = attempt.structuredContent as { error: { operationId: string } }
     expect(attempt.isError).toBe(true)
     expect(error).toMatchObject({
       code: 'package_sensitive_content',
@@ -259,15 +259,13 @@ test('reviews a pending MCP export in Desktop and publishes the exact candidate'
     await operation.getByRole('checkbox').check()
     await publish.click()
     await expect
-      .poll(
-        async () =>
-          (
-            await client.callTool({
-              name: 'get_package_operation',
-              arguments: { operationId: error.operationId }
-            })
-          ).structuredContent?.result
-      )
+      .poll(async () => {
+        const response = await client.callTool({
+          name: 'get_package_operation',
+          arguments: { operationId: error.operationId }
+        })
+        return (response.structuredContent as { result?: unknown } | undefined)?.result
+      })
       .toMatchObject({
         operationId: error.operationId,
         completionStatus: 'completed',

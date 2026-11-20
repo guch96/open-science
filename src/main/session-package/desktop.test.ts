@@ -2458,6 +2458,8 @@ it.each(['minimal', 'full', 'headless', 'forwarded'] as const)(
       })
     }
     const exportTo = vi.spyOn(service, 'exportTo')
+    const review =
+      Promise.withResolvers<import('../../shared/session-package').PackageOperationSnapshot>()
     const release = vi.fn()
     const reserveExport = vi.fn(async () => release)
     const destination = join(fixture.storageRoot, 'private.science')
@@ -2469,6 +2471,7 @@ it.each(['minimal', 'full', 'headless', 'forwarded'] as const)(
       afterImport: async () => undefined,
       reserveExport,
       onOperationChanged: (snapshot) => {
+        if (snapshot.sensitiveExportReview) review.resolve(snapshot)
         if (
           snapshot.kind === 'export' &&
           snapshot.state === 'awaiting-selection' &&
@@ -2495,10 +2498,13 @@ it.each(['minimal', 'full', 'headless', 'forwarded'] as const)(
         undefined,
         mode === 'headless' ? destination : undefined
       )
-      await expect
-        .poll(() => desktop.operations.snapshot?.sensitiveContent?.length)
-        .toBeGreaterThan(0)
-      const pending = desktop.operations.snapshot!
+      const pending = await Promise.race([
+        review.promise,
+        exporting.then(() => {
+          throw new Error('Export ended before review.')
+        })
+      ])
+      expect(pending.sensitiveContent?.length).toBeGreaterThan(0)
       await expect(stat(destination)).rejects.toMatchObject({ code: 'ENOENT' })
       expect(() =>
         desktop.respond(
