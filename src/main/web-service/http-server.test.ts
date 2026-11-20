@@ -4523,22 +4523,27 @@ describe('startWebHttpServer', () => {
     expect(await sessions.json()).toEqual({ data: [{ id: 'session/1', title: 'Review' }] })
     expect(tasks.listSessions).toHaveBeenCalledWith('project-1')
 
-    const session = await fetch(`${base}/api/v1/sessions/session%2F1`, { headers })
-    expect(await session.json()).toEqual({ data: { id: 'session/1', title: 'Review' } })
-    expect(tasks.getSession).toHaveBeenCalledWith('session/1')
-
-    const sessionConfiguration = await fetch(`${base}/api/v1/sessions/session%2F1/config`, {
+    const session = await fetch(`${base}/api/v1/sessions/session%2F1?project=project%2F1`, {
       headers
     })
+    expect(await session.json()).toEqual({ data: { id: 'session/1', title: 'Review' } })
+    expect(tasks.getSession).toHaveBeenCalledWith('session/1', 'project/1')
+
+    const sessionConfiguration = await fetch(
+      `${base}/api/v1/sessions/session%2F1/config?project=project%2F1`,
+      { headers }
+    )
     expect(await sessionConfiguration.json()).toMatchObject({ data: { revision: 3 } })
+    expect(tasks.getSessionConfiguration).toHaveBeenCalledWith('session/1', 'project/1')
     const updatedSessionConfiguration = await fetch(`${base}/api/v1/sessions/session%2F1/config`, {
       method: 'PATCH',
       headers: { ...headers, 'content-type': 'application/json' },
-      body: JSON.stringify({ expectedRevision: 3, memoryEnabled: false })
+      body: JSON.stringify({ expectedRevision: 3, projectId: 'project/1', memoryEnabled: false })
     })
     expect(await updatedSessionConfiguration.json()).toMatchObject({ data: { revision: 4 } })
     expect(tasks.updateSessionConfiguration).toHaveBeenCalledWith('session/1', {
       expectedRevision: 3,
+      projectId: 'project/1',
       memoryEnabled: false
     })
 

@@ -434,6 +434,14 @@ export type Run = {
 export type SessionStatus =
   'idle' | 'running' | 'waiting-for-user' | 'waiting-permission' | 'waiting-plan-approval' | 'error'
 
+export type SessionOrigin = {
+  importId: string
+  sourceProjectId: string
+  sourceSessionId: string
+  importedAt: number
+  manifestChecksum: string
+}
+
 export type Session = {
   id: string
   projectId: string
@@ -450,6 +458,10 @@ export type Session = {
   output?: string
   error?: string
   artifactCount: number
+  /** Absent on services that do not publish this status. */
+  readOnly?: boolean
+  packageOrigin?: SessionOrigin
+  forkOrigin?: SessionOrigin
 }
 
 export type SessionConfiguration = {
@@ -646,15 +658,16 @@ export class OpenScienceClient {
     options?: RequestOptions
   ): ReturnType<OpenScienceClient['getProjectSessionDefaults']>
   listSessions(projectId?: string, options?: RequestOptions): Promise<Session[]>
-  getSession(sessionId: string, options?: RequestOptions): Promise<Session>
+  getSession(sessionId: string, options?: RequestOptions & { projectId?: string }): Promise<Session>
   getSessionConfiguration(
     sessionId: string,
-    options?: RequestOptions
+    options?: RequestOptions & { projectId?: string }
   ): Promise<SessionConfiguration>
   updateSessionConfiguration(
     sessionId: string,
     request: {
       expectedRevision: number
+      projectId?: string
       agentConfiguration?: {
         providerId?: string
         model?: string | null

@@ -349,11 +349,27 @@ export class OpenScienceClient {
   }
 
   getSession(sessionId, options) {
-    return this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, options)
+    return this.#readSessionResource(sessionId, '', options)
   }
 
   getSessionConfiguration(sessionId, options) {
-    return this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/config`, options)
+    return this.#readSessionResource(sessionId, '/config', options)
+  }
+
+  async #readSessionResource(sessionId, suffix, { projectId, ...options } = {}) {
+    const query = projectId === undefined ? '' : `?project=${encodeURIComponent(projectId)}`
+    const data = await this.request(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}${suffix}${query}`,
+      options
+    )
+    // Legacy servers may ignore the Project query. Never confirm an unverified association.
+    if (projectId !== undefined && data?.projectId !== projectId) {
+      throw new OpenScienceApiError('Session does not belong to this Project.', {
+        code: 'session_project_mismatch',
+        status: 409
+      })
+    }
+    return data
   }
 
   // Web RPC seam: authenticated loopback dispatch of one application command channel.

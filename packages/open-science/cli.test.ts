@@ -740,10 +740,14 @@ describe('task CLI', () => {
       ]),
       deps
     )
-    expect(client.updateProjectSessionDefaults).toHaveBeenCalledWith('project-1', {
-      expectedUpdatedAt: 10,
-      patch: { permissionProfile: 'auto', memoryEnabled: null }
-    })
+    expect(client.updateProjectSessionDefaults).toHaveBeenCalledWith(
+      'project-1',
+      {
+        expectedUpdatedAt: 10,
+        patch: { permissionProfile: 'auto', memoryEnabled: null }
+      },
+      expect.any(Object)
+    )
 
     await runTaskCommand(
       parseCliArgs([
@@ -758,10 +762,14 @@ describe('task CLI', () => {
       ]),
       deps
     )
-    expect(client.updateSessionConfiguration).toHaveBeenCalledWith('session-1', {
-      expectedRevision: 4,
-      computeHosts: { enabled: ['ssh:alpha'], selected: ['ssh:alpha'] }
-    })
+    expect(client.updateSessionConfiguration).toHaveBeenCalledWith(
+      'session-1',
+      {
+        expectedRevision: 4,
+        computeHosts: { enabled: ['ssh:alpha'], selected: ['ssh:alpha'] }
+      },
+      expect.any(Object)
+    )
 
     await runTaskCommand(
       parseCliArgs([
@@ -1129,8 +1137,11 @@ describe('task CLI', () => {
       deps
     )
 
-    expect(client.createProject).toHaveBeenCalledWith({ name: 'Created', description: undefined })
-    expect(client.getSession).toHaveBeenCalledWith('session-1')
+    expect(client.createProject).toHaveBeenCalledWith(
+      { name: 'Created', description: undefined },
+      expect.any(Object)
+    )
+    expect(client.getSession).toHaveBeenCalledWith('session-1', expect.any(Object))
     expect(client.getRun).toHaveBeenCalledWith('run-1')
     expect(client.cancelRun).toHaveBeenCalledWith('run-1')
     expect(client.listArtifacts).toHaveBeenCalledWith('session-1')
@@ -1164,15 +1175,14 @@ describe('task CLI', () => {
       deps
     )
 
-    expect(client.searchLiterature).toHaveBeenCalledWith({
-      query: 'cell atlas',
-      projectId: 'project-1'
-    })
-    expect(client.formatReferences).toHaveBeenCalledWith({
-      itemIds: ['item-1', 'item-2'],
-      styleId: 'apa',
-      locale: 'en-US'
-    })
+    expect(client.searchLiterature).toHaveBeenCalledWith(
+      { query: 'cell atlas', projectId: 'project-1', limit: 50 },
+      expect.any(Object)
+    )
+    expect(client.formatReferences).toHaveBeenCalledWith(
+      { itemIds: ['item-1', 'item-2'], styleId: 'apa', locale: 'en-US' },
+      expect.any(Object)
+    )
     expect(log.mock.calls.map(([line]) => line)).toEqual([
       'item-1\tAtlas',
       'More results: --offset 20',
@@ -1206,14 +1216,18 @@ describe('task CLI', () => {
     await runTaskCommand(parseCliArgs(['literature', 'import', '-']), deps)
     await runTaskCommand(parseCliArgs(['literature', 'trash', 'i1', '--json']), deps)
 
-    expect(client.importLiterature).toHaveBeenCalledWith({
-      mode: 'preview',
-      content: '@article{a}'
-    })
+    expect(client.importLiterature).toHaveBeenCalledWith(
+      { mode: 'preview', content: '@article{a}' },
+      expect.any(Object)
+    )
     expect(log).toHaveBeenCalledWith(
       'Preview only; nothing was saved. Re-run with --commit to import.'
     )
-    expect(client.setLiteratureLifecycle).toHaveBeenCalledWith(['i1'], 'deleted')
+    expect(client.setLiteratureLifecycle).toHaveBeenCalledWith(
+      ['i1'],
+      'deleted',
+      expect.any(Object)
+    )
     expect(() => parseCliArgs(['literature', 'import', 'refs.bib', '--project', 'p1'])).toThrow(
       '--project requires literature import --commit.'
     )
@@ -1442,19 +1456,22 @@ describe('task CLI', () => {
       dependencies
     )
 
-    expect(client.createProject).toHaveBeenCalledWith({
-      name: 'Created',
-      description: undefined,
-      agentContext: 'Always cite sources.'
-    })
-    expect(client.updateProject).toHaveBeenNthCalledWith(1, 'project-1', {
-      expectedUpdatedAt: 7,
-      agentContext: 'Prefer Python.'
-    })
-    expect(client.updateProject).toHaveBeenNthCalledWith(2, 'project-1', {
-      expectedUpdatedAt: 7,
-      agentContext: ''
-    })
+    expect(client.createProject).toHaveBeenCalledWith(
+      { name: 'Created', description: undefined, agentContext: 'Always cite sources.' },
+      expect.any(Object)
+    )
+    expect(client.updateProject).toHaveBeenNthCalledWith(
+      1,
+      'project-1',
+      { expectedUpdatedAt: 7, agentContext: 'Prefer Python.' },
+      expect.any(Object)
+    )
+    expect(client.updateProject).toHaveBeenNthCalledWith(
+      2,
+      'project-1',
+      { expectedUpdatedAt: 7, agentContext: '' },
+      expect.any(Object)
+    )
     expect(JSON.stringify(log.mock.calls)).not.toContain('Always cite sources.')
     expect(JSON.stringify(log.mock.calls)).not.toContain('Prefer Python.')
   })

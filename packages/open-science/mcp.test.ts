@@ -37,10 +37,10 @@ const cases = [
   ],
   [
     'update_project',
-    { projectId: 'p/1', agentContext: null },
+    { projectId: 'p/1', expectedUpdatedAt: 4, agentContext: null },
     '/api/v1/projects/p%2F1',
     'PATCH',
-    { agentContext: null }
+    { expectedUpdatedAt: 4, agentContext: '' }
   ],
   ['list_sessions', { projectId: 'p/1' }, '/api/v1/sessions?project=p%2F1', 'GET', undefined],
   ['get_session', { sessionId: 's/1' }, '/api/v1/sessions/s%2F1', 'GET', undefined],
@@ -363,7 +363,7 @@ describe('research MCP tools', () => {
     ],
     ['start_run', { projectId: 'p1', prompt: ' ' }],
     ['start_run', { projectId: 'p1', prompt: 'Go', permissionProfile: 'unknown' }],
-    ['search_literature', { limit: 21 }],
+    ['search_literature', { limit: 101 }],
     ['format_references', { itemIds: [], styleId: 'apa' }],
     ['import_literature', { mode: 'commit' }],
     ['import_literature', { mode: 'preview', content: 'x', projectId: 'p1' }],
