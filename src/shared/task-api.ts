@@ -27,6 +27,19 @@ export type TaskAgentRuntime = Readonly<{
   source?: 'managed' | 'external'
 }>
 
+export type TaskReadinessCheck = Readonly<{
+  status: 'ready' | 'blocked' | 'checking' | 'unconfirmed'
+  reason?: string
+}>
+
+export type TaskNotebookReadiness = Readonly<{
+  platform: NodeJS.Platform
+  environment: TaskReadinessCheck & { pythonReady?: boolean; rReady?: boolean }
+  dependencies: TaskReadinessCheck
+  sandbox: TaskReadinessCheck
+  memoryPolicy: TaskReadinessCheck & { source?: string; executionScope?: string }
+}>
+
 export type TaskDoctorReport = Readonly<{
   ready: boolean
   checks: Readonly<{
@@ -36,6 +49,7 @@ export type TaskDoctorReport = Readonly<{
       { status: 'ready' | 'missing' } | { status: 'not_ready'; reason?: ProviderReadinessReason }
     >
     skills: Readonly<{ status: 'ready'; enabled: string[] }>
+    notebook?: TaskNotebookReadiness
   }>
   next: ReadonlyArray<
     Readonly<{

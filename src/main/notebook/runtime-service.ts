@@ -506,6 +506,7 @@ const projectNotebookMemoryPolicyState = (
   status: state.status,
   reason: state.reason.code,
   detail: state.reason.detail,
+  ...(state.reason.diagnostic ? { diagnostic: state.reason.diagnostic } : {}),
   source: state.source,
   executionScope: state.executionScope,
   checkedAt: Date.now(),

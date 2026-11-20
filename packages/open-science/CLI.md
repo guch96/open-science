@@ -217,8 +217,7 @@ if the process subsequently exits; they cannot prove the stopped generation to a
 
 ## Readiness checks
 
-Inspect the running service without changing runtime, provider, credential, onboarding, or Skill
-settings:
+Inspect the running service and default local delivery directory:
 
 ```bash
 open-science doctor --json
@@ -228,8 +227,18 @@ The command prints `{ "result": { "readiness": ..., "checks": ..., "next": ... }
 `readiness.agent: "ready"` requires both the selected Agent runtime and active provider to be
 ready. A check is `missing` when its resource is absent and `not_ready` when it is configured but
 unusable; provider failures may include a stable `reason`, such as `credential_invalid`.
-`readiness.notebook: "unconfirmed"` means this check has no evidence about Notebook readiness.
-Doctor does not establish execution or delivery.
+`readiness.notebook` summarizes the service's default Python environment, system dependencies,
+isolation, and current host memory policy. `checks.notebook` reports each separately and includes
+the service platform, Python/R availability, and the memory source and scope when known. `ready`
+means the reported prerequisites passed. `checking` means an Owner is preparing or checking a
+prerequisite. `blocked` identifies a known problem. `unconfirmed` means some evidence is missing.
+See the [deployment prerequisites](../../docs/standalone-runtime.md#notebook-readiness-for-agents)
+for what each platform can establish. Actual Notebook dispatch and output delivery are separate.
+
+`checks.deliveryDirectory` inspects `<profile>/agent-delivery` on the CLI or MCP host, using the
+profile directory if the default location does not yet exist. It checks directory type and access
+without creating anything or writing a test file. File delivery still has to write and verify the
+actual output.
 
 Codex credential inspection checks supported material in the app-owned `auth.json` without launching
 Codex or validating expiry/revocation remotely; historical provider validation remains a separate gate.
@@ -237,7 +246,7 @@ Codex or validating expiry/revocation remotely; historical provider validation r
 `doctor` and `get_setup_status` have the same checks. `profile` identifies the running service's
 configuration root. `next` contains setup actions, with an owner, a user action flag and a
 verification step for the same profile. A completed inspection exits with code `0`, including
-when Agent readiness is blocked. If the service is
+when a readiness check is blocked. If the service is
 unreachable, the CLI emits `daemon_unavailable` and the startup command for the selected profile
 on stderr, and exits with code `3`. An HTTP authentication rejection stays an `access_denied`
 error.
@@ -518,9 +527,12 @@ open-science session status <session-id> --json
 ```
 
 Every CLI submission has a request ID. Supply `--request-id <id>` to retain an identity in a script;
-otherwise the CLI generates one. The local service durably acknowledges the request before slow
-Agent preparation. If the connection fails before a Run ID is returned, the error includes
-`requestId`; query that receipt rather than sending a new request:
+otherwise `open-science run` generates one and saves it before submission in the selected
+profile's `agent-run-requests/<requestId>.json`. The record only locates the request and profile;
+it contains no prompt, credentials, or receipt status. A save failure prevents submission. If a
+process exits before printing its result, inspect that directory to recover the ID and the profile.
+The local service saves the receipt before slow Agent preparation. If the connection fails before
+a Run ID is returned, query the original receipt using the same profile:
 
 ```bash
 open-science run --project <project-id> --prompt-file ./task.md --request-id analysis-001 --wait --json
@@ -1104,8 +1116,11 @@ service on the same machine with access to the input and delivery files.
 | `get_session`                  | Read Session status and import or Fork provenance        |
 | `get_session_configuration`    | Read session configuration and revision                  |
 | `update_session_configuration` | Update settings with `expectedRevision`                  |
-| `start_run`                    | Submit a prompt and return a run ID                      |
+| `start_run`                    | Submit research under a caller-supplied request ID        |
+| `get_submission`               | Read the original durable receipt                        |
+| `wait_submission`              | Wait until the original receipt leaves `pending`         |
 | `get_run`                      | Read progress, output and attention state                |
+| `wait_run`                     | Wait until a Run finishes or needs attention             |
 | `cancel_run`                   | Explicitly cancel a run without undoing previous effects |
 | `get_plan`                     | Read the plan and its version/revision                   |
 | `respond_plan`                 | Approve/reject a reviewed version or request changes     |
@@ -1125,8 +1140,22 @@ service on the same machine with access to the input and delivery files.
 | `set_reading_status`           | Set unread, reading, or read                             |
 | `set_literature_lifecycle`     | Move records to the trash or restore them                |
 
-A typical workflow calls `list_projects`, `start_run` with `{ "projectId": "…", "prompt": "…" }`,
-then polls `get_run` with the returned run ID and calls `list_artifacts` with the session and Run IDs.
+Generate and retain a `requestId` before calling `start_run` over MCP or `tools call`. Send
+`{ "requestId": "analysis-001", "projectId": "…", "prompt": "…" }`. The result is a durable
+receipt, which can be pending. Read it with `get_submission`, or use `wait_submission` to observe
+it until it leaves `pending`. An accepted receipt provides the `runId` for `get_run` or
+`wait_run`; an interrupted or failed receipt does not start another Run. Both wait tools
+default to `timeoutMs: 10000` and accept up to `30000`. They return the applied budget and the
+receipt or Run. Timeout returns the same budget and reference for the next read. Disconnecting
+or timing out never cancels the study; use `cancel_run` to cancel explicitly.
+
+After a lost response or service restart, always query the same `requestId` in the original
+profile. The same effective submission and ID resolve to the same receipt; a changed request
+under that ID fails with `submission_conflict`. A Run interrupted by restart reports
+`failureCode: "process_restarted"`. Use a new ID for a separately authorized research turn.
+Older services without durable submission support reject the operation without writing a Run.
+
+Use the session and Run IDs from `get_run` to list the Artifacts for that research.
 Notebook working files must be published as Artifacts before they can be downloaded. For each
 Artifact, pass its `downloadId` and `sessionId` to `download_artifact`; `artifactId` identifies
 the lineage and `versionId` identifies the immutable version. Files default to
@@ -1165,14 +1194,10 @@ Configuration reads and writes accept `projectId` to verify the Session belongs 
 inspected but cannot be configured or resumed. A writable Fork reports `forkOrigin`. A missing
 `readOnly` on an older service does not establish that a Session is writable.
 
-Runs use the service's configured framework and authorization defaults. `start_run` accepts
-existing session, provider/model, permission, skill, specialist, compute-host, memory, review,
-delegation and plan-first options; it does not change the global framework. A run can require
-human action in Open-Science. Explicit `permissionPrompts: "none"` denies unresolved human
-interactions using the existing capability check; it does not expand permissions and cannot
-be combined with `turnIntent: "plan-first"`. Plan approval/rejection requires the version and
-revision from `get_plan`. Configuration updates require the revision from
-`get_session_configuration`.
+Runs use the service's configured framework and authorization defaults. `start_run` accepts an
+existing Session, flat model fields, skills, a Specialist, Compute Hosts, Memory, and plan-first
+options. It accepts no permission overrides. A Run can require human action in Open-Science.
+Plan approval or rejection requires the version and revision from `get_plan`.
 
 `search_literature` defaults to 20 records per page and accepts a `limit` from 1 to 100.
 `format_references` defaults to `en-US`. `get_reference_metadata` and `create_literature_item` contact external registries

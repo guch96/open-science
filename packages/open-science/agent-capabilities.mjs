@@ -5,7 +5,18 @@ import { OpenScienceApiError } from './index.mjs'
 const id = (description) => z.string().trim().min(1).describe(description)
 const sessionId = id('Session ID returned by list_sessions or start_run.')
 const projectId = id('Project ID returned by list_projects or create_project.')
-const runId = id('Run ID returned by start_run.')
+const runId = id('Run ID returned by the submission receipt.')
+const requestId = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{1,128}$/)
+  .describe('Stable request ID. Generate and keep it before you submit.')
+const waitTimeoutMs = z
+  .number()
+  .int()
+  .min(1)
+  .max(30_000)
+  .default(10_000)
+  .describe('Maximum milliseconds to observe the original request. Does not cancel it.')
 const literatureItemId = id('Literature item ID returned by search_literature.')
 const literatureItemIds = z.array(literatureItemId).min(1).max(1000)
 const collectionId = id('Literature collection ID returned by create_literature_collection.')
@@ -32,7 +43,6 @@ const sessionPreferences = {
   memoryEnabled: z.boolean().optional(),
   delegationPolicy: z.enum(['allow', 'deny']).optional()
 }
-const sessionSettings = { ...sessionPreferences, agentConfiguration: agentConfiguration.optional() }
 const expectedUpdatedAt = z
   .number()
   .int()
@@ -104,7 +114,17 @@ const libraryAdd = { ...libraryWrite, destructiveHint: false }
 
 export const existingMcpCapabilities = []
 
-const addCapability = (exposure, name, group, description, shape, annotations, invoke, refine) => {
+const addCapability = (
+  exposure,
+  name,
+  group,
+  description,
+  shape,
+  annotations,
+  invoke,
+  refine,
+  { serviceCapability, boundedWait = false } = {}
+) => {
   const schema = z.strictObject(shape)
   existingMcpCapabilities.push({
     name,
@@ -113,8 +133,14 @@ const addCapability = (exposure, name, group, description, shape, annotations, i
     inputSchema: refine ? schema.superRefine(refine) : schema,
     annotations,
     exposure,
+    serviceCapability,
+    probeOnly: boundedWait,
     async handler(args, { getClient, signal }) {
-      return invoke(await getClient(), args, { signal })
+      if (boundedWait) {
+        const timeout = AbortSignal.timeout(args.timeoutMs)
+        signal = signal ? AbortSignal.any([signal, timeout]) : timeout
+      }
+      return invoke(await getClient(signal), args, { signal })
     }
   })
 }
@@ -253,42 +279,71 @@ registerResource(
   (client, { sessionId, ...fields }, options) =>
     client.updateSessionConfiguration(sessionId, configurationPatch(fields), options)
 )
-register(
+registerResource(
   'start_run',
   'research',
-  'Submit research in a project and immediately return a run ID. Omit sessionId to create a session, or provide it to continue that session through its existing active branch. May write files/data and incur model charges. Poll get_run; disconnecting does not cancel the run. Uses configured framework and permissions, without automatically approving human interactions.',
+  'Submit research and return its durable receipt. Keep requestId before sending. Omit sessionId to create a Session, or supply it to continue that Session in the Project. Uses the configured permissions and can incur model charges. Query get_submission after disconnect.',
   {
+    requestId,
     projectId,
     prompt: id('Research instructions.'),
     sessionId: sessionId.optional(),
     cwd: id('Working directory on the Open-Science host.').optional(),
-    ...sessionSettings,
+    ...agentConfiguration.shape,
+    memoryEnabled: z.boolean().optional(),
     skillIds: z.array(id('Skill ID.')).optional(),
     specialist: id('Specialist ID or exact name for a new session.').optional(),
     turnIntent: z
       .literal('plan-first')
       .describe('Require an approved plan before execution.')
       .optional(),
-    permissionPrompts: z
-      .literal('none')
-      .describe(
-        'Deny unresolved human interactions instead of waiting; does not expand permissions. Incompatible with plan-first.'
-      )
-      .optional(),
     computeHostIds: z.array(id('Selected Compute Host ID.')).optional(),
     enabledComputeHostIds: z.array(id('Enabled Compute Host ID for a new session.')).optional()
   },
-  write,
-  (client, { projectId, ...request }, options) => {
-    if (request.turnIntent === 'plan-first' && request.permissionPrompts === 'none') {
-      throw new OpenScienceApiError('Incompatible permission and planning options.', {
-        code: 'invalid_request'
-      })
-    }
-    return client.startRun({ project: projectId, ...request }, options)
-  }
+  { ...write, idempotentHint: true },
+  (client, { requestId, projectId, providerId, model, reasoningEffort, ...request }, options) =>
+    client.submitRun(
+      requestId,
+      {
+        project: projectId,
+        ...request,
+        ...(providerId !== undefined || model !== undefined || reasoningEffort !== undefined
+          ? { agentConfiguration: { providerId, model, reasoningEffort } }
+          : {})
+      },
+      options
+    ),
+  undefined,
+  { serviceCapability: 'durable-submissions' }
 )
-register(
+registerResource(
+  'get_submission',
+  'research',
+  'Read the original durable receipt by requestId. A missing receipt is not a reason to submit with a new ID.',
+  { requestId },
+  read,
+  (client, args, options) => client.getSubmission(args.requestId, options),
+  undefined,
+  { serviceCapability: 'durable-submissions' }
+)
+registerResource(
+  'wait_submission',
+  'research',
+  'Wait for the original receipt to leave pending. Failed and interrupted receipts are returned as recorded; timeout only stops observation.',
+  { requestId, timeoutMs: waitTimeoutMs },
+  read,
+  async (client, { requestId, timeoutMs }, options) => ({
+    timeoutMs,
+    receipt: await client.waitForSubmission(requestId, {
+      ...options,
+      timeoutMs,
+      returnReceipt: true
+    })
+  }),
+  undefined,
+  { serviceCapability: 'durable-submissions', boundedWait: true }
+)
+registerResource(
   'get_run',
   'research',
   'Read authoritative run status, progress, result and attention state. Poll this after start_run; a waiting run may require human action in Open-Science.',
@@ -296,7 +351,20 @@ register(
   read,
   (client, args, options) => client.getRun(args.runId, options)
 )
-register(
+registerResource(
+  'wait_run',
+  'research',
+  'Wait for a Run to finish or need attention. Timeout only stops observation.',
+  { runId, timeoutMs: waitTimeoutMs },
+  read,
+  async (client, { runId, timeoutMs }, options) => ({
+    timeoutMs,
+    run: await client.waitForRun(runId, { ...options, timeoutMs, returnOnAttention: true })
+  }),
+  undefined,
+  { boundedWait: true }
+)
+registerResource(
   'cancel_run',
   'research',
   'Explicitly cancel a research run and wait for service finalization. This does not undo files, data or costs already produced.',

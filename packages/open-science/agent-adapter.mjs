@@ -1,8 +1,10 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
-import { existingMcpCapabilities } from './agent-capabilities.mjs'
 import { artifactCapabilities } from './agent-artifacts.mjs'
+import { existingMcpCapabilities } from './agent-capabilities.mjs'
+import { inspectAgentDeliveryDirectory } from './agent-delivery-directory.mjs'
+import { projectAgentNotebookReadiness, readinessActions } from './agent-notebook-readiness.mjs'
 import { getAgentPackageCapabilities } from './agent-package-capabilities.mjs'
 import { connectToOpenScience } from './index.mjs'
 
@@ -15,7 +17,7 @@ Install Open-Science with the application's installer or npm package. Start the 
 
 Use the capability catalog and detail schemas to find the operations the installed adapter exposes. Check service support and call doctor for the same profile. Base Agent readiness does not prove that a Notebook can run, has run, or produced files.
 
-Use the user's research instructions and choose an explicit Project. Leave provider credentials, Notebook continuation, and sensitive export confirmation to the user in Open-Science. After a lost response, query the original request or operation before deciding what to do next.
+Use the user's research instructions and choose an explicit Project. Generate and keep a request ID before sending. If the response is lost, query the original receipt in the same profile. Waiting only observes work; it does not cancel it. Use a new ID only for a new research turn. Leave provider credentials, Notebook continuation, and sensitive export confirmation to the user in Open-Science.
 
 Notebook working files are not delivered Artifacts. Check the actual report and result files returned by the delivery capabilities. In a new environment, import a .science package and inspect the Session read-only; ask the user before creating a writable Fork.
 
@@ -113,6 +115,21 @@ const policies = {
     'Run not found. Check the original Run ID.',
     { action: 'inspect_state' }
   ],
+  submission_not_found: [
+    'agent',
+    'No receipt was found for this request ID. Check the original ID and profile before doing anything else.',
+    { action: 'get_submission' }
+  ],
+  submission_conflict: [
+    'agent',
+    'This request ID belongs to a different effective request. Inspect its receipt before continuing.',
+    { action: 'get_submission' }
+  ],
+  submission_unavailable: [
+    'service',
+    'The receipt store is unavailable. Check the original request after the service becomes available.',
+    { action: 'get_submission' }
+  ],
   artifact_not_found: [
     'agent',
     'Artifact not found. Refresh list_artifacts.',
@@ -161,7 +178,10 @@ export class AgentError extends Error {
 }
 
 const safeId = z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/)
-export const agentErrorDetails = (error, { capability, configRoot, readOnly, connected } = {}) => {
+export const agentErrorDetails = (
+  error,
+  { capability, configRoot, readOnly, connected, args = {} } = {}
+) => {
   if (error instanceof AgentError) return error.details
   const status = error?.status
   const known = Object.hasOwn(policies, error?.code)
@@ -208,7 +228,8 @@ export const agentErrorDetails = (error, { capability, configRoot, readOnly, con
     'operationId',
     'correlationId'
   ]) {
-    if (safeId.safeParse(error?.[key]).success) details[key] = error[key]
+    const value = error?.[key] ?? args[key]
+    if (safeId.safeParse(value).success) details[key] = value
   }
   if (code === 'literature_project_link_failed' && Array.isArray(error.itemIds)) {
     details.itemIds = error.itemIds.filter((id) => safeId.safeParse(id).success)
@@ -223,6 +244,29 @@ export const agentErrorDetails = (error, { capability, configRoot, readOnly, con
     (status === undefined || status >= 500)
   ) {
     details.completionStatus = 'unconfirmed'
+  }
+  if (
+    details.requestId &&
+    (details.completionStatus === 'submission-unconfirmed' ||
+      ['submission_conflict', 'submission_unavailable', 'submission_not_found'].includes(code))
+  ) {
+    details.next = [{ action: 'get_submission', requestId: details.requestId }]
+    if (
+      details.completionStatus === 'submission-unconfirmed' &&
+      code !== 'submission_unavailable'
+    ) {
+      details.message =
+        'Submission unconfirmed. Query the original request ID before submitting anything again.'
+    }
+  }
+  if (code === 'timeout' && ['wait_submission', 'wait_run'].includes(capability)) {
+    details.timeoutMs = args.timeoutMs
+    details.next =
+      capability === 'wait_submission'
+        ? [{ action: 'get_submission', requestId: details.requestId }]
+        : [{ action: 'get_run', runId: details.runId }]
+    details.message =
+      'The observation timed out. Query the original operation; it was not cancelled.'
   }
   return details
 }
@@ -349,7 +393,11 @@ const setupAction = ({ code, argv }, profile) => {
 async function doctor(_args, { getClient, configRoot, signal }) {
   const client = await getClient()
   const profile = client.configRoot ?? configRoot
-  const report = await client.doctor({ signal })
+  const [report, deliveryDirectory] = await Promise.all([
+    client.doctor({ signal }),
+    inspectAgentDeliveryDirectory(profile)
+  ])
+  const notebook = projectAgentNotebookReadiness(report?.checks?.notebook, profile)
   const runtime = report?.checks?.runtime
   const provider = report?.checks?.provider
   const agent =
@@ -360,7 +408,7 @@ async function doctor(_args, { getClient, configRoot, signal }) {
         : 'unconfirmed'
   return {
     ...(profile ? { profile } : {}),
-    readiness: { service: 'ready', agent, notebook: 'unconfirmed' },
+    readiness: { service: 'ready', agent, notebook: notebook.status },
     checks: {
       runtime: {
         status: readinessStatus(runtime?.status),
@@ -369,13 +417,19 @@ async function doctor(_args, { getClient, configRoot, signal }) {
       provider: {
         status: readinessStatus(provider?.status),
         ...(providerReasons.includes(provider?.reason) ? { reason: provider.reason } : {})
-      }
+      },
+      notebook: notebook.checks,
+      deliveryDirectory
     },
-    next: Array.isArray(report?.next)
-      ? report.next
-          .filter((item) => setupCodes.includes(item?.code))
-          .map((item) => setupAction(item, profile))
-      : []
+    next: [
+      ...(Array.isArray(report?.next)
+        ? report.next
+            .filter((item) => setupCodes.includes(item?.code))
+            .map((item) => setupAction(item, profile))
+        : []),
+      ...notebook.next,
+      ...readinessActions([deliveryDirectory], profile)
+    ]
   }
 }
 
@@ -401,7 +455,7 @@ const setupStatus = {
   name: 'doctor',
   group: 'setup',
   description:
-    'Check Agent runtime and provider readiness. User actions identify the exact installed CLI and profile.',
+    'Read Agent and Notebook readiness and the default local delivery directory. Actions identify who should handle a blocker and how to recheck this profile.',
   inputSchema: z.strictObject({}),
   annotations: readOnly,
   exposure: { cli: true, mcp: true },
@@ -485,10 +539,10 @@ export const invokeAgentCapability = async (
     exposure,
     configRoot,
     signal,
-    getClient: async () => {
-      signal?.throwIfAborted()
-      client ??= await (entry.probeOnly ? probe : connect)({ configRoot, signal })
-      signal?.throwIfAborted()
+    getClient: async (requestSignal = signal) => {
+      requestSignal?.throwIfAborted()
+      client ??= await (entry.probeOnly ? probe : connect)({ configRoot, signal: requestSignal })
+      requestSignal?.throwIfAborted()
       return client
     },
     probeService: async (entries) => {
@@ -533,7 +587,8 @@ export const invokeAgentCapability = async (
         capability: name,
         configRoot,
         readOnly: entry.annotations?.readOnlyHint,
-        connected: Boolean(client)
+        connected: Boolean(client),
+        args: args.data
       })
     )
   }

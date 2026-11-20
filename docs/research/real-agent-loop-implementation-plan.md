@@ -38,6 +38,11 @@
    [#56](https://github.com/guch96/open-science/issues/56) 已用真实 MCP stdio 和 CLI JSON 调用同一个认证 HTTP
    夹具验证资源选择、配置版本检查、导入 Session 的只读拒绝和 Literature 默认值；
    TaskRunner 测试验证 Owner 的归属与只读限制。此处的导入 Session 使用测试记录，真实包迁移另行验收。
+   [#59](https://github.com/guch96/open-science/issues/59) 复用 TaskSubmissions 和 Run Owner；
+   `start_run` 返回持久回执，`get_submission` / `wait_submission` 和 `get_run` / `wait_run`
+   查询原任务。Agent 等待默认 10 秒、上限 30 秒，超时不取消。CLI `run` 自动分配 ID 时先将定位信息
+   写入 `<profile>/agent-run-requests/`。协议测试覆盖丢失响应、重连和落盘失败；服务端测试覆盖同 ID
+   并发、冲突和重启后的回执关联及中断状态。
 3. [#62–#65](https://github.com/guch96/open-science/issues/54) 接入包导出、导入、Fork、查询和敏感确认。
    以真实 `.science` 和原操作关联证据区分可验证交付、待确认和未知结果。
    [#62](https://github.com/guch96/open-science/issues/62) 导出由 Package Owner 在受理时记录 operation/correlation，

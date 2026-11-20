@@ -20,11 +20,17 @@ import {
   parseCliArgs,
   reportCliError,
   runCli,
-  runTaskCommand,
+  runTaskCommand as dispatchTaskCommand,
   startCommand,
   stopCommand,
   statusCommand
 } from './cli.mjs'
+
+const runTaskCommand = (
+  command: Parameters<typeof dispatchTaskCommand>[0],
+  dependencies: Parameters<typeof dispatchTaskCommand>[1]
+): ReturnType<typeof dispatchTaskCommand> =>
+  dispatchTaskCommand(command, { persistRunRequest: async () => undefined, ...dependencies })
 
 const listProjects = async (): Promise<Array<{ id: string; name: string }>> => [
   { id: 'project-1', name: 'Research' }
