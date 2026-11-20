@@ -190,7 +190,8 @@ your profile. You can open the desktop app later. The published 1.3.0 CLI requir
 service; with that version, open Open-Science or run `npx --yes @aipoch/open-science@1.3.0 start --no-open` first.
 
 For local file delivery, run the agent, MCP server, and Open-Science service on the same machine
-with access to the same files. Use the same Open-Science profile for setup, sign-in, and research.
+with access to the same files. The MCP process needs access to the selected profile and the
+local service's loopback connection. Use that same profile for setup, sign-in, and research.
 See [Notebook prerequisites](docs/standalone-runtime.md#notebook-readiness-for-agents), especially
 when running on Linux or in a container.
 
