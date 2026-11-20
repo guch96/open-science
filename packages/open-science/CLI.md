@@ -224,19 +224,21 @@ settings:
 open-science doctor --json
 ```
 
-The command prints one JSON object. `ready` requires both the selected Agent runtime and active
-provider to be ready. A check is `missing` when its resource is absent and `not_ready` when it is
-configured but unusable; provider failures may include a stable `reason`, such as
-`credential_invalid`.
+The command prints `{ "result": { "readiness": ..., "checks": ..., "next": ... } }`.
+`readiness.agent: "ready"` requires both the selected Agent runtime and active provider to be
+ready. A check is `missing` when its resource is absent and `not_ready` when it is configured but
+unusable; provider failures may include a stable `reason`, such as `credential_invalid`.
+`readiness.notebook: "unconfirmed"` means this check has no evidence about Notebook readiness.
+Doctor does not establish execution or delivery.
 
 Codex credential inspection checks supported material in the app-owned `auth.json` without launching
 Codex or validating expiry/revocation remotely; historical provider validation remains a separate gate.
 
-`checks.skills.enabled` contains the sorted IDs of enabled, available Skills; Skills do not block
-overall readiness. `next` contains stable action codes such as
-`runtime_missing` and `provider_not_ready`, with an additive `argv` recovery command for the Codex bootstrap path. A completed inspection
-exits with code `0` even when `ready` is false; connection and command failures keep the existing
-nonzero CLI error codes.
+`next` contains setup codes such as `runtime_missing` and `provider_not_ready`. A completed
+inspection exits with code `0`, including when Agent readiness is blocked. If the service is
+unreachable, the CLI emits `daemon_unavailable` and the startup command for the selected profile
+on stderr, and exits with code `3`. An HTTP authentication rejection stays an `access_denied`
+error.
 
 ## First-run setup (Codex)
 
@@ -268,8 +270,8 @@ open-science provider add --type official --vendor openai --model gpt-5.4 \
 Use a model supported by the installed application's OpenAI catalog. Setup probes that exact model
 before saving its protected credential reference and validation record. This initial command creates
 `cli-openai`; repeating it with the same key and currently selected model revalidates that target.
-If Settings changed the active model, Doctor suggests the selected model; revalidation preserves the
-provider default model and active selection. Different existing credentials,
+If Settings changed the active model, revalidation preserves the provider default model and
+active selection. Different existing credentials,
 providers, or framework selections produce `configuration_conflict`, without overwriting them.
 Later account edits remain in Settings. Other runtime/provider bootstrap combinations are not yet
 supported. Existing run-time selection commands are unchanged.
@@ -282,14 +284,9 @@ All writes use existing Settings/runtime/credential owners and formats. No onboa
 flag or database migration is added. OS storage remains the default; Linux file storage still
 requires the existing explicit `start --credential-store file` option on every start.
 
-`doctor` keeps existing readiness/reason fields. If the daemon is absent, the CLI prints a report
-with `checks.daemon.status: "missing"` and `next: [{ code: "daemon_unavailable", argv: ["start",
-"--no-open"] }]`, exiting 3. This includes a stale state file whose loopback connection is refused; HTTP health
-rejections (including authorization failures) remain errors rather than missing-daemon reports.
-When probing both default profiles, a later refused connection does not hide an earlier HTTP or
-configuration error; a healthy later profile can still be selected. A running-daemon report still exits 0 even when readiness is false.
-Append the same development `--profile` argument when executing a suggested argv in an isolated
-profile. Doctor reports readiness, not a live third-party authorization or research-run guarantee.
+Use the same `--profile` for service startup, diagnostics, and manual provider setup when working
+with an isolated profile. Doctor reports current service checks; provider validation and research
+execution are separate operations.
 
 `bootstrap` SDK requests return `{ ok: true, providerId? }` or `{ ok: false, code }`. Codes are
 `invalid_request` (including unknown model/input), `configuration_conflict`, `runtime_unavailable`,
@@ -1033,21 +1030,43 @@ Use the absolute CLI path if the client cannot find the installed command.
 `~/.open-science-project` (development) before `~/.open-science` (production).
 For a source checkout, use `node` as the command and put the absolute path to
 `packages/open-science/cli.mjs` before `mcp` in `args`. When a client initializes the MCP connection, the adapter starts or reuses the
-standalone service with the same persistent lifetime as `start --no-open`. Tool discovery is
-available during startup. The first call waits for the service and uses its selected profile.
+standalone service with the same persistent lifetime as `start --no-open`. Discovery and the local
+guide are available during startup. Business calls wait for startup; `doctor` and the optional
+discovery probe report the current state without waiting for startup.
 Listing projects works before model setup. A later desktop launch can attach to a compatible
 backend. Closing the MCP connection leaves the service running; use `open-science stop` to
 release the persistent hold. `open-science mcp --help` only prints help.
 
-If startup fails, check the selected profile's status and startup log, resolve the failure and
-retry the tool call. CLI 1.3.0 requires a running service before tool calls. Tool names consistently use
-lowercase `snake_case`; argument names retain the SDK's `camelCase`. Tools accept explicit IDs
-rather than resolving project names. Each tool publishes its description, input schema, output
-schema and behavior annotations through `tools/list`.
+If startup fails, check the selected profile's status and startup log. Tool names use lowercase
+`snake_case`; argument names use `camelCase`. Choose explicit resource IDs returned by Open-Science.
+
+### Discover capabilities
+
+Use MCP `list_capabilities` (optional `group` and `checkService`) and `describe_capability` (`name`),
+or their CLI equivalents:
+
+```bash
+open-science tools list --json
+open-science tools list setup --check-service --profile /absolute/path/to/profile --json
+open-science tools describe doctor --json
+open-science tools call get_agent_guide --json
+```
+
+The catalog groups discovery, setup, research, and delivery and reports exposure separately for
+CLI and MCP. `tools call <name> --json` accepts a JSON object on stdin (empty input means `{}`),
+and only calls capabilities with CLI exposure. The equivalent MCP invocation uses the published
+`tools/list` schema. Service support is `unknown` until there is evidence, `unavailable` when
+the selected service cannot be checked, and `not_required` for local discovery. `checkService`
+defaults to `false`; using it probes the existing service without starting it. The doctor check
+recognizes the bootstrap advertisement or confirms the read endpoint on older services.
+
+Read the Markdown resource `openscience://agent/guide` or call `get_agent_guide` if the MCP client
+does not expose resources. The full local workflow requires the external Agent, MCP process, and
+service on the same machine with access to the input and delivery files.
 
 | Tool                           | Purpose                                                  |
 | ------------------------------ | -------------------------------------------------------- |
-| `doctor`                       | Check research readiness                                 |
+| `doctor`                       | Check base Agent readiness                               |
 | `list_runtimes`                | List detected Agent runtimes                             |
 | `list_projects`                | List projects and IDs                                    |
 | `create_project`               | Create a persistent project                              |
@@ -1077,10 +1096,12 @@ schema and behavior annotations through `tools/list`.
 
 A typical workflow calls `list_projects`, `start_run` with `{ "projectId": "…", "prompt": "…" }`,
 then polls `get_run` with the returned run ID and calls `list_artifacts` with the session ID.
-Successful calls return `structuredContent: { "result": ... }` plus the same JSON in text
-content. Tool execution failures set `isError: true`; exception bodies and credentials are not
-forwarded. After a timeout or transport failure, inspect current state before repeating a write:
-the original operation may already have succeeded. The adapter never retries mutations itself.
+Successful calls return `structuredContent: { "result": ... }` plus the same JSON in text content.
+Tool failures set `isError: true` and return `{ "error": ... }` with `code`, `message`, `owner`,
+`requiresUser`, `retryable`, `next`, and available recovery references. CLI Agent calls use the
+same result on stdout or the same error with `exitCode` on stderr. An `unconfirmed` completion
+status means the original write may already have taken effect; query the original state before
+deciding whether to repeat it. Error output excludes raw service messages and credentials.
 
 Runs use the service's configured framework and authorization defaults. `start_run` accepts
 existing session, provider/model, permission, skill, specialist, compute-host, memory, review,

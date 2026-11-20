@@ -28,6 +28,10 @@
 
 1. [#55](https://github.com/guch96/open-science/issues/55) 建立共享注册、发现和基础 doctor。
    用真实 MCP stdio、CLI JSON 核对本地发现、Schema 与错误。
+   当前入口为 CLI `tools list/describe/call --json` 和 MCP `list_capabilities`、`describe_capability`；
+   指南通过 `openscience://agent/guide` 或 `get_agent_guide` 读取。目录默认离线，显式探测复用
+   SDK 的 `/api/bootstrap`；旧服务未公告 doctor 时，可用只读 doctor 请求核对支持情况。
+   `readiness.agent` 根据已有服务端检查投影，Notebook 状态目前保留 `unconfirmed`。
 2. [#56–#61](https://github.com/guch96/open-science/issues/54) 接入资源、runtime/provider、Notebook readiness、持久研究、执行状态及 Artifact。
    在两个公开入口对齐语义；复用 Owner 测试验证重启、审批边界及源端文件校验。
 3. [#62–#65](https://github.com/guch96/open-science/issues/54) 接入包导出、导入、Fork、查询和敏感确认。

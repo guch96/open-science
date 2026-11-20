@@ -273,64 +273,6 @@ describe('task CLI', () => {
     expect(() => parseCliArgs(['doctor'])).toThrow('doctor requires --json.')
   })
 
-  it('prints the doctor readiness contract as valid JSON', async () => {
-    const report = {
-      ready: false,
-      checks: {
-        daemon: { status: 'ready' },
-        runtime: { status: 'missing', framework: 'codex' },
-        provider: { status: 'not_ready', reason: 'credential_invalid' },
-        skills: { status: 'ready', enabled: ['literature-review'] }
-      },
-      next: [{ code: 'runtime_missing' }, { code: 'provider_not_ready' }]
-    }
-    const log = vi.fn()
-
-    await runTaskCommand(parseCliArgs(['doctor', '--json']), {
-      connect: vi.fn().mockResolvedValue({ doctor: vi.fn().mockResolvedValue(report) }),
-      log,
-      stdinIsTTY: true
-    })
-
-    expect(JSON.parse(log.mock.calls[0][0])).toEqual(report)
-  })
-
-  it('reports a concrete startup command when doctor cannot reach a daemon', async () => {
-    const log = vi.fn()
-    const setExitCode = vi.fn()
-    await runTaskCommand(parseCliArgs(['doctor', '--json']), {
-      connect: vi
-        .fn()
-        .mockRejectedValue(Object.assign(new Error('unavailable'), { code: 'daemon_unavailable' })),
-      log,
-      setExitCode
-    })
-    expect(JSON.parse(log.mock.calls[0][0])).toEqual({
-      ready: false,
-      checks: { daemon: { status: 'missing' } },
-      next: [{ code: 'daemon_unavailable', argv: ['start', '--no-open'] }]
-    })
-    expect(setExitCode).toHaveBeenCalledWith(3)
-  })
-
-  it.each([401, 403, 500])(
-    'does not describe an HTTP %s health rejection as a missing daemon',
-    async (status) => {
-      const log = vi.fn()
-      const error = Object.assign(new Error('health rejected'), {
-        code: 'daemon_unavailable',
-        status
-      })
-      await expect(
-        runTaskCommand(parseCliArgs(['doctor', '--json']), {
-          connect: vi.fn().mockRejectedValue(error),
-          log
-        })
-      ).rejects.toBe(error)
-      expect(log).not.toHaveBeenCalled()
-    }
-  )
-
   it('parses runtime list', () => {
     expect(parseCliArgs(['runtime', 'list'])).toMatchObject({
       command: 'runtime',

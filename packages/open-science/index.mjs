@@ -1056,7 +1056,8 @@ export class OpenScienceClient {
       error?.message ?? `Open-Science request failed (${response.status}).`,
       {
         code: error?.code,
-        status: response.status
+        status: response.status,
+        correlationId: response.headers.get('x-correlation-id')
       }
     )
   }

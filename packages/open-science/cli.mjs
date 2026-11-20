@@ -53,6 +53,9 @@ Commands:
   status      Show local service status, App sessions, and persistent running
   url         Print the authenticated web URL
   mcp         Start or reuse the local service and serve research tools over MCP stdio (--profile <path>)
+  tools list [group] [--check-service] --json  Discover capabilities and optionally probe service support
+  tools describe <name> --json                Read the capability input schema
+  tools call <name> --json                    Invoke with a JSON object on stdin
   doctor --json  Inspect headless readiness
   runtime list          List detected Agent runtimes
   runtime install codex   Prepare the app-managed Codex runtime
@@ -230,6 +233,7 @@ const TASK_COMMANDS = new Set([
 ])
 const GROUP_COMMANDS = new Set([
   'codex',
+  'tools',
   'runtime',
   'project',
   'session',
@@ -251,6 +255,9 @@ const POSITIONAL_LIMITS = new Map([
   ['paths', 0],
   ['mcp', 0],
   ['doctor', 0],
+  ['tools list', 1],
+  ['tools describe', 1],
+  ['tools call', 1],
   ['runtime list', 0],
   ['runtime install', 1],
   ['provider add', 0],
@@ -340,7 +347,16 @@ export const parseCliArgs = (argv) => {
           ? ['--help', '-h', '--config-root', '--profile']
           : command === 'help'
             ? ['--help', '-h']
-            : undefined
+            : command === 'doctor' || command === 'tools'
+              ? [
+                  '--json',
+                  '--help',
+                  '-h',
+                  '--config-root',
+                  '--profile',
+                  ...(command === 'tools' ? ['--check-service'] : [])
+                ]
+              : undefined
   const subcommand =
     (GROUP_COMMANDS.has(command) && args[0] && !args[0].startsWith('-')) ||
     (command === 'run' && ['status', 'cancel', 'wait'].includes(args[0]))
@@ -367,6 +383,7 @@ export const parseCliArgs = (argv) => {
       options.passwordStore = arg.slice('--password-store='.length)
     else if (arg === '--no-sandbox') options.noSandbox = true
     else if (arg === '--json') options.json = true
+    else if (arg === '--check-service' && command === 'tools') options.checkService = true
     else if (arg === '--force') options.force = true
     else if (arg === '--jsonl') options.jsonl = true
     else if (arg === '--wait') options.wait = true
@@ -438,6 +455,9 @@ export const parseCliArgs = (argv) => {
     options
   }
   if (localOptions) {
+    if (!options.help && (command === 'doctor' || command === 'tools') && !options.json) {
+      throw new CliUsageError(`${command} requires --json.`)
+    }
     assertPositionalLimit(command, subcommand, positionals)
     return parsed
   }
@@ -522,9 +542,6 @@ export const parseCliArgs = (argv) => {
   }
   if (options.json && options.jsonl) {
     throw new CliUsageError('Use only one of --json or --jsonl.')
-  }
-  if (command === 'doctor' && !options.json) {
-    throw new CliUsageError('doctor requires --json.')
   }
   if (command === 'runtime' && subcommand !== 'list' && subcommand !== 'install') {
     throw new CliUsageError(`Unknown command: runtime ${subcommand ?? ''}`.trimEnd())
@@ -1567,30 +1584,47 @@ const assertNoClearConflict = (clear, present, label) => {
   if (clear && present) throw new CliUsageError(`Cannot set and clear ${label} together.`)
 }
 
+const runAgentCommand = async ({ command, subcommand, positionals = [], options }, deps) => {
+  const { AgentError, invokeAgentCapability } = await import('./agent-adapter.mjs')
+  const [operand] = positionals
+  let name
+  let input
+  if (command === 'doctor') {
+    name = 'doctor'
+    input = {}
+  } else if (subcommand === 'list') {
+    name = 'list_capabilities'
+    input = { group: operand, checkService: options.checkService }
+  } else if (!options.checkService && subcommand === 'describe' && operand) {
+    name = 'describe_capability'
+    input = { name: operand }
+  } else if (!options.checkService && subcommand === 'call' && operand) {
+    name = operand
+    const text = deps.stdinIsTTY ? '' : (await deps.readStdin()).trim()
+    try {
+      input = text ? JSON.parse(text) : {}
+    } catch {
+      throw new AgentError('invalid_request')
+    }
+  } else {
+    throw new AgentError('invalid_request', {
+      message: 'Use tools list, tools describe <name>, or tools call <name>.',
+      next: [{ action: 'show_help', executable: 'open-science', argv: ['tools', '--help'] }]
+    })
+  }
+  const result = await invokeAgentCapability(name, input, {
+    exposure: 'cli',
+    configRoot: options.configRoot,
+    connect: deps.connect
+  })
+  deps.log(JSON.stringify({ result: result ?? null }))
+}
+
 export const runTaskCommand = async (parsed, dependencies = {}) => {
   const deps = { ...TASK_DEPS, ...dependencies }
   const { command, subcommand, positionals = [], options } = parsed
-  let client
-  try {
-    client = await deps.connect({ configRoot: options.configRoot })
-  } catch (error) {
-    if (command !== 'doctor' || error?.code !== 'daemon_unavailable' || error?.status !== undefined)
-      throw error
-    deps.log(
-      JSON.stringify({
-        ready: false,
-        checks: { daemon: { status: 'missing' } },
-        next: [{ code: 'daemon_unavailable', argv: ['start', '--no-open'] }]
-      })
-    )
-    deps.setExitCode(3)
-    return
-  }
-
-  if (command === 'doctor') {
-    deps.log(JSON.stringify(await client.doctor()))
-    return
-  }
+  if (command === 'doctor' || command === 'tools') return runAgentCommand(parsed, deps)
+  const client = await deps.connect({ configRoot: options.configRoot })
 
   if (command === 'runtime' && subcommand === 'list') {
     const runtimes = await client.listRuntimes()
@@ -2391,25 +2425,28 @@ export const reportCliError = (error, argv = process.argv.slice(2), dependencies
     },
     ...dependencies
   }
-  const code = error?.code ?? 'command_failed'
+  const agentError = error?.name === 'AgentError' ? error.details : undefined
+  const code = agentError?.code ?? error?.code ?? 'command_failed'
   const message = error instanceof Error ? error.message : String(error)
   const exitCode =
     error?.exitCode ??
-    (code === 'daemon_unavailable'
-      ? 3
-      : [
-            'project_not_found',
-            'session_not_found',
-            'run_not_found',
-            'artifact_not_found',
-            'literature_item_not_found'
-          ].includes(code) || code === 'specialist_not_found'
-        ? 4
-        : 1)
+    (code === 'invalid_request' && agentError
+      ? 2
+      : code === 'daemon_unavailable'
+        ? 3
+        : [
+              'project_not_found',
+              'session_not_found',
+              'run_not_found',
+              'artifact_not_found',
+              'literature_item_not_found'
+            ].includes(code) || code === 'specialist_not_found'
+          ? 4
+          : 1)
   if (argv.includes('--json') || argv.includes('--jsonl')) {
     deps.error(
       JSON.stringify({
-        error: {
+        error: agentError ?? {
           code,
           message,
           ...(error?.correlationId ? { correlationId: error.correlationId } : {}),
@@ -2490,7 +2527,20 @@ const pathsCommand = async (options) => {
 }
 
 export const runCli = async (argv = process.argv.slice(2)) => {
-  const parsed = parseCliArgs(argv)
+  let parsed
+  try {
+    parsed = parseCliArgs(argv)
+  } catch (error) {
+    if (
+      error instanceof CliUsageError &&
+      ['doctor', 'tools'].includes(argv[0]) &&
+      argv.includes('--json')
+    ) {
+      const { AgentError } = await import('./agent-adapter.mjs')
+      throw new AgentError('invalid_request')
+    }
+    throw error
+  }
   const { command, options } = parsed
   if (options.help || !command || command === 'help' || command === '-h' || command === '--help') {
     console.log(commandHelp(command === 'help' ? parsed.positionals?.[0] : command))
@@ -2504,6 +2554,7 @@ export const runCli = async (argv = process.argv.slice(2)) => {
     const { runResearchMcpServer } = await import('./mcp.mjs')
     const { version } = await readCliMetadata()
     await runResearchMcpServer({
+      configRoot: options.configRoot,
       version,
       startService: async (signal) => {
         // stdout belongs to the MCP transport. The persistent service has its own startup log.
@@ -2529,7 +2580,7 @@ export const runCli = async (argv = process.argv.slice(2)) => {
   else if (command === 'status') await statusCommand(options)
   else if (command === 'url') await urlCommand(options)
   else if (command === 'codex' && parsed.subcommand === 'login') await codexLoginCommand(options)
-  else if (TASK_COMMANDS.has(command)) await runTaskCommand(parsed)
+  else if (command === 'tools' || TASK_COMMANDS.has(command)) await runTaskCommand(parsed)
   else throw new CliUsageError(`Unknown command: ${command}\n\n${usage}`)
 }
 

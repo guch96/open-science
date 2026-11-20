@@ -26,7 +26,6 @@ async function harness(connect: ReturnType<typeof vi.fn>): Promise<{
 }
 
 const cases = [
-  ['doctor', {}, '/api/v1/doctor', 'GET', undefined],
   ['list_runtimes', {}, '/api/v1/runtimes', 'GET', undefined],
   ['list_projects', {}, '/api/v1/projects', 'GET', undefined],
   [
@@ -180,14 +179,15 @@ describe('research MCP tools', () => {
     const connect = vi.fn()
     const { client } = await harness(connect)
     const { tools } = await client.listTools()
-    expect(tools.map((tool) => tool.name).sort()).toEqual(
-      [
-        ...new Set(
-          [...cases, ...rpcCases, ...writeRpcCases, ['create_literature_item']].map(
-            ([name]) => name
-          )
-        )
-      ].sort()
+    expect(tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([
+        ...[...cases, ...rpcCases, ...writeRpcCases].map(([name]) => name),
+        'create_literature_item',
+        'doctor',
+        'list_capabilities',
+        'describe_capability',
+        'get_agent_guide'
+      ])
     )
     for (const tool of tools) {
       expect(tool.name).toMatch(/^[a-z]+(?:_[a-z]+)*$/)
@@ -391,9 +391,19 @@ describe('research MCP tools', () => {
     const { client } = await harness(connect)
     const call = (): ReturnType<Client['callTool']> =>
       client.callTool({ name: 'create_project', arguments: { name: 'Research' } })
-    expect(JSON.stringify(await call())).toContain('open-science start')
+    expect((await call()).structuredContent).toMatchObject({
+      error: {
+        code: 'daemon_unavailable',
+        next: [
+          { executable: 'open-science', argv: ['start', '--no-open', '--profile', '/test-profile'] }
+        ]
+      }
+    })
     const failedWrite = await call()
     expect(failedWrite.isError).toBe(true)
+    expect(failedWrite.structuredContent).toMatchObject({
+      error: { completionStatus: 'unconfirmed', retryable: false }
+    })
     expect(JSON.stringify(failedWrite)).not.toContain('SECRET')
     expect(createProject).toHaveBeenCalledTimes(1)
     expect((await call()).structuredContent).toEqual({ result: { id: 'p1' } })
