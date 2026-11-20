@@ -4,7 +4,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, openSync, realpathSync } from 'node:fs'
-import { mkdir, open, readFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { text as readStreamText } from 'node:stream/consumers'
 import { spawn } from 'node:child_process'
