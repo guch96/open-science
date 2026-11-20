@@ -136,6 +136,12 @@ async function deliveryStatus({ runId, reportName, tableName, reportPath, tableP
   )
   const available = outputs.filter(({ status }) => status === 'available' || status === 'verified')
   const verified = outputs.every(({ status }) => status === 'verified')
+  const unverifiedDefaults = outputs
+    .filter(
+      ({ role, status }) => status === 'available' && !(role === 'report' ? reportPath : tablePath)
+    )
+    .map(({ role }) => `${role}Path`)
+    .join(' and ')
   const execution = run.execution ?? { status: 'unconfirmed' }
   const completed =
     run.status === 'completed' &&
@@ -158,7 +164,22 @@ async function deliveryStatus({ runId, reportName, tableName, reportPath, tableP
             : 'missing',
       verified,
       outputs
-    }
+    },
+    ...(unverifiedDefaults
+      ? {
+          next: [
+            {
+              action: 'get_delivery_status',
+              runId,
+              reportName,
+              tableName,
+              ...(reportPath ? { reportPath } : {}),
+              ...(tablePath ? { tablePath } : {}),
+              message: `No file verified at the default path for ${unverifiedDefaults}. If already downloaded elsewhere, recheck using ${unverifiedDefaults} from the download receipt. Otherwise download the files first. No background verification is pending.`
+            }
+          ]
+        }
+      : {})
   }
 }
 
@@ -195,7 +216,7 @@ export const artifactCapabilities = [
   {
     name: 'get_delivery_status',
     description:
-      'Check execution and delivery for one Run. File verification checks source bytes and SHA-256. A complete handoff also requires Notebook dispatch and a completed Run; scientific correctness is separate.',
+      'Check execution and delivery for one Run. Pass reportPath and tablePath from the download receipts for custom locations; omitted paths check only the default delivery directory. Available means an Artifact exists but its file did not verify at the checked path. A complete handoff requires matching source bytes and SHA-256, a completed Notebook with kernel dispatch, and a completed Run.',
     inputSchema: z.strictObject({
       runId,
       reportName: outputName,

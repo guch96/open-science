@@ -1445,6 +1445,23 @@ it('delivers a pinned Artifact through either entry point without overwriting lo
     handoffStatus: 'incomplete', execution: { status: 'failed', kernelDispatched: true }
   })
   Object.assign(run, { execution: { status: 'completed', sessionId: 's1', kernelDispatched: true } })
+  expect(await both('get_delivery_status', expected)).toMatchObject({
+    handoffStatus: 'incomplete',
+    delivery: {
+      status: 'available',
+      outputs: [
+        { role: 'report', path: reportPath, status: 'verified' },
+        { role: 'table', status: 'available' }
+      ]
+    },
+    next: [
+      {
+        action: 'get_delivery_status',
+        ...expected,
+        message: expect.stringContaining('tablePath from the download receipt')
+      }
+    ]
+  })
   expect(await both('get_delivery_status', { ...expected, tablePath })).toMatchObject({
     handoffStatus: 'complete', delivery: { status: 'verified', verified: true }
   })
