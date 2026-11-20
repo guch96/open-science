@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { z } from 'zod'
 import { existingMcpCapabilities } from './agent-capabilities.mjs'
+import { getAgentPackageCapabilities } from './agent-package-capabilities.mjs'
 import { connectToOpenScience } from './index.mjs'
 
 export const agentGuideUri = 'openscience://agent/guide'
@@ -15,6 +16,8 @@ Use the capability catalog and detail schemas to find the operations the install
 Use the user's research instructions and choose an explicit Project. Leave provider credentials, Notebook continuation, and sensitive export confirmation to the user in Open-Science. After a lost response, query the original request or operation before deciding what to do next.
 
 Notebook working files are not delivered Artifacts. Check the actual report and result files returned by the delivery capabilities. In a new environment, import a .science package and inspect the Session read-only; ask the user before creating a writable Fork.
+
+Package exports target a new absolute .science path. Keep the operation and correlation IDs. If the bounded wait ends, use the package operation lookup with an original ID; it only reports on a matching operation. An unconfirmed result means the service or delivered file cannot prove what happened. Do not repeat the write automatically. Package operations do not have durable research receipts. A blocked sensitive export requires the user's action; the agent cannot approve it.
 `
 
 const policies = {
@@ -335,7 +338,8 @@ const definitions = [
     probeOnly: true,
     handler: doctor
   },
-  ...existingMcpCapabilities
+  ...existingMcpCapabilities,
+  ...getAgentPackageCapabilities(AgentError)
 ]
 const capabilities = new Map(definitions.map((entry) => [entry.name, entry]))
 

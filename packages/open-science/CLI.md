@@ -656,22 +656,39 @@ unavailable references fail with `invalid_configuration`.
 
 ## Session package export and import
 
-Export a Session to a `.science` package at an explicit path. The Session must be idle:
+Export an idle Session with the shared Agent capability. Use explicit source IDs and a new
+absolute `.science` path in an existing directory on the same machine:
 
 ```bash
-open-science session export <session-id> --project <id-or-name> --output ~/backups/session.science
+printf '%s\n' '{"projectId":"PROJECT_ID","sessionId":"SESSION_ID","destinationPath":"/absolute/path/result.science"}' \
+  | open-science tools call export_session --json
 ```
 
-`--project` resolves a Project by id or name and selects which Session to export. `--output` must
-be an absolute or relative path ending in `.science`; when it is omitted the command fails instead
-of opening a native save dialog, because the CLI runs without a desktop session. The command
-returns the saved status and written path as JSON with `--json`.
+The MCP `export_session` tool takes the same arguments. The CLI shortcut
+`open-science session export SESSION_ID --project PROJECT_ID_OR_NAME --output PATH --json`
+resolves the Project and path then calls the same capability. `waitMs` (shortcut: `--timeout-ms`)
+defaults to 30,000 and accepts 1–300,000 ms. The wait only limits observation; the service can
+finish the export afterward. Existing files, directories and symbolic links are never replaced.
 
-Both package commands allow up to one hour by default. Use `--timeout-ms <milliseconds>`
-to adjust the request deadline for large packages or slower disks.
+Save the returned `operationId` and `correlationId`. After a timeout, pass either original
+reference to `get_package_operation`; also pass the original scope fields when available:
+
+```bash
+printf '%s\n' '{"correlationId":"ORIGINAL_CORRELATION_UUID","kind":"export"}' \
+  | open-science tools call get_package_operation --json
+```
+
+The lookup is read-only. It can report pending or verify the package actually delivered at the
+local path, including its size and SHA-256. If the service has restarted, a newer snapshot
+replaced the original, or the file cannot be verified, expect `completionStatus: "unconfirmed"`.
+Keep the original references and check the destination; do not repeat the export automatically.
+Package operations do not offer the durable receipts that research submissions provide.
+If Open-Science detects sensitive content, the export is blocked and returned with
+`requiresUser: true`; the Agent has no confirmation or force option.
 
 Import a `.science` package. Import is non-interactive by design and requires an explicit
-confirmation flag:
+confirmation flag. It waits up to one hour by default; use `--timeout-ms <milliseconds>` to
+adjust the request deadline:
 
 ```bash
 open-science session import ~/backups/session.science --new-project "Restored session" --non-interactive
@@ -688,12 +705,8 @@ before retrying, since another import can create a second Session. For a rejecte
 include the returned `error.correlationId` (when present) when looking up the service log. The
 package file is read directly from disk, so no upload or drag-and-drop step is involved.
 
-Both commands dispatch the same `sessions:export-package`, `sessions:import-package`, and
-`sessions:package-operation` application commands the desktop app uses, over the authenticated
-loopback HTTP channel. They are unavailable to remote Web sessions by design: the channel is
-installed as a rejecting stub for remote callers, and the handler additionally requires a local
-caller, so arbitrary-path file read and write stay confined to loopback callers that hold the
-service token.
+Both commands reuse the Package Owner over the authenticated loopback channel. They are
+unavailable to remote Web sessions: arbitrary-path file reads and writes require local access.
 
 ### Fork an existing Session
 

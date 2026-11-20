@@ -2351,35 +2351,14 @@ describe('Session package CLI', () => {
     }
   )
 
-  it('passes resolved paths, destinations and transfer deadlines to the SDK', async () => {
+  it('passes resolved import paths, destinations and transfer deadlines to the SDK', async () => {
     const client = {
       listProjects: vi.fn().mockResolvedValue([{ id: 'project-1', name: 'Research' }]),
-      exportSessionPackage: vi.fn().mockResolvedValue({ saved: true }),
       importSessionPackage: vi
         .fn()
         .mockResolvedValue({ projectId: 'project-2', sessionId: 'session-2' })
     }
     const deps = { connect: vi.fn().mockResolvedValue(client), log: vi.fn() }
-    await runTaskCommand(
-      parseCliArgs([
-        'session',
-        'export',
-        'session-1',
-        '--project',
-        'Research',
-        '--output',
-        'out.science',
-        '--timeout-ms',
-        '7200000'
-      ]),
-      deps
-    )
-    expect(client.exportSessionPackage).toHaveBeenCalledWith(
-      'project-1',
-      'session-1',
-      resolve('out.science'),
-      { timeoutMs: 7200000 }
-    )
     for (const [flags, target] of [
       [[], {}],
       [['--project', 'Research'], { projectId: 'project-1' }],

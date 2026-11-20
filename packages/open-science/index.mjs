@@ -406,6 +406,25 @@ export class OpenScienceClient {
     })
   }
 
+  startAgentPackageExport(projectId, sessionId, destinationPath, correlationId, options) {
+    return this.callRpc(
+      'sessions:package-operation',
+      [
+        {
+          action: 'agent-export',
+          session: { projectId, sessionId },
+          destinationPath,
+          correlationId
+        }
+      ],
+      options
+    )
+  }
+
+  getPackageOperation(options) {
+    return this.callRpc('sessions:package-operation', [{ action: 'snapshot' }], options)
+  }
+
   importSessionPackage(target, sourcePath, options, rpcOptions) {
     if (options?.nonInteractive !== true)
       throw new TypeError('Non-interactive Session import requires explicit confirmation.')

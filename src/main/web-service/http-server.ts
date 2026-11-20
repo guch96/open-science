@@ -469,6 +469,7 @@ const applicationCommandErrorStatus = (error: ApplicationCommandError): number =
   if (error.code === 'command-unavailable') return 404
   if (error.code === 'session-details-conflict') return 409
   if (error.code === 'session-revision-conflict') return 409
+  if (error.code === 'session-package-operation-conflict') return 409
   return 500
 }
 
@@ -1614,15 +1615,20 @@ const startWebHttpServer = async (options: WebServerOptions): Promise<RunningWeb
             .update('\0')
             .update(clientPrincipalId)
             .digest('hex'),
-          taskCapabilities: options.tasks
-            ? [
-                'permission-prompts-none',
-                ...(options.tasks.doctor ? ['doctor'] : []),
-                ...(!externalAuthorization && options.tasks.supportsSubmissions?.()
-                  ? ['durable-submissions']
-                  : [])
-              ]
-            : [],
+          taskCapabilities: [
+            ...(options.tasks
+              ? [
+                  'permission-prompts-none',
+                  ...(options.tasks.doctor ? ['doctor'] : []),
+                  ...(!externalAuthorization && options.tasks.supportsSubmissions?.()
+                    ? ['durable-submissions']
+                    : [])
+                ]
+              : []),
+            ...(auth.ok && rpcChannels.includes('sessions:package-operation')
+              ? ['agent-package-operations']
+              : [])
+          ],
           rpcProtocolVersion: WEB_RPC_PROTOCOL_VERSION,
           rpcCapabilities: auth.ok ? WEB_RPC_CAPABILITIES : [RUNTIME_PAYLOAD_CAPABILITY],
           rpcChannels,

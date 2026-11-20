@@ -23,6 +23,7 @@ export const APPLICATION_COMMAND_ERROR_CODES = [
   'session-size-limit',
   'session-package-source-unavailable',
   'session-package-invalid-archive',
+  'session-package-operation-conflict',
   'session-revision-conflict',
   'SESSION_RUNTIME_WRITER_LOST',
   'csl-file-too-large',
