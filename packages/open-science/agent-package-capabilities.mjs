@@ -124,8 +124,12 @@ async function packageStatus(snapshot, expected, signal) {
     ...snapshot.session,
     ...(snapshot.agent.destinationPath ? { destinationPath: snapshot.agent.destinationPath } : {}),
     ...(snapshot.agent.sourcePath ? { sourcePath: snapshot.agent.sourcePath } : {}),
-    ...(snapshot.importTarget?.projectId ? { targetProjectId: snapshot.importTarget.projectId } : {}),
-    ...(snapshot.importTarget?.projectName ? { newProjectName: snapshot.importTarget.projectName } : {})
+    ...(snapshot.importTarget?.projectId
+      ? { targetProjectId: snapshot.importTarget.projectId }
+      : {}),
+    ...(snapshot.importTarget?.projectName
+      ? { newProjectName: snapshot.importTarget.projectName }
+      : {})
   }
   if (busy(snapshot)) {
     return { ...reference, completionStatus: 'pending', next: [lookup(reference)] }
@@ -156,7 +160,9 @@ async function packageStatus(snapshot, expected, signal) {
         ...reference,
         completionStatus: 'completed',
         session: { ...imported, readOnly: true },
-        ...(snapshot.result.packageSummary ? { packageSummary: snapshot.result.packageSummary } : {}),
+        ...(snapshot.result.packageSummary
+          ? { packageSummary: snapshot.result.packageSummary }
+          : {}),
         next: [
           { action: 'get_session', ...imported },
           { action: 'list_artifacts', sessionId: imported.sessionId }
@@ -212,7 +218,8 @@ function importFailureDetails(failure) {
   if (failure === 'invalid-archive')
     return {
       code: 'package_invalid_archive',
-      message: 'The selected file is not a valid .science archive. Check or replace the source file.',
+      message:
+        'The selected file is not a valid .science archive. Check or replace the source file.',
       owner: 'agent',
       requiresUser: false,
       next: [{ action: 'check_package_input' }]
@@ -220,7 +227,8 @@ function importFailureDetails(failure) {
   if (failure === 'source-unavailable')
     return {
       code: 'package_source_unavailable',
-      message: 'The package is missing or unreadable. Check the absolute source path in this profile.',
+      message:
+        'The package is missing or unreadable. Check the absolute source path in this profile.',
       owner: 'agent',
       requiresUser: false,
       next: [{ action: 'check_package_input' }]
@@ -235,7 +243,8 @@ function importFailureDetails(failure) {
     }
   return {
     code: 'package_import_failed',
-    message: 'Open-Science could not import this package. Check its contents and the selected Project.',
+    message:
+      'Open-Science could not import this package. Check its contents and the selected Project.',
     owner: 'service',
     requiresUser: false,
     next: [{ action: 'inspect_package_state' }]
@@ -250,7 +259,12 @@ async function waitForPackageOperation(client, snapshot, expected, signal) {
   return packageStatus(snapshot, expected, signal)
 }
 
-async function requirePackageOperations(client, signal, AgentError, capability = serviceCapability) {
+async function requirePackageOperations(
+  client,
+  signal,
+  AgentError,
+  capability = serviceCapability
+) {
   const { taskCapabilities } = await client.health({ signal })
   if (!Array.isArray(taskCapabilities) || !taskCapabilities.includes(capability))
     throw new AgentError('unsupported_capability', { requiresUser: true })
@@ -270,11 +284,10 @@ async function startPackageOperation(client, expected, waitMs, signal, start, Ag
   }
   if (matchesPackageOperation(snapshot, expected))
     expected = { ...expected, operationId: snapshot.id }
-  const result = await waitForPackageOperation(client, snapshot, expected, observation).catch(
-    () => unconfirmed(expected)
+  const result = await waitForPackageOperation(client, snapshot, expected, observation).catch(() =>
+    unconfirmed(expected)
   )
-  if (result.completionStatus === 'failed')
-    throw new AgentError(result.code, { ...result, waitMs })
+  if (result.completionStatus === 'failed') throw new AgentError(result.code, { ...result, waitMs })
   return { ...result, waitMs }
 }
 
@@ -307,9 +320,21 @@ export const getAgentPackageCapabilities = (AgentError) => [
         destinationPath: normalize(destinationPath),
         correlationId: randomUUID()
       }
-      return startPackageOperation(client, expected, waitMs, signal, (observation) =>
-        client.startAgentPackageExport(projectId, sessionId, expected.destinationPath,
-          expected.correlationId, { signal: observation }), AgentError)
+      return startPackageOperation(
+        client,
+        expected,
+        waitMs,
+        signal,
+        (observation) =>
+          client.startAgentPackageExport(
+            projectId,
+            sessionId,
+            expected.destinationPath,
+            expected.correlationId,
+            { signal: observation }
+          ),
+        AgentError
+      )
     }
   },
   {
@@ -317,12 +342,22 @@ export const getAgentPackageCapabilities = (AgentError) => [
     group: 'delivery',
     description:
       'Import a local .science package as read-only research history. Never executes its Notebook or creates a Fork. Use get_package_operation after an interrupted wait.',
-    inputSchema: z.strictObject({
-      sourcePath: pathSchema.describe('Absolute path to the local .science package.'),
-      targetProjectId: id.describe('Existing Project ID. Do not combine with newProjectName.').optional(),
-      newProjectName: projectName.describe('Name of a new Project. Omit both destinations to use the package Project name in a new Project.').optional(),
-      waitMs: waitMsSchema.describe('Maximum time to observe the import. The import may finish afterward.')
-    }).refine(({ targetProjectId, newProjectName }) => !(targetProjectId && newProjectName)),
+    inputSchema: z
+      .strictObject({
+        sourcePath: pathSchema.describe('Absolute path to the local .science package.'),
+        targetProjectId: id
+          .describe('Existing Project ID. Do not combine with newProjectName.')
+          .optional(),
+        newProjectName: projectName
+          .describe(
+            'Name of a new Project. Omit both destinations to use the package Project name in a new Project.'
+          )
+          .optional(),
+        waitMs: waitMsSchema.describe(
+          'Maximum time to observe the import. The import may finish afterward.'
+        )
+      })
+      .refine(({ targetProjectId, newProjectName }) => !(targetProjectId && newProjectName)),
     annotations: { ...readOnly, readOnlyHint: false, idempotentHint: false },
     exposure: { cli: true, mcp: true },
     serviceCapability: importCapability,
@@ -337,9 +372,17 @@ export const getAgentPackageCapabilities = (AgentError) => [
         ...(newProjectName ? { newProjectName } : {})
       }
       const target = { projectId: targetProjectId, projectName: newProjectName }
-      return startPackageOperation(client, expected, waitMs, signal, (observation) =>
-        client.startAgentPackageImport(expected.sourcePath, target,
-          expected.correlationId, { signal: observation }), AgentError)
+      return startPackageOperation(
+        client,
+        expected,
+        waitMs,
+        signal,
+        (observation) =>
+          client.startAgentPackageImport(expected.sourcePath, target, expected.correlationId, {
+            signal: observation
+          }),
+        AgentError
+      )
     }
   },
   {

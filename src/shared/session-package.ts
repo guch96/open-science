@@ -167,7 +167,11 @@ export type BrowserPackageTransfer = {
   totalBytes: number
 }
 
-const agentPackageSourcePathSchema = z.string().min(1).max(32768).regex(/\.science$/i)
+const agentPackageSourcePathSchema = z
+  .string()
+  .min(1)
+  .max(32768)
+  .regex(/\.science$/i)
 const agentPackageOperationReferenceSchema = z
   .object({
     correlationId: z.uuid(),

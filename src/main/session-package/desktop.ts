@@ -364,7 +364,10 @@ export class SessionPackageDesktop {
     if (request.action === 'agent-import') {
       const { sourcePath, target, correlationId } = request
       if (!isAbsolute(sourcePath) || sourcePath.includes('\0'))
-        throw new ApplicationCommandError('invalid-command-arguments', 'Use an absolute package path.')
+        throw new ApplicationCommandError(
+          'invalid-command-arguments',
+          'Use an absolute package path.'
+        )
       const current = this.operations.snapshot
       if (
         this.operations.active ||
@@ -1348,7 +1351,9 @@ export class SessionPackageDesktop {
                   })
                 throw error
               })
-              if (!info.isFile() || info.size > PACKAGE_MAX_BYTES)
+              if (!info.isFile())
+                throw new PackageSourceUnavailableError('Package source is not a file.')
+              if (info.size > PACKAGE_MAX_BYTES)
                 throw new Error('Session package exceeds the archive limit.')
               const archive = join(directory, 'session.science')
               await this.copyArchive(input, archive, 'copying', signal)
@@ -1382,19 +1387,21 @@ export class SessionPackageDesktop {
                             packageSummary = {
                               ...summary,
                               omissionCount: omissions.length + (webOmissions?.length ?? 0),
-                              externalOmissionCount: omissions.filter(({ kind }) => kind === 'external').length
+                              externalOmissionCount: omissions.filter(
+                                ({ kind }) => kind === 'external'
+                              ).length
                             }
                           }
                         : nonInteractive
-                        ? undefined
-                        : async (preview, budgetSignal) => {
-                            await this.operations.waitForImport(
-                              { preview, filename: basename(input) },
-                              budgetSignal
-                            )
-                            confirmed = true
-                            signal.throwIfAborted()
-                          },
+                          ? undefined
+                          : async (preview, budgetSignal) => {
+                              await this.operations.waitForImport(
+                                { preview, filename: basename(input) },
+                                budgetSignal
+                              )
+                              confirmed = true
+                              signal.throwIfAborted()
+                            },
                       target
                     )
                     .catch((error: unknown) => {

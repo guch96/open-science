@@ -50,6 +50,10 @@
    返回 `unconfirmed`。查询仅匹配当前快照，不提供研究提交级别的持久回执。导出入口会阻断未经确认的敏感包；
    同一操作与具体内容绑定的人工确认由 #65 补齐。真实 CLI JSON、MCP stdio 与 Package Owner 集成覆盖
    文件内容、目标冲突、回执关联、超时和敏感阻断。
+   [#63](https://github.com/guch96/open-science/issues/63) 通过同一 Package Owner 的本地导入入口，
+   从绝对路径导入 `.science`，将已校验包的摘要和新建只读 Session 关联到原操作。使用实际 Project/Session ID
+   查阅 Session、历史回答和已发布 Artifact。测试只迁移包字节到另一个空数据目录，验证拒绝写入、
+   丢失回执后查询原操作以及快照被覆盖时保留 `unconfirmed`；独立机器或容器验收留给 #67。
 4. [#66–#67](https://github.com/guch96/open-science/issues/54) 以实际构建的 npm 包运行 README 两条验收路径。
    只给提示语时，准备好后等用户研究指令；给包时在无源数据库、Notebook 工作目录或凭据的独立环境先只读检查。
 5. [#68](https://github.com/guch96/open-science/issues/68) 在目标版本发布后从 registry 复验。
