@@ -3408,6 +3408,49 @@ describe('startWebHttpServer', () => {
     expect(rpc.invoke).not.toHaveBeenCalled()
   })
 
+  it('does not treat SDK bearer credentials as a human Notebook continuation', async () => {
+    const staticRoot = await mkdtemp(join(tmpdir(), 'open-science-web-static-'))
+    roots.push(staticRoot)
+    const channel = 'acp:continue-notebook-execution'
+    const invoke = vi.fn(async () => ({ accepted: true }))
+    const server = await startTestWebHttpServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'local-token',
+      staticRoot,
+      rpc: { channels: () => [channel], invoke: vi.fn(), releaseClient: vi.fn(), dispose: vi.fn() },
+      applicationCommands: {
+        localWeb: { commandNames: () => [channel], invoke },
+        remoteWeb: { commandNames: () => [], rejectedCommandNames: () => [], invoke: vi.fn() }
+      },
+      bootstrap: {
+        appName: 'Open-Science',
+        appVersion: '0.0.0',
+        configRoot: '/fake/root',
+        platform: 'test',
+        versions: { electron: '1', chrome: '1', node: '1' }
+      }
+    })
+    servers.push(server)
+    const url = `http://127.0.0.1:${server.port}`
+    const call = (headers: Record<string, string>, suffix = ''): Promise<Response> =>
+      fetch(`${url}/rpc/${encodeURIComponent(channel)}${suffix}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({
+          protocolVersion: WEB_RPC_PROTOCOL_VERSION,
+          args: [{ projectId: 'p1', sessionId: 's1', refusalId: 'r1', text: 'Continue.' }]
+        })
+      })
+    expect((await call({ authorization: 'Bearer local-token' })).status).toBe(403)
+    expect((await call({ authorization: 'Bearer local-token', origin: url })).status).toBe(403)
+    expect((await call({}, '?token=local-token')).status).toBe(403)
+    expect(invoke).not.toHaveBeenCalled()
+    expect((await call({ cookie: 'open_science_web_token=local-token', origin: url })).status).toBe(
+      200
+    )
+  })
+
   it('pins the remote Web Notebook capability matrix', () => {
     const channelsFor = (prefix: string): string[] =>
       Object.entries(WEB_INVOKE_CHANNELS)
@@ -5573,7 +5616,7 @@ it('recovers a lost submission response through the real SDK and CLI without sta
       listSessions: vi.fn(),
       getSession: vi.fn(),
       startRun: vi.fn(),
-      getRun: () => run,
+      getRun: async () => run,
       cancelRun: vi.fn(),
       listArtifacts: vi.fn(),
       acquireArtifact: vi.fn()

@@ -1294,7 +1294,7 @@ const handleTaskApiRequest = async (
       const runMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)$/)
       if (runMatch && request.method === 'GET') {
         assertExternalAuthorizationCurrent(externalAuthorization)
-        reply(200, { data: tasks.getRun(decodeURIComponent(runMatch[1])) })
+        reply(200, { data: await tasks.getRun(decodeURIComponent(runMatch[1])) })
         return true
       }
       const cancelRunMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)\/cancel$/)
@@ -1804,6 +1804,19 @@ const startWebHttpServer = async (options: WebServerOptions): Promise<RunningWeb
             403,
             'method_not_found',
             `Channel only available from the local app: ${channel}`
+          )
+          return
+        }
+        if (
+          auth.ok &&
+          channel === 'acp:continue-notebook-execution' &&
+          (request.headers.authorization !== undefined || auth.queryToken)
+        ) {
+          webRpcError(
+            response,
+            403,
+            'handler_error',
+            'Continue stopped Notebook work from the Open-Science interface.'
           )
           return
         }

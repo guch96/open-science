@@ -627,7 +627,8 @@ export class OpenScienceClient {
       if (['completed', 'failed', 'cancelled'].includes(run.status)) return run
       if (run.status !== 'running')
         throw new OpenScienceApiError('Unknown Run status.', { code: 'invalid_response' })
-      if (returnOnAttention && run.attention) return run
+      if (returnOnAttention && (run.attention || run.execution?.status === 'waiting_for_user'))
+        return run
       const sleepMs =
         deadline === undefined
           ? pollIntervalMs

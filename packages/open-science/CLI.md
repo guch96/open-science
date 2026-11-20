@@ -640,8 +640,22 @@ open-science run \
   does not cancel, hide, or prevent collection/messaging of children admitted earlier.
 
 Ordinary `--wait` retains its terminal-only behavior. Add `--return-on-attention` to return a
-still-running Run when its Plan needs approval. Plan approval is the only structured Run attention
-in this release; permission and delegated-question events do not cause an attention return.
+still-running Run when its Plan needs approval or Notebook work is stopped pending human
+continuation. Permission and delegated-question events do not cause an attention return.
+
+`get_run` and `wait_run` report Notebook `execution` independently from the outer Run. Execution
+describes the latest Python or R Notebook Run attributed to the exact research prompt: `preparing`,
+`running`, `completed`, `failed`, `unconfirmed`, or `waiting_for_user`. A completed outer Run,
+an unverified kernel dispatch, or a successful cell from a previous prompt does not establish
+Notebook success. A missing `kernelDispatched` is unknown. Check output delivery separately.
+
+For `waiting_for_user`, keep the refusal, Session, and branch references. Once the cause has
+been resolved, the user opens that conversation branch and chooses **Continue Notebook work**
+in **Compute**. CLI and MCP do not expose this action. Do not retry or switch tools, language,
+environment, or Session to bypass it. After the user acts, `get_session` can observe the live
+Notebook execution intent in the same Session; `execution.continuedFromRefusalId` associates the
+new prompt with the original refusal. This association lives in the running service. The
+original Run keeps its own outcome, and opening a fresh Session is not recovery.
 
 Inspect and respond to an active Plan with its exact version and revision:
 

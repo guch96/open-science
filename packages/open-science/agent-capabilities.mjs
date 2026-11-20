@@ -248,7 +248,7 @@ registerResource(
 registerResource(
   'get_session',
   'research',
-  'Inspect Session identity, status, and import or Fork provenance. Pass projectId to verify ownership.',
+  'Inspect Session identity, import or Fork provenance, and the current Notebook intent. Recheck this Session after the user continues stopped Notebook work.',
   { sessionId, projectId: projectId.optional() },
   read,
   (client, { sessionId, projectId }, options) =>
@@ -346,7 +346,7 @@ registerResource(
 registerResource(
   'get_run',
   'research',
-  'Read authoritative run status, progress, result and attention state. Poll this after start_run; a waiting run may require human action in Open-Science.',
+  'Read outer Run status and separate Notebook execution evidence. A completed Run alone does not establish execution or delivery.',
   { runId },
   read,
   (client, args, options) => client.getRun(args.runId, options)
@@ -354,7 +354,7 @@ registerResource(
 registerResource(
   'wait_run',
   'research',
-  'Wait for a Run to finish or need attention. Timeout only stops observation.',
+  'Wait for a Run to finish or need attention, including a stopped Notebook. Timeout only stops observation.',
   { runId, timeoutMs: waitTimeoutMs },
   read,
   async (client, { runId, timeoutMs }, options) => ({

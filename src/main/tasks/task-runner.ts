@@ -1651,6 +1651,10 @@ class TaskRunner {
     return snapshot
   }
 
+  getRunPromptMessageId(runId: string): string | undefined {
+    return this.runs.get(runId)?.promptMessageId || undefined
+  }
+
   async waitForRun(runId: string): Promise<TaskRun> {
     const run = this.runs.get(runId)
     if (!run) throw new TaskRunnerError('run_not_found', `Run not found: ${runId}`)
