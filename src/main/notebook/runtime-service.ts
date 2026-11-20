@@ -1598,7 +1598,7 @@ class NotebookRuntimeService {
         next: {
           action: 'continue_notebook_in_app',
           message:
-            'Resolve the cause, then have the user return to the affected Session and conversation branch and choose Continue Notebook work in Open-Science Compute. Recheck the same Session afterward.'
+            'Resolve the cause, then have the user open the affected Session and branch in the Open-Science desktop app connected to this service. In Compute, choose Continue Notebook work. Recheck the same Session afterward.'
         }
       }
     }

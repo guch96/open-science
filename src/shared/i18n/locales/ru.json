@@ -8669,6 +8669,7 @@
     "Close progress": "Закрыть ход очистки",
     "Waiting for your decision": "Ожидается ваше решение",
     "Continue Notebook work": "Продолжить работу Notebook",
+    "Open the same Session and branch in the Open-Science desktop app, then choose Continue Notebook work in Compute.": "Откройте тот же сеанс и ветку в настольном приложении Open-Science. В разделе «Вычисления» выберите «Продолжить работу Notebook».",
     "Notebook work remains stopped until you explicitly continue. This sends a new guidance message and checks memory again.": "Работа Notebook остаётся остановленной, пока вы явно не продолжите её. Будет отправлено новое сообщение с указаниями и повторно проверена память.",
     "Open in browser": "Открыть в браузере",
     "Close task": "Закрыть задачу",

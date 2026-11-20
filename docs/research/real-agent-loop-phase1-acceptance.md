@@ -28,6 +28,29 @@ turn, a Notebook dispatch, and verified files are separate observations.
   create the namespaces needed by `bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev -- true`.
   This establishes a deployment constraint for that configuration. No product protection was changed.
 
+## Packaged Session handoff preview: macOS arm64
+
+- Build `d012d48dd`: actual CLI and native npm tarballs installed from a loopback registry;
+  native loading and the Electron-free install check passed. CLI SHA-256:
+  `907203a4033a115af1f29481e0ea5ed20d3c67340e1909918f70bdc84c725a5e`.
+  Native package SHA-256: `0a12c72acb6b05b55f060858f025369190ccfb38d94c582248970d32e79433a9`.
+- A fresh profile used MCP stdio to import the repository's `v0.31.1-minimal` fixture and read
+  back the same read-only Session. Import operation `bc79e0d1-a6cb-4451-b885-0c49e6cb336f`
+  returned Session `import-d9c98023-ce0b-439c-b110-0687e0a40f54`. Fixture-authorized Fork
+  operation `91a4aaa4-c41a-423d-92bb-b803733fa60d` returned writable Session
+  `2a418ecc-bf9c-4a7c-b324-a91c028968de`. The original operation lookup matched each result.
+- Export operation `e057d894-57bc-407b-bdc4-bf426ad4145a` published `packaged-fork.science`,
+  2316 bytes, SHA-256 `fb6a78a4cec91990d9fe8f137343d3ed48c128a66aaf38111c58469e28a70f3e`.
+  The local file matched the Owner's receipt; its archive inventory contained `session.json`,
+  `records.json`, `README.md`, and `ro-crate-metadata.json`.
+- A separate Codex conversation on the same machine received the exact README quote and this
+  package in a fresh profile. It called the guide, catalog, doctor, `import_session`,
+  `get_session`, `list_projects` and `list_artifacts` over MCP. It identified the read-only
+  Session `import-10a06ec5-31d7-48e7-8de3-6caec7281eba` and waited for permission to Fork.
+  The fixture has no results to deliver. The agent did not call `fork_session` or `start_run`.
+- Scope: actual packaged service and local files, with an archive fixture and separate profiles.
+  No real model call to Open-Science, Notebook dispatch, fresh machine, or registry release.
+
 ## Remaining gates
 
 | Gate                                                                                              | Evidence required                                                                                                                                                                                                                                                                                      |

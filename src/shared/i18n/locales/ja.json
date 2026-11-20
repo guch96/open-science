@@ -8176,6 +8176,7 @@
     "Close progress": "進行状況を閉じる",
     "Waiting for your decision": "操作を選択してください",
     "Continue Notebook work": "Notebook の作業を続行",
+    "Open the same Session and branch in the Open-Science desktop app, then choose Continue Notebook work in Compute.": "Open-Science デスクトップアプリで同じセッションとブランチを開き、コンピュートで「Notebook の作業を続行」を選択してください。",
     "Notebook work remains stopped until you explicitly continue. This sends a new guidance message and checks memory again.": "明示的に続行するまで Notebook の作業は停止したままです。新しい指示メッセージを送信し、メモリを再確認します。",
     "Open in browser": "ブラウザーで開く",
     "Close task": "タスクを終了",

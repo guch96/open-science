@@ -174,6 +174,7 @@ type ApplicationCommandCompositionDependencies = Readonly<{
 }>
 
 const ELECTRON_NATIVE_COMMAND_NAMES = Object.freeze([
+  'acp:continue-notebook-execution',
   'resource-recording:get-state',
   'resource-recording:start',
   'resource-recording:stop',

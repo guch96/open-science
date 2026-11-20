@@ -650,8 +650,9 @@ an unverified kernel dispatch, or a successful cell from a previous prompt does 
 Notebook success. A missing `kernelDispatched` is unknown. Check output delivery separately.
 
 For `waiting_for_user`, keep the refusal, Session, and branch references. Once the cause has
-been resolved, the user opens that conversation branch and chooses **Continue Notebook work**
-in **Compute**. CLI and MCP do not expose this action. Do not retry or switch tools, language,
+been resolved, the user opens that conversation branch in the Open-Science desktop app connected to
+the same service and chooses **Continue Notebook work** in **Compute**. Web shows the handoff;
+only Desktop can continue. Do not retry or switch tools, language,
 environment, or Session to bypass it. After the user acts, `get_session` can observe the live
 Notebook execution intent in the same Session; `execution.continuedFromRefusalId` associates the
 new prompt with the original refusal. This association lives in the running service. The
