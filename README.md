@@ -148,7 +148,8 @@ The former Model settings tab is now **Local capabilities**, covering PDF extrac
 ### Connect your own agent through MCP
 
 If your agent can configure local MCP servers, copy this prompt into its chat. Attach a `.science`
-file only if you want to bring in existing research.
+file only if you want to bring in existing research. If your client cannot attach binary files,
+include the package's absolute local path in the same message.
 
 > Set up Open-Science for me using https://github.com/aipoch/open-science#connect-your-own-agent-through-mcp. Discover what the installed version supports and check whether Open-Science and its Notebook are ready. Tell me where to sign in, continue a stopped Notebook, or review a sensitive export when my action is required.
 >
@@ -192,8 +193,9 @@ service; with that version, open Open-Science or run `npx --yes @aipoch/open-sci
 For local file delivery, run the agent, MCP server, and Open-Science service on the same machine
 with access to the same files. The MCP process needs access to the selected profile and the
 local service's loopback connection. Use that same profile for setup, sign-in, and research.
-See [Notebook prerequisites](docs/standalone-runtime.md#notebook-readiness-for-agents), especially
-when running on Linux or in a container.
+On headless Linux, [start the service with your configured OS credential store](docs/standalone-runtime.md#linux-prerequisites)
+before connecting MCP. See the [Notebook prerequisites](docs/standalone-runtime.md#notebook-readiness-for-agents)
+for sandbox and runtime setup.
 
 In your agent client's custom MCP settings, add a local **stdio** server. For clients that
 accept `mcpServers` JSON, use the following macOS/Linux configuration with Node.js 22.13.0

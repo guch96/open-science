@@ -49,7 +49,16 @@
    `start_run` 返回持久回执，`get_submission` / `wait_submission` 和 `get_run` / `wait_run`
    查询原任务。Agent 等待默认 10 秒、上限 30 秒，超时不取消。CLI `run` 自动分配 ID 时先将定位信息
    写入 `<profile>/agent-run-requests/`。协议测试覆盖丢失响应、重连和落盘失败；服务端测试覆盖同 ID
-   并发、冲突和重启后的回执关联及中断状态。
+   并发、冲突和重启后的回执关联及中断状态。ACP 在 Run 建立前明确拒绝认证时，原失败回执
+   持久保留 `provider_auth_required`，CLI/MCP 共用同一 profile 的用户设置入口。用户完成配置
+   后可另行授权新请求，旧请求不会重放。待受理回执带原 `requestId` 的 `wait_submission`
+   动作。续研默认使用原 Session 配置；需要换模型时先更新该 Session。
+   实包验收发现两类等待没有正确显示：代码审阅被投影为 `running`，Ask 策略下首次绑定
+   Python 则在 Notebook Run 创建前就等用户确认。现在从审批 Owner 匹配原 prompt 和分支，
+   返回 `waiting_for_user`、`kernelDispatched: false`，并区分环境确认和代码审阅。用户处理后
+   查询同一 Run。停止后的继续仍走 Desktop 的 Compute。Session 查询按活跃或最新的 prompt
+   读取执行证据，不会用上一轮的 Notebook 派发证明当前轮次。
+   模型触发回合或输出预算上限时，原 Run 报告失败原因并保留已有输出。
 3. [#62–#65](https://github.com/guch96/open-science/issues/54) 接入包导出、导入、Fork、查询和敏感确认。
    以真实 `.science` 和原操作关联证据区分可验证交付、待确认和未知结果。
    [#62](https://github.com/guch96/open-science/issues/62) 导出由 Package Owner 在受理时记录 operation/correlation，

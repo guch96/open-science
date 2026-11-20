@@ -639,24 +639,35 @@ open-science run \
 - `--delegation allow|deny` updates whether the Session may create new delegated children. `deny`
   does not cancel, hide, or prevent collection/messaging of children admitted earlier.
 
-`--wait` returns a still-running Run when its Plan needs approval or Notebook work is stopped pending
-human continuation. `--return-on-attention` is accepted for older scripts and has the same behavior.
-Permission and delegated-question events do not cause an attention return.
+`--wait` returns a still-running Run when a Plan needs approval, a Notebook environment or cell
+needs review, or Notebook work is stopped pending human continuation. `--return-on-attention` is
+accepted for older scripts and has the same behavior. Other permission and delegated-question
+events do not cause an attention return.
 
 `get_run` and `wait_run` report Notebook `execution` independently from the outer Run. Execution
 describes the latest Python or R Notebook Run attributed to the exact research prompt: `preparing`,
 `running`, `completed`, `failed`, `unconfirmed`, or `waiting_for_user`. A completed outer Run,
 an unverified kernel dispatch, or a successful cell from a previous prompt does not establish
 Notebook success. A missing `kernelDispatched` is unknown. Check output delivery separately.
+If the model reaches its turn or output budget, the Run fails with an explanation and retains
+any partial output. Check the model settings for that Session before trying another research turn.
 
-For `waiting_for_user`, keep the refusal, Session, and branch references. Once the cause has
-been resolved, the user opens that conversation branch in the Open-Science desktop app connected to
-the same service and chooses **Continue Notebook work** in **Compute**. Web shows the handoff;
-only Desktop can continue. Do not retry or switch tools, language,
-environment, or Session to bypass it. After the user acts, `get_session` can observe the live
-Notebook execution intent in the same Session; `execution.continuedFromRefusalId` associates the
-new prompt with the original refusal. This association lives in the running service. The
-original Run keeps its own outcome, and opening a fresh Session is not recovery.
+For `review_notebook_runtime_in_app`, the user responds to **Confirm Notebook kernel and
+environment** in the original Session and branch. A first binding can wait for this decision
+before a Notebook Run has been created. For `review_notebook_code_in_app`, the user reviews
+the pending cell there. Recheck the same research Run after either decision. CLI and MCP
+provide the handoff; the Web or Desktop app presents the decision. Public `permission.requested`
+notices for these reviews identify the Run and reason without carrying decision options,
+interpreter paths, or code risk details.
+
+For `next.action: "continue_notebook_in_app"`, keep the refusal, Session, and branch references.
+Once the cause has been resolved, the user opens that conversation branch in the Open-Science
+desktop app connected to the same service and chooses **Continue Notebook work** in **Compute**.
+Web shows the handoff; only Desktop can continue. Do not retry or switch tools, language,
+environment, or Session to bypass it. After the user acts, `get_session` can observe execution for
+the active or latest prompt in the same Session; `execution.continuedFromRefusalId` associates the
+new prompt with the original refusal. This association lives in the running service. The original
+Run keeps its own outcome, and opening a fresh Session is not recovery.
 
 Inspect and respond to an active Plan with its exact version and revision:
 

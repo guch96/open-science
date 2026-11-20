@@ -68,7 +68,21 @@ cross-Agent model migration, and subscription reuse are outside this phase.
    30 seconds; timeout does not cancel. CLI `run` records an automatically generated ID in
    `<profile>/agent-run-requests/` before submitting. Protocol tests cover lost responses, reconnect,
    and recovery-record failure. Server tests cover same-ID concurrency, conflicts, restart recovery,
-   and interruption state.
+   and interruption state. When ACP reports authentication failure before a Run starts, the
+   original failed receipt persists `provider_auth_required`. CLI and MCP give the user the
+   same-profile Settings handoff and keep the old request final. A separately authorized new
+   request can follow provider repair. While a receipt is pending, it gives the Agent the
+   `wait_submission` action with its original `requestId`. Continuing a Session uses its saved
+   model and other settings; changing the profile default does not replace a saved selection.
+   Packaged acceptance found two approval waits: a pending Notebook code review looked like
+   active execution, and an initial Python binding in Ask mode waited before a Notebook Run
+   existed. The permission broker now provides the matching scope for `waiting_for_user` with
+   `review_notebook_code_in_app` or `review_notebook_runtime_in_app`. The user decides in the
+   original Session, then the Agent rechecks the same Run. Both are separate from continuing a
+   stopped Notebook in Desktop. Session queries follow the active or latest prompt and do not
+   use a prior prompt's dispatch to describe the current turn.
+   A provider stop for a turn or output budget fails the original Run with an explanation and
+   preserves any partial output.
 
 3. [#62–#65](https://github.com/guch96/open-science/issues/54) add package export, import, Fork,
    operation lookup, and sensitive confirmation. Real `.science` files and operation references
