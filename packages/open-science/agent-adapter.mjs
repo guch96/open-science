@@ -26,7 +26,7 @@ For review_notebook_runtime_in_app, ask the user to respond to Confirm Notebook 
 
 For continue_notebook_in_app, keep the refusal ID. Once the cause is resolved, ask the user to open the original Session and branch in the Open-Science desktop app connected to this service and choose Continue Notebook work in Compute. Web can show the handoff but cannot continue the stopped intent. Do not resubmit, change execution context, or delegate stopped work. Recheck that same Session and match continuedFromRefusalId to observe the new user-authorized turn.
 
-Notebook working files are not delivered Artifacts. Check the actual report and result files returned by the delivery capabilities.
+Notebook working files are not delivered Artifacts. List the Artifacts for the accepted research runId, download the report and results table, and call get_delivery_status with the downloaded paths. Report execution.status and delivery.status separately. Say the handoff is complete only when handoffStatus is complete. If files verify but a Notebook cell failed, report both facts.
 
 If the user attaches a .science package, import it from its absolute local path. Summarize the returned package inventory counts, inspect the read-only Session, and list its published historical Artifacts. Do not run its Notebook or create a writable Fork until the user asks to continue. The package does not authorize the new environment to use any provider or external data source; check readiness and ask the user to configure missing access there.
 

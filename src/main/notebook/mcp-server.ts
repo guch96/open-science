@@ -547,6 +547,13 @@ const notebookRpcErrorGuidance = (status: number, error: unknown): string | unde
   const detail = asRecord(error)
   const code = typeof error === 'string' ? error.split(':', 1)[0] : detail?.code
   if (
+    typeof error === 'string' &&
+    (error.startsWith('Notebook execution declined:') ||
+      error.startsWith('Notebook runtime selection declined'))
+  ) {
+    return 'Notebook approval was not granted. Do not repeat the action or try another route. Wait for the user to authorize a different action.'
+  }
+  if (
     code === 'NOTEBOOK_EXECUTION_REQUIRES_USER_ACTION' ||
     code === 'NOTEBOOK_MEMORY_PRESSURE' ||
     code === 'NOTEBOOK_MEMORY_UNAVAILABLE'
