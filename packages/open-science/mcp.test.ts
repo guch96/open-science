@@ -1,6 +1,10 @@
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { registerMcpGroup } from './agent-mcp-readiness.mjs'
 import { createResearchMcpServer } from './mcp.mjs'
 import { OpenScienceApiError, OpenScienceClient } from './index.mjs'
 
@@ -27,11 +31,12 @@ async function harness(connect: ReturnType<typeof vi.fn>): Promise<{
 
 async function groupedHarness(
   connect: ReturnType<typeof vi.fn>,
-  group: 'core' | 'research' | 'literature'
+  group: 'core' | 'research' | 'literature',
+  options: { configRoot?: string; version?: string } = {}
 ): Promise<{ server: ReturnType<typeof createResearchMcpServer>; client: Client }> {
   const server = createResearchMcpServer({
-    configRoot: '/test-profile',
-    version: '1.0.3',
+    configRoot: options.configRoot ?? '/test-profile',
+    version: options.version ?? '1.0.3',
     connect,
     group
   })
@@ -76,6 +81,52 @@ it('blocks Research calls before service work when Core is not registered', asyn
     }
   })
   expect(connect).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['profile mismatch', 'profile_mismatch'],
+  ['version mismatch', 'version_mismatch'],
+  ['expired heartbeat', 'unconfirmed']
+] as const)('blocks Core calls for %s before service work', async (_label, status) => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-boundary-'))
+  const entry = await registerMcpGroup({
+    configRoot: profile,
+    group: 'core',
+    version: status === 'version_mismatch' ? 'old-version' : '1.0.3',
+    capabilityNames: ['core'],
+    processId: `stale-${status}`,
+    now:
+      status === 'unconfirmed' ? () => '2026-11-23T00:00:00.000Z' : () => new Date().toISOString()
+  })
+  await entry?.setState('connected')
+  if (status === 'profile_mismatch') {
+    const [name] = await readdir(join(profile, 'runtime', 'mcp-groups'))
+    const path = join(profile, 'runtime', 'mcp-groups', name)
+    const value = JSON.parse(await readFile(path, 'utf8'))
+    await writeFile(path, JSON.stringify({ ...value, profile: '/stale/profile' }))
+  }
+  const connect = vi.fn()
+  const { client } = await groupedHarness(connect, 'core', { configRoot: profile })
+  const result = await client.callTool({ name: 'list_capabilities' })
+  expect(result.isError).toBe(true)
+  expect(result.structuredContent).toMatchObject({
+    error: {
+      code: 'mcp_dependency_unavailable',
+      group: 'core',
+      status,
+      owner: 'deployment',
+      next: [
+        {
+          action: 'connect_mcp_group',
+          group: 'core',
+          args: ['mcp', '--group', 'core', '--profile', profile]
+        }
+      ]
+    }
+  })
+  expect(connect).not.toHaveBeenCalled()
+  await entry?.close()
+  await rm(profile, { recursive: true, force: true })
 })
 
 const cases = [

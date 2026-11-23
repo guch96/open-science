@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -18,7 +18,7 @@ const register = (
   configRoot: string,
   group: 'core' | 'research' | 'literature',
   state?: 'starting' | 'connected'
-) =>
+): Promise<Awaited<ReturnType<typeof registerMcpGroup>>> =>
   registerMcpGroup({
     configRoot,
     group,
@@ -178,4 +178,75 @@ it('distinguishes version or capability drift from a connected group and recover
   })
   expect(recovered.groups.core).toMatchObject({ status: 'connected', version: '1.3.2' })
   await current?.close()
+})
+
+it('reports an actionable reconnect for profile drift', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-readiness-profile-'))
+  cleanup.push(profile)
+  const entry = await register(profile, 'core', 'connected')
+  const [name] = await readdir(join(profile, 'runtime', 'mcp-groups'))
+  const path = join(profile, 'runtime', 'mcp-groups', name)
+  const value = JSON.parse(await readFile(path, 'utf8'))
+  await writeFile(path, JSON.stringify({ ...value, profile: '/stale/profile' }))
+
+  const status = await readMcpGroupStatus({
+    configRoot: profile,
+    version: '1.3.2',
+    now: Date.parse('2026-11-23T00:00:05.000Z')
+  })
+  expect(status.groups.core).toMatchObject({
+    status: 'profile_mismatch',
+    reason: 'registered_profile_differs',
+    owner: 'deployment',
+    next: [
+      {
+        action: 'connect_mcp_group',
+        group: 'core',
+        serverName: 'open-science-core',
+        args: ['mcp', '--group', 'core', '--profile', profile]
+      }
+    ]
+  })
+  await entry?.close()
+})
+
+it('reports reconnect ownership for expired heartbeats and service loss', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-readiness-recovery-'))
+  cleanup.push(profile)
+  const entry = await registerMcpGroup({
+    configRoot: profile,
+    group: 'core',
+    version: '1.3.2',
+    capabilityNames: ['core'],
+    processId: 'expired-core-process',
+    now: () => '2026-11-23T00:00:00.000Z'
+  })
+  await entry?.setState('connected')
+
+  const expired = await readMcpGroupStatus({
+    configRoot: profile,
+    version: '1.3.2',
+    now: Date.parse('2026-11-23T00:00:11.000Z')
+  })
+  expect(expired.groups.core).toMatchObject({
+    status: 'unconfirmed',
+    reason: 'heartbeat_expired',
+    owner: 'deployment',
+    next: [{ action: 'connect_mcp_group', group: 'core' }]
+  })
+
+  await entry?.heartbeat()
+  const unavailable = await readMcpGroupStatus({
+    configRoot: profile,
+    version: '1.3.2',
+    serviceStatus: 'unavailable',
+    now: Date.parse('2026-11-23T00:00:00.000Z')
+  })
+  expect(unavailable.groups.core).toMatchObject({
+    status: 'unavailable',
+    reason: 'service_unavailable',
+    owner: 'deployment',
+    next: [{ action: 'connect_mcp_group', group: 'core' }]
+  })
+  await entry?.close()
 })
