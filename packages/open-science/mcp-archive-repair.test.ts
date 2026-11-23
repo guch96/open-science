@@ -3,7 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { findStandaloneInstallation, repairStandaloneMcp } from './mcp-archive-repair.mjs'
+import {
+  findStandaloneInstallation,
+  repairStandaloneMcp,
+  verifyStandaloneSignature
+} from './mcp-archive-repair.mjs'
 
 const roots: string[] = []
 
@@ -280,4 +284,64 @@ it('rejects an archive target mismatch before downloading a replacement', async 
   })
   expect(fetchImpl).not.toHaveBeenCalled()
   expect(await readFile(join(archive, 'backend', 'cli.mjs'), 'utf8')).toBe('old cli')
+})
+
+it('reports a stable download error when the official transport fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'open-science-archive-repair-download-'))
+  roots.push(root)
+  const archive = join(root, 'open-science-cli-1.3.2-win32-x64')
+  await mkdir(join(archive, 'backend'), { recursive: true })
+  await mkdir(join(archive, 'node-runtime'), { recursive: true })
+  await writeFile(join(archive, 'backend', 'cli.mjs'), 'old cli')
+  await writeFile(join(archive, 'node-runtime', 'node.exe'), 'old node')
+  await writeFile(
+    join(archive, 'release.json'),
+    JSON.stringify({ version: '1.3.2', target: 'win32-x64', sourceSha: 'a'.repeat(40) })
+  )
+  const installation = await findStandaloneInstallation({
+    cliPath: join(archive, 'backend', 'cli.mjs'),
+    platform: 'win32',
+    arch: 'x64'
+  })
+  const fetchImpl = vi.fn(async (url: string) => {
+    if (url.endsWith('SHA256SUMS.txt'))
+      return new Response(`${'0'.repeat(64)}  open-science-cli-1.3.3-win32-x64.zip\n`)
+    const error = Object.assign(new Error('request timed out'), { code: 23 })
+    throw error
+  })
+
+  const result = await repairStandaloneMcp({
+    profile: join(root, 'profile'),
+    installation,
+    platform: 'win32',
+    arch: 'x64',
+    checkDependency: async () => ({ available: false }),
+    fetchImpl
+  })
+
+  expect(result).toMatchObject({
+    status: 'failed',
+    error: { code: 'mcp_repair_download_failed' }
+  })
+})
+
+it('passes the archive root and signature mode to the Windows verifier', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'open-science-archive-signature-'))
+  roots.push(root)
+  const exec = vi.fn().mockResolvedValue({})
+
+  await verifyStandaloneSignature({ root, platform: 'win32', exec })
+
+  expect(exec).toHaveBeenCalledWith(
+    'pwsh',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-File',
+      expect.stringContaining('.mcp-signature-'),
+      root,
+      'stable'
+    ],
+    expect.objectContaining({ timeout: expect.any(Number), windowsHide: true })
+  )
 })

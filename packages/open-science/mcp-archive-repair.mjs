@@ -97,7 +97,10 @@ const failure = (installation, profile, platform, arch, error) => ({
   arch,
   profile,
   error: {
-    code: error.code ?? 'mcp_repair_failed',
+    code:
+      typeof error?.code === 'string' && error.code.startsWith('mcp_repair_')
+        ? error.code
+        : 'mcp_repair_failed',
     message: error.message ?? 'The standalone archive repair failed.',
     owner: 'deployment',
     requiresUser: true,
@@ -137,10 +140,15 @@ const parseChecksums = (text, target, platform) => {
 }
 
 const downloadResponse = async (fetchImpl, url) => {
-  const response = await fetchImpl(url, {
-    redirect: 'follow',
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
-  })
+  let response
+  try {
+    response = await fetchImpl(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+    })
+  } catch {
+    throw repairError('mcp_repair_download_failed', 'The official archive download failed.')
+  }
   if (!response.ok)
     throw repairError(
       'mcp_repair_download_failed',
@@ -195,22 +203,35 @@ foreach ($file in $files) {
   if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) { throw "Invalid Windows signature: $($file.FullName) ($($signature.Status))" }
 }
 `
+  const scriptPath = join(root, `.mcp-signature-${randomUUID()}.ps1`)
+  await writeFile(scriptPath, script, 'utf8')
   let lastError
-  for (const executable of ['pwsh', 'powershell.exe']) {
-    try {
-      await exec(
-        executable,
-        ['-NoProfile', '-NonInteractive', '-Command', script, root, nightly ? 'nightly' : 'stable'],
-        {
-          timeout: EXTRACT_TIMEOUT_MS,
-          windowsHide: true
-        }
-      )
-      return
-    } catch (error) {
-      lastError = error
-      if (error?.code !== 'ENOENT') throw error
+  try {
+    for (const executable of ['pwsh', 'powershell.exe']) {
+      try {
+        await exec(
+          executable,
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-File',
+            scriptPath,
+            root,
+            nightly ? 'nightly' : 'stable'
+          ],
+          {
+            timeout: EXTRACT_TIMEOUT_MS,
+            windowsHide: true
+          }
+        )
+        return
+      } catch (error) {
+        lastError = error
+        if (error?.code !== 'ENOENT') throw error
+      }
     }
+  } finally {
+    await rm(scriptPath, { force: true })
   }
   throw lastError
 }
@@ -285,7 +306,7 @@ export const verifyMcpHandshake = async ({
 }) => {
   const child = spawnProcess(
     join(root, 'node-runtime', nodeName(platform)),
-    [join(root, 'backend', 'cli.mjs'), 'mcp', '--group', 'core', '--profile', profile],
+    [join(root, 'backend', 'cli.mjs'), 'mcp', '--profile', profile],
     { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }
   )
   try {

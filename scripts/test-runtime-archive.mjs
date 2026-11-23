@@ -23,6 +23,7 @@ const verifyMcpStdio = async ({ node, cli, profile }) => {
   const child = spawn(node, [cli, 'mcp', '--group', 'core', '--profile', profile], {
     stdio: ['pipe', 'pipe', 'pipe']
   })
+  const closed = once(child, 'close').catch(() => undefined)
   let output = ''
   let errorOutput = ''
   let buffer = ''
@@ -85,8 +86,9 @@ const verifyMcpStdio = async ({ node, cli, profile }) => {
     assert.equal(tools.error, undefined, `MCP tools/list failed\n${output}${errorOutput}`)
     assert.ok(Array.isArray(tools.result?.tools), 'MCP tools/list returned no tools')
   } finally {
+    child.stdin.destroy()
     child.kill()
-    await once(child, 'close').catch(() => undefined)
+    await closed
   }
 }
 
@@ -121,7 +123,7 @@ console.log('PASS bundled Node and native dependencies');
   await rm(probe)
   await verifyMcpStdio({
     node,
-    cli: join(installed, 'cli.mjs'),
+    cli: join(installed, 'backend', 'cli.mjs'),
     profile: join(temporary, 'mcp-profile')
   })
   console.log('PASS extracted MCP stdio initialize and tools/list')
