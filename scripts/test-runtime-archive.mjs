@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { promisify } from 'node:util'
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -17,6 +18,78 @@ assert.equal(report.filename, archiveFilename(report.version, target))
 assert.equal(await sha256(join(directory, report.filename)), report.sha256)
 const temporary = await mkdtemp(join(tmpdir(), 'open-science archive install '))
 const exec = promisify(execFile)
+
+const verifyMcpStdio = async ({ node, cli, profile }) => {
+  const child = spawn(node, [cli, 'mcp', '--group', 'core', '--profile', profile], {
+    stdio: ['pipe', 'pipe', 'pipe']
+  })
+  let output = ''
+  let errorOutput = ''
+  let buffer = ''
+  const responses = new Map()
+  const waiters = new Map()
+  const onData = (chunk) => {
+    buffer += chunk.toString()
+    for (;;) {
+      const newline = buffer.indexOf('\n')
+      if (newline < 0) return
+      const line = buffer.slice(0, newline).trim()
+      buffer = buffer.slice(newline + 1)
+      if (!line) continue
+      output += line + '\n'
+      const message = JSON.parse(line)
+      if (message.id === undefined) continue
+      const resolve = waiters.get(message.id)
+      if (resolve) {
+        waiters.delete(message.id)
+        resolve(message)
+      } else responses.set(message.id, message)
+    }
+  }
+  child.stdout.on('data', onData)
+  child.stderr.on('data', (chunk) => {
+    errorOutput += chunk.toString()
+  })
+  const waitForResponse = (id) => {
+    const response = responses.get(id)
+    if (response) {
+      responses.delete(id)
+      return Promise.resolve(response)
+    }
+    return new Promise((resolve, reject) => {
+      waiters.set(id, resolve)
+      const timer = setTimeout(() => {
+        waiters.delete(id)
+        reject(new Error(`Timed out waiting for MCP response ${id}\n${errorOutput}`))
+      }, 30_000)
+      timer.unref?.()
+    })
+  }
+  const send = (message) => child.stdin.write(JSON.stringify(message) + '\n')
+  try {
+    send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'open-science-archive-test', version: '1.0.0' }
+      }
+    })
+    const initialized = await waitForResponse(1)
+    assert.equal(initialized.error, undefined, `MCP initialize failed\n${output}${errorOutput}`)
+    send({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+    const tools = await waitForResponse(2)
+    assert.equal(tools.error, undefined, `MCP tools/list failed\n${output}${errorOutput}`)
+    assert.ok(Array.isArray(tools.result?.tools), 'MCP tools/list returned no tools')
+  } finally {
+    child.kill()
+    await once(child, 'close').catch(() => undefined)
+  }
+}
+
 try {
   await exec(archiveTar, ['-xf', join(directory, report.filename), '-C', temporary], {
     timeout: 180_000
@@ -46,6 +119,12 @@ console.log('PASS bundled Node and native dependencies');
   )
   console.log((await exec(node, [probe], { cwd: temporary })).stdout.trim())
   await rm(probe)
+  await verifyMcpStdio({
+    node,
+    cli: join(installed, 'cli.mjs'),
+    profile: join(temporary, 'mcp-profile')
+  })
+  console.log('PASS extracted MCP stdio initialize and tools/list')
   const forbidden = async (path) => {
     for (const entry of await readdir(path, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
