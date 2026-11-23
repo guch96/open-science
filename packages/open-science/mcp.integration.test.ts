@@ -108,7 +108,25 @@ it('runs Research and Literature operations through their grouped stdio servers'
       if (request.url === '/api/v1/run-submissions/request-grouped' && request.method === 'PUT') {
         response.end(
           JSON.stringify({
-            data: { requestId: 'request-grouped', status: 'accepted', runId: 'run-grouped' }
+            data: {
+              requestId: 'request-grouped',
+              status: 'accepted',
+              runId: 'run-grouped',
+              sessionId: 'session-grouped'
+            }
+          })
+        )
+        return
+      }
+      if (request.url === '/api/v1/run-submissions/request-grouped-2' && request.method === 'PUT') {
+        response.end(
+          JSON.stringify({
+            data: {
+              requestId: 'request-grouped-2',
+              status: 'accepted',
+              runId: 'run-grouped-2',
+              sessionId: 'session-grouped'
+            }
           })
         )
         return
@@ -146,7 +164,29 @@ it('runs Research and Literature operations through their grouped stdio servers'
     arguments: { requestId: 'request-grouped', projectId: 'p1', prompt: 'Run the grouped study.' }
   })
   expect(receipt.structuredContent).toMatchObject({
-    result: { requestId: 'request-grouped', status: 'accepted', runId: 'run-grouped' }
+    result: {
+      requestId: 'request-grouped',
+      status: 'accepted',
+      runId: 'run-grouped',
+      sessionId: 'session-grouped'
+    }
+  })
+  const secondReceipt = await research.callTool({
+    name: 'start_run',
+    arguments: {
+      requestId: 'request-grouped-2',
+      projectId: 'p1',
+      sessionId: 'session-grouped',
+      prompt: 'Continue the grouped study with a second research turn.'
+    }
+  })
+  expect(secondReceipt.structuredContent).toMatchObject({
+    result: {
+      requestId: 'request-grouped-2',
+      status: 'accepted',
+      runId: 'run-grouped-2',
+      sessionId: 'session-grouped'
+    }
   })
   const searched = await literature.callTool({
     name: 'search_literature',
@@ -2590,6 +2630,16 @@ it('delivers a pinned Artifact through either entry point without overwriting lo
   )
   await writeFile(join(profile, 'web-token'), token)
   const mcp = await connectMcp(profile, undefined, cli, 'core')
+  const tools = await mcp.listTools()
+  expect(tools.tools.map((tool) => tool.name)).toEqual(
+    expect.arrayContaining([
+      'list_artifacts',
+      'download_artifact',
+      'get_delivery_status',
+      'get_package_operation'
+    ])
+  )
+  expect(tools.tools.map((tool) => tool.name)).not.toContain('start_run')
   const cliArgs = (name: string): string[] => [
     'tools',
     'call',
