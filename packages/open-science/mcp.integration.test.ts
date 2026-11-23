@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createRequire } from 'node:module'
 import {
   cp,
   lstat,
@@ -14,7 +15,7 @@ import {
   writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, expect, it, vi } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -26,6 +27,10 @@ afterEach(async () => {
 })
 
 const cli = resolve('packages/open-science/cli.mjs')
+let dependencyRoot = dirname(
+  createRequire(import.meta.url).resolve('@modelcontextprotocol/sdk/package.json')
+)
+while (basename(dependencyRoot) !== 'node_modules') dependencyRoot = dirname(dependencyRoot)
 const exec = promisify(execFile)
 const runCli = (
   args: string[],
@@ -1770,7 +1775,7 @@ it('checks a fresh MCP profile after its own startup with another local service 
       .map((file) => cp(join(sources, file), join(install, file)))
   )
   await symlink(
-    resolve('node_modules'),
+    dependencyRoot,
     join(install, 'node_modules'),
     process.platform === 'win32' ? 'junction' : 'dir'
   )
