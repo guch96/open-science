@@ -83,6 +83,48 @@ it('blocks Research calls before service work when Core is not registered', asyn
   expect(connect).not.toHaveBeenCalled()
 })
 
+it('keeps grouped capability discovery available while a dependency is missing', async () => {
+  const connect = vi.fn()
+  const { client } = await groupedHarness(connect, 'core')
+  const result = await client.callTool({ name: 'list_capabilities' })
+  expect(result.isError).not.toBe(true)
+  expect(result.structuredContent).toMatchObject({
+    result: {
+      groups: {
+        discovery: expect.arrayContaining([expect.objectContaining({ name: 'list_capabilities' })])
+      },
+      mcp: { groups: { core: { status: 'missing' } } }
+    }
+  })
+  expect(connect).not.toHaveBeenCalled()
+})
+
+it('keeps grouped capability details available when the group needs reconnecting', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-discovery-reconnect-'))
+  const entry = await registerMcpGroup({
+    configRoot: profile,
+    group: 'core',
+    version: 'old-version',
+    capabilityNames: ['core'],
+    processId: 'stale-core',
+    now: () => new Date().toISOString()
+  })
+  await entry?.setState('connected')
+  const connect = vi.fn()
+  const { client } = await groupedHarness(connect, 'core', { configRoot: profile })
+  const result = await client.callTool({
+    name: 'describe_capability',
+    arguments: { name: 'doctor' }
+  })
+  expect(result.isError).not.toBe(true)
+  expect(result.structuredContent).toMatchObject({
+    result: { name: 'doctor', mcpGroup: 'core', inputSchema: expect.any(Object) }
+  })
+  expect(connect).not.toHaveBeenCalled()
+  await entry?.close()
+  await rm(profile, { recursive: true, force: true })
+})
+
 it.each([
   ['profile mismatch', 'profile_mismatch'],
   ['version mismatch', 'version_mismatch'],
@@ -107,7 +149,7 @@ it.each([
   }
   const connect = vi.fn()
   const { client } = await groupedHarness(connect, 'core', { configRoot: profile })
-  const result = await client.callTool({ name: 'list_capabilities' })
+  const result = await client.callTool({ name: 'doctor' })
   expect(result.isError).toBe(true)
   expect(result.structuredContent).toMatchObject({
     error: {
