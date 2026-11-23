@@ -16,7 +16,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
@@ -76,6 +76,90 @@ it('exposes filtered tools through each real stdio MCP group', async () => {
     expect.arrayContaining(['search_literature', 'get_literature_item'])
   )
   expect(names[2]).not.toContain('list_projects')
+})
+
+it('runs Research and Literature operations through their grouped stdio servers', async () => {
+  const literaturePage = { entries: [{ id: 'item-grouped', item: { title: 'Grouped Atlas' } }] }
+  const agent = await resourceAgents(
+    async (request, response) => {
+      if (request.url === '/api/v1/projects') {
+        response.end(JSON.stringify({ data: [{ id: 'p1', name: 'Grouped project' }] }))
+        return
+      }
+      if (request.url === '/rpc/literature%3Asearch') {
+        response.end(JSON.stringify({ ok: true, result: literaturePage }))
+        return
+      }
+      if (request.url === '/rpc/literature%3Aimport-records') {
+        response.end(
+          JSON.stringify({ ok: true, result: { imported: { itemIds: ['item-grouped'] } } })
+        )
+        return
+      }
+      if (request.url === '/rpc/literature%3Atransact') {
+        response.end(
+          JSON.stringify({
+            ok: true,
+            result: { projectId: 'p1', itemIds: ['item-grouped'], included: true }
+          })
+        )
+        return
+      }
+      if (request.url === '/api/v1/run-submissions/request-grouped' && request.method === 'PUT') {
+        response.end(
+          JSON.stringify({
+            data: { requestId: 'request-grouped', status: 'accepted', runId: 'run-grouped' }
+          })
+        )
+        return
+      }
+      response.writeHead(404).end(JSON.stringify({ error: { code: 'not_found' } }))
+    },
+    ['durable-submissions']
+  )
+  const [core, research, literature] = await Promise.all(
+    (['core', 'research', 'literature'] as const).map((group) =>
+      connectMcp(agent.profile, undefined, cli, group)
+    )
+  )
+  await vi.waitFor(async () => {
+    const listed = await core.callTool({ name: 'list_capabilities' })
+    expect(listed.structuredContent).toMatchObject({
+      result: {
+        mcp: {
+          groups: {
+            core: { status: 'connected' },
+            research: { status: 'connected' },
+            literature: { status: 'connected' }
+          }
+        }
+      }
+    })
+  })
+
+  const projects = await research.callTool({ name: 'list_projects' })
+  expect(projects.structuredContent).toEqual({
+    result: [{ id: 'p1', name: 'Grouped project' }]
+  })
+  const receipt = await research.callTool({
+    name: 'start_run',
+    arguments: { requestId: 'request-grouped', projectId: 'p1', prompt: 'Run the grouped study.' }
+  })
+  expect(receipt.structuredContent).toMatchObject({
+    result: { requestId: 'request-grouped', status: 'accepted', runId: 'run-grouped' }
+  })
+  const searched = await literature.callTool({
+    name: 'search_literature',
+    arguments: { projectId: 'p1' }
+  })
+  expect(searched.structuredContent).toEqual({ result: literaturePage })
+  const imported = await literature.callTool({
+    name: 'import_literature',
+    arguments: { mode: 'commit', content: '@article{grouped}', projectId: 'p1' }
+  })
+  expect(imported.structuredContent).toMatchObject({
+    result: { imported: { itemIds: ['item-grouped'] } }
+  })
 })
 
 async function cliError(
