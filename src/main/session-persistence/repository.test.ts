@@ -23,6 +23,7 @@ vi.mock('electron', () => ({
 }))
 
 import {
+  createSessionFile,
   MAX_PERSISTED_SESSION_BYTES,
   SESSION_SIZE_LIMIT_ERROR_CODE,
   type PersistedChatSession,
@@ -165,6 +166,49 @@ describe('session persistence repository (per-session files)', () => {
       sessionId: session.id,
       projectId: session.projectId
     })
+
+    expect(scan).toHaveBeenCalledOnce()
+  })
+
+  it('rebuilds a valid locator once when a newly discovered Session is missing', async () => {
+    const root = await createStorageRoot()
+    const existing = createSession()
+    const repository = new SessionRepository(root)
+    await repository.saveSession(existing)
+
+    const discovered = createSession({ id: 'session-2', projectId: 'project-b' })
+    const discoveredProjectDir = join(root, 'sessions', discovered.projectId)
+    await mkdir(discoveredProjectDir, { recursive: true })
+    await writeFile(
+      join(discoveredProjectDir, `${discovered.id}.json`),
+      `${JSON.stringify(createSessionFile(discovered))}\n`,
+      'utf8'
+    )
+    await writeFile(
+      join(root, 'sessions', 'session-locator.json'),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            sessionId: existing.id,
+            projectId: existing.projectId,
+            storagePath: `sessions/${existing.projectId}/${existing.id}.json`
+          }
+        ]
+      }),
+      'utf8'
+    )
+
+    const reopened = new SessionRepository(root)
+    const scan = vi.spyOn(reopened, 'scanSessionIdentities')
+
+    await expect(reopened.locateSession(discovered.id)).resolves.toEqual({
+      sessionId: discovered.id,
+      projectId: discovered.projectId,
+      storagePath: `sessions/${discovered.projectId}/${discovered.id}.json`
+    })
+    await expect(reopened.locateSession('session-missing')).resolves.toBeUndefined()
+    await expect(reopened.locateSession('session-missing')).resolves.toBeUndefined()
 
     expect(scan).toHaveBeenCalledOnce()
   })

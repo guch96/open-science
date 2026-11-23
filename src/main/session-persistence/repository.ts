@@ -391,6 +391,8 @@ class SessionRepository {
   private suspendedProjectionCatalogMutation = false
   private readyIdentityCatalog: SessionIdentityCatalog | undefined
   private sessionLocator: SessionLocatorDocument | undefined
+  private sessionLocatorMissingEntryRebuild: Promise<SessionLocatorDocument> | undefined
+  private readonly sessionLocatorRemovedSessionIds = new Set<string>()
   private sessionLocatorRebuildBlocked = false
   private projectionInitialization:
     | Promise<{
@@ -1334,6 +1336,12 @@ class SessionRepository {
     const sessionId = assertSafeSegment(sessionIdValue)
     let locator = await this.ensureSessionLocator()
     let entry = locator.entries.find((candidate) => candidate.sessionId === sessionId)
+    if (!entry && !this.sessionLocatorRemovedSessionIds.has(sessionId)) {
+      const rebuild = (this.sessionLocatorMissingEntryRebuild ??=
+        this.rebuildSessionLocator('missing-entry'))
+      locator = await rebuild
+      entry = locator.entries.find((candidate) => candidate.sessionId === sessionId)
+    }
     if (!entry) return undefined
 
     const expectedPath = this.sessionStoragePath(entry.projectId, entry.sessionId)
@@ -1410,7 +1418,7 @@ class SessionRepository {
   }
 
   private async rebuildSessionLocator(
-    reason: 'missing-or-invalid' | 'stale'
+    reason: 'missing-or-invalid' | 'missing-entry' | 'stale'
   ): Promise<SessionLocatorDocument> {
     if (this.sessionLocatorRebuildBlocked) {
       throw new Error('Session locator rebuild is already deferred after an incomplete attempt.')
@@ -1483,6 +1491,7 @@ class SessionRepository {
   private async upsertSessionLocator(
     session: Pick<PersistedChatSession, 'id' | 'projectId'>
   ): Promise<void> {
+    this.sessionLocatorRemovedSessionIds.delete(session.id)
     await this.maintainSessionLocator((document) => ({
       version: 1,
       entries: [
@@ -1497,6 +1506,7 @@ class SessionRepository {
   }
 
   private async removeSessionLocator(sessionId: string): Promise<void> {
+    this.sessionLocatorRemovedSessionIds.add(sessionId)
     await this.maintainSessionLocator((document) => ({
       version: 1,
       entries: document.entries.filter((entry) => entry.sessionId !== sessionId)
@@ -1506,7 +1516,10 @@ class SessionRepository {
   private async removeProjectSessionLocators(projectId: string): Promise<void> {
     await this.maintainSessionLocator((document) => ({
       version: 1,
-      entries: document.entries.filter((entry) => entry.projectId !== projectId)
+      entries: document.entries.filter((entry) => {
+        if (entry.projectId === projectId) this.sessionLocatorRemovedSessionIds.add(entry.sessionId)
+        return entry.projectId !== projectId
+      })
     }))
   }
 
