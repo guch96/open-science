@@ -333,6 +333,7 @@ const commandsFrom = (
         if (
           !channel.startsWith('sessions:') ||
           ![
+            'sessions:load-one',
             'sessions:bind-task-session',
             'sessions:admit-task-turn',
             'sessions:stage-task-completion',
@@ -353,6 +354,21 @@ const commandsFrom = (
         const saved = (result ?? candidate) as PersistedChatSession
         sessions.set(saved.id, structuredClone(saved))
         return saved
+      }
+      if (channel === 'sessions:load-one') {
+        const request = args[0] as { projectId?: string; sessionId: string }
+        let current = sessions.get(request.sessionId)
+        if (!current) {
+          const result = (await invoke('sessions:load-all', invocation.callerContext, [])) as {
+            sessions?: PersistedChatSession[]
+          }
+          for (const session of result?.sessions ?? [])
+            sessions.set(session.id, structuredClone(session))
+          current = sessions.get(request.sessionId)
+        }
+        if (!current || (request.projectId && current.projectId !== request.projectId))
+          return undefined
+        return structuredClone(current)
       }
       if (channel === 'sessions:admit-task-turn') {
         const request = args[0] as Parameters<TaskSessionPort['admitTurn']>[0]
@@ -3112,6 +3128,7 @@ describe('HeadlessTaskApi adapter', () => {
       if (channel === 'sessions:load-all') {
         return { sessions: [session], manifest: { version: 1 } }
       }
+      if (channel === 'sessions:load-one') return session
       if (channel === 'artifacts:resolve-version-descriptors') return []
       if (channel === 'managed-file-versions:inspect') {
         const request = args[0] as { versionNumber?: number }
@@ -3159,7 +3176,9 @@ describe('HeadlessTaskApi adapter', () => {
     await expect(api.listSessions(project.id)).resolves.toEqual([
       expect.objectContaining({ id: session.id, artifactCount: 1 })
     ])
-    await expect(api.getSession(session.id)).resolves.toMatchObject({ title: session.title })
+    await expect(api.getSession(session.id, project.id)).resolves.toMatchObject({
+      title: session.title
+    })
     await expect(api.listArtifacts(session.id)).resolves.toEqual(session.artifacts)
     const acquired = await api.acquireArtifact('artifact-query')
     expect(acquired).toMatchObject({
@@ -3178,6 +3197,12 @@ describe('HeadlessTaskApi adapter', () => {
       taskCallerContext(),
       [{ projectId: project.id, appSessionId: session.id, versionIds: ['artifact-query'] }]
     )
+    expect(invoke).toHaveBeenCalledWith('sessions:load-one', taskCallerContext(), [
+      { projectId: project.id, sessionId: session.id }
+    ])
+    expect(invoke).toHaveBeenCalledWith('sessions:load-one', taskCallerContext(), [
+      { sessionId: session.id }
+    ])
     expect(invoke).toHaveBeenCalledWith('preview-resources:acquire', taskCallerContext(), [
       {
         source: 'artifact',

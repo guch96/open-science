@@ -127,8 +127,14 @@ type TaskProjectPort = {
   update?(request: UpdateProjectRequest): Promise<Project>
 }
 
+type TaskSessionReadRequest = {
+  projectId?: string
+  sessionId: string
+}
+
 type TaskSessionPort = {
   list(): Promise<PersistedChatSession[]>
+  get?(request: TaskSessionReadRequest): Promise<PersistedChatSession | undefined>
   save(session: PersistedChatSession): Promise<PersistedChatSession>
   bindSession(request: BindTaskSessionRequest): Promise<PersistedChatSession>
   admitTurn(request: AdmitTaskSessionTurnRequest): Promise<PersistedChatSession>
@@ -1480,9 +1486,8 @@ class TaskRunner {
     if (project.archivedAt !== undefined) {
       throw new TaskRunnerError('project_archived', archiveAvailabilityMessage('project-archived'))
     }
-    const sessions = await this.dependencies.sessions.list()
     const existing = request.sessionId
-      ? sessions.find((session) => session.id === request.sessionId)
+      ? await this.readSession(request.sessionId, project.id)
       : undefined
     if (request.sessionId && !existing) {
       throw new TaskRunnerError('session_not_found', `Session not found: ${request.sessionId}`)
@@ -2173,9 +2178,8 @@ class TaskRunner {
 
     let session: PersistedChatSession | undefined
     try {
-      session = (await this.dependencies.sessions.list()).find((candidate) =>
-        sessionOwnsTaskRunPrompt(candidate, run)
-      )
+      session = await this.readSession(run.sessionId, run.projectId)
+      if (session && !sessionOwnsTaskRunPrompt(session, run)) session = undefined
     } catch (error) {
       log.error('Failed to verify a Session after its save reported an error.', {
         error: toErrorMessage(error),
@@ -2588,9 +2592,8 @@ class TaskRunner {
 
     if (admissionPersistenceError !== undefined) {
       await this.withLifecycleSessionAvailable(run.projectId, session.id, async () => {
-        const latestSession = (await this.dependencies.sessions.list()).find(
-          (candidate) => candidate.id === session.id && candidate.projectId === run.projectId
-        )
+        const latestSession = await this.readSession(session.id, run.projectId)
+        if (latestSession?.projectId !== run.projectId) return
         if (latestSession?.activeRun?.promptMessageId !== run.promptMessageId) return
         await this.failRun(run, latestSession, undefined, admissionPersistenceError)
       }).catch(() => undefined)
@@ -2866,10 +2869,11 @@ class TaskRunner {
     // Main stamps transcript ownership while admitting the prompt, after the Task callback may have
     // returned its Session snapshot. Reload after prompt completion so selection follows current
     // authority rather than that necessarily stale admission receipt.
-    const authoritative = (await this.dependencies.sessions.list()).find(
-      (candidate) => candidate.id === session.id && candidate.projectId === session.projectId
-    )
-    if (authoritative?.runtimeTranscriptOwner === 'main') {
+    const authoritative = await this.readSession(session.id, session.projectId)
+    if (
+      authoritative?.projectId === session.projectId &&
+      authoritative.runtimeTranscriptOwner === 'main'
+    ) {
       const materialized = materializeSessionConversationGraph(authoritative)
       const graph = materialized.conversationGraph
       if (!graph) throw new Error('Main-owned Task Session has no durable conversation graph.')
@@ -3466,10 +3470,23 @@ class TaskRunner {
     }
   }
 
+  private async readSession(
+    sessionId: string,
+    projectId?: string
+  ): Promise<PersistedChatSession | undefined> {
+    if (this.dependencies.sessions.get) {
+      const session = await this.dependencies.sessions.get({
+        sessionId,
+        ...(projectId !== undefined ? { projectId } : {})
+      })
+      if (session || projectId === undefined) return session
+      return this.dependencies.sessions.get({ sessionId })
+    }
+    return (await this.dependencies.sessions.list()).find((candidate) => candidate.id === sessionId)
+  }
+
   async findSession(sessionId: string, projectId?: string): Promise<PersistedChatSession> {
-    const session = (await this.dependencies.sessions.list()).find(
-      (candidate) => candidate.id === sessionId
-    )
+    const session = await this.readSession(sessionId, projectId)
     if (!session) throw new TaskRunnerError('session_not_found', `Session not found: ${sessionId}`)
     if (projectId !== undefined && session.projectId !== projectId) {
       throw new TaskRunnerError(

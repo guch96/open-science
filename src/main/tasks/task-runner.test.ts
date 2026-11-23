@@ -1834,6 +1834,49 @@ describe('TaskRunner', () => {
     ])
   })
 
+  it('uses targeted Session reads for direct queries without hydrating the catalog', async () => {
+    const list = vi.fn(async () => {
+      throw new Error('full Session hydration must not run')
+    })
+    const get = vi.fn(async ({ sessionId }: { projectId?: string; sessionId: string }) => ({
+      ...structuredClone(session),
+      id: sessionId
+    }))
+    const runner = createRunner({ sessions: { list, get } })
+
+    await expect(runner.getSession(session.id, project.id)).resolves.toMatchObject({
+      id: session.id,
+      projectId: project.id
+    })
+    await expect(runner.getSessionConfiguration(session.id, project.id)).resolves.toMatchObject({
+      sessionId: session.id,
+      projectId: project.id
+    })
+    await expect(runner.listArtifacts(session.id)).resolves.toEqual([])
+
+    expect(list).not.toHaveBeenCalled()
+    expect(get).toHaveBeenCalledWith({ projectId: project.id, sessionId: session.id })
+    expect(get).toHaveBeenCalledWith({ sessionId: session.id })
+  })
+
+  it('preserves an existing-session project mismatch without a catalog scan', async () => {
+    const list = vi.fn(async () => {
+      throw new Error('full Session hydration must not run')
+    })
+    const get = vi.fn(async ({ projectId }: { projectId?: string; sessionId: string }) =>
+      projectId ? undefined : { ...structuredClone(session), projectId: 'project-other' }
+    )
+    const runner = createRunner({ sessions: { list, get } })
+
+    await expect(
+      runner.startRun({ project: project.id, sessionId: session.id, prompt: 'Continue research.' })
+    ).rejects.toMatchObject({ code: 'session_project_mismatch' })
+
+    expect(list).not.toHaveBeenCalled()
+    expect(get).toHaveBeenNthCalledWith(1, { projectId: project.id, sessionId: session.id })
+    expect(get).toHaveBeenNthCalledWith(2, { sessionId: session.id })
+  })
+
   it('does not route headless requests by project display name', async () => {
     const projects: TaskProjectPort = {
       list: async () => [project],

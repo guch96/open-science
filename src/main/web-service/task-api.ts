@@ -429,6 +429,8 @@ class HeadlessTaskApi {
           }
           return result.sessions
         },
+        get: (request) =>
+          this.invoke('sessions:load-one', request) as Promise<PersistedChatSession | undefined>,
         save: async (session) => {
           return this.invoke('sessions:save-session', session) as Promise<PersistedChatSession>
         },
