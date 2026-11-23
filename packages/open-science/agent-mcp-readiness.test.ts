@@ -145,3 +145,37 @@ it('requires every group and readiness layer before declaring the full loop read
   expect(blocked.fullLoopReady).toBe(false)
   await Promise.all(entries.map((entry) => entry?.close()))
 })
+
+it('distinguishes version or capability drift from a connected group and recovers after re-registration', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-readiness-drift-'))
+  cleanup.push(profile)
+  const stale = await registerMcpGroup({
+    configRoot: profile,
+    group: 'core',
+    version: '1.2.0',
+    capabilityNames: ['old-capability'],
+    processId: 'stale-core-process',
+    now: () => '2026-11-23T00:00:00.000Z'
+  })
+  await stale?.setState('connected')
+  const drift = await readMcpGroupStatus({
+    configRoot: profile,
+    version: '1.3.2',
+    capabilityDigests: { core: 'expected-current-digest' },
+    now: Date.parse('2026-11-23T00:00:05.000Z')
+  })
+  expect(drift.groups.core).toMatchObject({
+    status: 'version_mismatch',
+    reason: 'registered_version_differs'
+  })
+
+  await stale?.close()
+  const current = await register(profile, 'core', 'connected')
+  const recovered = await readMcpGroupStatus({
+    configRoot: profile,
+    version: '1.3.2',
+    now: Date.parse('2026-11-23T00:00:05.000Z')
+  })
+  expect(recovered.groups.core).toMatchObject({ status: 'connected', version: '1.3.2' })
+  await current?.close()
+})

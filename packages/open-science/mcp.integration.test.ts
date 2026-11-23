@@ -162,6 +162,30 @@ it('runs Research and Literature operations through their grouped stdio servers'
   })
 })
 
+it('allows reverse-order grouped MCP startup and reaches dependency readiness after Core connects', async () => {
+  const agent = await resourceAgents(() => undefined)
+  const clients: Client[] = []
+  for (const group of ['literature', 'research', 'core'] as const) {
+    clients.push(await connectMcp(agent.profile, undefined, cli, group))
+  }
+  const core = clients[2]
+  await vi.waitFor(async () => {
+    const listed = await core.callTool({ name: 'list_capabilities' })
+    expect(listed.structuredContent).toMatchObject({
+      result: {
+        mcp: {
+          groups: {
+            core: { status: 'connected' },
+            research: { status: 'connected' },
+            literature: { status: 'connected' }
+          },
+          fullLoopReady: false
+        }
+      }
+    })
+  })
+})
+
 async function cliError(
   args: string[],
   input?: string,
