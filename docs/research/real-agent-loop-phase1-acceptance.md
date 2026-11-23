@@ -35,6 +35,25 @@ The full four-file MCP/CLI/readiness run passed 252 tests, including the fresh-p
 case. The fixture now resolves the actual installed dependency tree when this checkout is a
 worktree with its own empty `node_modules` directory; the product startup path is unchanged.
 
+### Installed grouped MCP stdio package: November 23, 2026
+
+The packed `@aipoch/open-science@1.3.2` entry from commit `c57f15f0a` was installed by npm in a
+fresh temporary prefix on the same macOS arm64 host. Three independent stdio processes were
+started from that installed entry against one temporary authenticated profile and local HTTP
+service fixture. Their tool inventories were `open-science-core` (28 tools),
+`open-science-research` (23 tools), and `open-science-literature` (12 tools). Core's
+`list_capabilities` response reported all three groups `connected`, each at version `1.3.2`, with
+the expected capability digests and server names. All three MCP processes kept stdout protocol
+clean and produced no stderr diagnostics.
+
+The first immediate readiness read can observe a downstream group as `missing` while its
+asynchronous heartbeat is still being registered. A bounded readiness poll converged to all three
+groups `connected`; external Agents should therefore read the readiness result after connecting
+instead of treating the MCP handshake alone as proof of group readiness. This run used a local
+service fixture, so `fullLoopReady` remained false (`service: unchecked`); it does not claim a
+real model call, Notebook dispatch, file delivery, or registry installation. Native loading and
+Electron-free npm installation are covered separately by `test:npm-installed` above.
+
 ## Terminal API provider setup: November 21, 2026
 
 The macOS arm64 and headless Linux arm64 npm candidates passed the same installed-package
