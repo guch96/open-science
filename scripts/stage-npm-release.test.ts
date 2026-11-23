@@ -99,7 +99,7 @@ it('ships grouped MCP entry code, setup docs and dependencies in the npm entry p
       ])
     )
     const rootReadme = await readFile('README.md', 'utf8')
-    const configBlock = rootReadme.match(/```json\n(\{\n  "mcpServers":[\s\S]*?\n\})\n```/)
+    const configBlock = rootReadme.match(/```json\n(\{\n {2}"mcpServers":[\s\S]*?\n\})\n```/)
     expect(configBlock).not.toBeNull()
     expect(JSON.parse(configBlock![1])).toEqual({ mcpServers: defaultMcpServerConfig() })
     const manifest = JSON.parse(
