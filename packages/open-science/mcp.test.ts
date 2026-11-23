@@ -126,6 +126,31 @@ it('keeps grouped capability details available when the group needs reconnecting
 })
 
 it.each([
+  ['version drift', 'old-version', ['list_capabilities'], 'version_mismatch'],
+  ['capability drift', '1.0.3', ['old-capability'], 'unconfirmed']
+] as const)('reports %s in grouped discovery', async (_label, version, capabilityNames, status) => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-discovery-drift-'))
+  const entry = await registerMcpGroup({
+    configRoot: profile,
+    group: 'core',
+    version,
+    capabilityNames,
+    processId: `stale-${status}`,
+    now: () => new Date().toISOString()
+  })
+  await entry?.setState('connected')
+  const connect = vi.fn()
+  const { client } = await groupedHarness(connect, 'core', { configRoot: profile })
+  const result = await client.callTool({ name: 'list_capabilities' })
+  expect(result.isError).not.toBe(true)
+  expect(result.structuredContent).toMatchObject({
+    result: { mcp: { groups: { core: { status } } } }
+  })
+  await entry?.close()
+  await rm(profile, { recursive: true, force: true })
+})
+
+it.each([
   ['profile mismatch', 'profile_mismatch'],
   ['version mismatch', 'version_mismatch'],
   ['expired heartbeat', 'unconfirmed']

@@ -15,6 +15,7 @@ import {
 import { mcpServerName } from './agent-mcp-groups.mjs'
 import {
   mcpGroupDependencyError,
+  mcpCapabilityDigest,
   readMcpGroupStatus,
   registerMcpGroup
 } from './agent-mcp-readiness.mjs'
@@ -44,7 +45,11 @@ export const createResearchMcpServer = ({
 }) => {
   const server = new McpServer({ name: mcpServerName(group), version })
   const lifetime = new AbortController()
-  const tools = (group ? listMcpCapabilities(group) : listMcpCapabilities()).map((entry) => ({
+  const capabilities = group ? listMcpCapabilities(group) : listMcpCapabilities()
+  const capabilityDigests = group
+    ? { [group]: mcpCapabilityDigest(capabilities.map((entry) => entry.name)) }
+    : undefined
+  const tools = capabilities.map((entry) => ({
     name: entry.name,
     description: entry.description,
     inputSchema: agentInputSchema(entry),
@@ -64,6 +69,7 @@ export const createResearchMcpServer = ({
         const status = await readMcpGroupStatus({
           configRoot: getRegistryRoot(),
           version,
+          capabilityDigests,
           serviceStatus: 'unchecked'
         })
         const dependency = mcpGroupDependencyError(status, group)
@@ -78,7 +84,9 @@ export const createResearchMcpServer = ({
         connect,
         probe,
         mcpGroup: group,
-        registryRoot: getRegistryRoot()
+        registryRoot: getRegistryRoot(),
+        mcpVersion: version,
+        mcpCapabilityDigests: capabilityDigests
       })
       return toolResult({ result: result ?? null })
     } catch (error) {

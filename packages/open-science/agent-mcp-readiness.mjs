@@ -53,7 +53,7 @@ const readEntries = async (configRoot) => {
   return entries
 }
 
-const capabilityDigest = (names) =>
+export const mcpCapabilityDigest = (names) =>
   createHash('sha256')
     .update([...names].sort().join('\n'))
     .digest('hex')
@@ -71,7 +71,7 @@ export const registerMcpGroup = async ({
   await mkdir(directory, { recursive: true })
   const path = entryPath(directory, group, processId)
   const profile = resolve(configRoot)
-  const digest = capabilityDigest(capabilityNames)
+  const digest = mcpCapabilityDigest(capabilityNames)
   const startedAt = now()
   let closed = false
   let state = 'starting'

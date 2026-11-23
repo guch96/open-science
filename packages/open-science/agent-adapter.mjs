@@ -493,7 +493,10 @@ const getCapability = (name, exposure, mcpGroup) => {
   return entry
 }
 
-async function catalog({ group, checkService }, { probeService, configRoot, registryRoot }) {
+async function catalog(
+  { group, checkService },
+  { probeService, configRoot, registryRoot, mcpVersion, mcpCapabilityDigests }
+) {
   const selected = listAgentCapabilities().filter((entry) => !group || entry.group === group)
   const { support, ...service } = checkService
     ? await probeService(selected)
@@ -513,6 +516,8 @@ async function catalog({ group, checkService }, { probeService, configRoot, regi
   }
   const mcp = await readMcpGroupStatus({
     configRoot: registryRoot ?? configRoot,
+    version: mcpVersion,
+    capabilityDigests: mcpCapabilityDigests,
     serviceStatus: service.status
   })
   return { groups: catalogGroups, service, mcp }
@@ -538,7 +543,10 @@ const setupCodes = [
   'provider_not_ready'
 ]
 
-async function doctor({ language }, { getClient, configRoot, registryRoot, signal }) {
+async function doctor(
+  { language },
+  { getClient, configRoot, registryRoot, mcpVersion, mcpCapabilityDigests, signal }
+) {
   const client = await getClient()
   const profile = client.configRoot ?? configRoot
   const [report, deliveryDirectory] = await Promise.all([
@@ -561,6 +569,8 @@ async function doctor({ language }, { getClient, configRoot, registryRoot, signa
         : 'unconfirmed'
   const mcp = await readMcpGroupStatus({
     configRoot: registryRoot ?? profile,
+    version: mcpVersion,
+    capabilityDigests: mcpCapabilityDigests,
     serviceStatus: 'ready',
     readiness: {
       agent,
@@ -1139,7 +1149,9 @@ export const invokeAgentCapability = async (
     connect = connectToOpenScience,
     probe = connect,
     mcpGroup,
-    registryRoot
+    registryRoot,
+    mcpVersion,
+    mcpCapabilityDigests
   }
 ) => {
   const entry = getCapability(name, exposure, mcpGroup)
@@ -1158,6 +1170,8 @@ export const invokeAgentCapability = async (
     exposure,
     configRoot,
     registryRoot,
+    mcpVersion,
+    mcpCapabilityDigests,
     signal,
     getClient: async (requestSignal = signal) => {
       requestSignal?.throwIfAborted()
