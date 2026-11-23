@@ -354,8 +354,10 @@ and leaves any user stop in effect. The delivery directory check runs in the CLI
 
 After an action, rerun setup status for the same profile. Readiness covers native host
 prerequisites. A Project, selected R or guest runtime, and current execution permissions are
-checked by their Owners at execution time. The Windows Settings protection check can launch
-compatibility probes, so the read-only Agent check leaves Windows isolation unconfirmed.
+checked by their Owners at execution time. The Windows Agent check uses the same bounded
+compatibility probe as the Settings protection check: a missing or incomplete AppContainer setup
+is blocked, a successful probe is ready, and an error that cannot be classified remains
+unconfirmed.
 
 The shared CLI/MCP contract is exercised with controlled service responses. Existing Owner tests
 cover native macOS readiness signals and Linux procfs/cgroup refusals. Those tests do not qualify

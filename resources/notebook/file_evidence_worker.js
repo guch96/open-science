@@ -28,7 +28,8 @@ const releaseDirectory = () => {
   directoryBinding = undefined
 }
 const pathOperation = (name, pathCount = 1) => {
-  const operation = fs[name]
+  const operation =
+    process.platform === 'win32' && name === 'realpathSync' ? fs.realpathSync.native : fs[name]
   if (process.platform !== 'win32') return operation
   return (...args) =>
     operation(...args.map((arg, index) => (index < pathCount ? boundPath(arg) : arg)))

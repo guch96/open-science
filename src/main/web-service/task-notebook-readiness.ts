@@ -58,12 +58,6 @@ async function networkChecks(
   platform: NodeJS.Platform,
   network?: NotebookNetworkStatus
 ): Promise<Pick<TaskNotebookReadiness, 'dependencies' | 'sandbox'>> {
-  if (platform === 'win32') {
-    return {
-      dependencies: unconfirmed,
-      sandbox: { status: 'unconfirmed', reason: 'notebook_windows_isolation_unconfirmed' }
-    }
-  }
   switch (network?.kind) {
     case 'ready': {
       const probe = platform === 'linux' ? await probeLinuxIsolation() : 'ready'
@@ -85,6 +79,12 @@ async function networkChecks(
         sandbox: { status: 'checking' }
       }
     case 'setupRequired':
+      if (platform === 'win32') {
+        return {
+          dependencies: { status: 'blocked', reason: 'notebook_sandbox_unavailable' },
+          sandbox: { status: 'blocked', reason: 'notebook_sandbox_unavailable' }
+        }
+      }
       if (network.reasons.includes('linuxBubblewrapMissing')) {
         return {
           dependencies: { status: 'blocked', reason: 'notebook_bubblewrap_missing' },
@@ -93,6 +93,15 @@ async function networkChecks(
       }
       break
     case 'error':
+      if (platform === 'win32') {
+        return {
+          dependencies: {
+            status: 'unconfirmed',
+            reason: 'notebook_windows_isolation_unconfirmed'
+          },
+          sandbox: { status: 'unconfirmed', reason: 'notebook_windows_isolation_unconfirmed' }
+        }
+      }
       if (network.reason === 'trustBundleInvalid') {
         return {
           dependencies: { status: 'blocked', reason: 'notebook_trust_bundle_invalid' },
@@ -147,10 +156,8 @@ export async function readTaskNotebookReadiness(
   const platform = process.platform
   const [environment, network, memory] = await Promise.all([
     observe<ProvisionStatus>(invoke('notebook-env:status')),
-    // Windows' Settings check can run sandboxed compatibility probes. Doctor is read-only.
-    platform === 'win32'
-      ? undefined
-      : observe<NotebookNetworkStatus>(invoke('settings:get-notebook-network-status')),
+    // The Settings owner performs the bounded platform compatibility probe without changing setup.
+    observe<NotebookNetworkStatus>(invoke('settings:get-notebook-network-status')),
     observe<NotebookMemoryPolicyState>(invoke('notebook:memory-policy-state', {}))
   ])
   if (!environment && !network && !memory) return undefined
