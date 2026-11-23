@@ -20,6 +20,7 @@ import { promisify } from 'node:util'
 import { afterEach, expect, it, vi } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { registerMcpGroup } from './agent-mcp-readiness.mjs'
 
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
@@ -471,6 +472,24 @@ async function resourceAgents(
       cliError(cliArgs(name), JSON.stringify(args), env)
   }
 }
+
+it('reports grouped package drift through the CLI discovery surface', async () => {
+  const agent = await resourceAgents(() => undefined)
+  const entry = await registerMcpGroup({
+    configRoot: agent.profile,
+    group: 'core',
+    version: 'old-version',
+    capabilityNames: ['old-capability'],
+    processId: 'stale-cli-core',
+    now: () => new Date().toISOString()
+  })
+  await entry?.setState('connected')
+  const listed = await agent.cli('list_capabilities', { group: 'setup' })
+  expect(listed).toMatchObject({
+    result: { mcp: { groups: { core: { status: 'version_mismatch' } } } }
+  })
+  await entry?.close()
+})
 
 it('finds a Plan that needs review from CLI JSON and MCP stdio', async () => {
   const interaction = {

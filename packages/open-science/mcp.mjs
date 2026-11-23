@@ -21,6 +21,11 @@ import {
 } from './agent-mcp-readiness.mjs'
 import { connectToOpenScience, OpenScienceApiError } from './index.mjs'
 
+const logMcpDiagnostic = (message, error) => {
+  const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  process.stderr.write(`[open-science:mcp] ${message}: ${detail}\n`)
+}
+
 const outputSchema = {
   type: 'object',
   oneOf: [
@@ -117,6 +122,7 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
   let startup
   let registration
   let heartbeat
+  let heartbeatFailureLogged = false
   const getRegistryRoot = () => registration?.configRoot ?? configRoot
   const ensureRegistration = async (root) => {
     if (!group || registration || !root) return
@@ -127,7 +133,16 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
       capabilityNames: listMcpCapabilities(group).map((entry) => entry.name)
     })
     heartbeat = setInterval(() => {
-      void registration?.heartbeat().catch(() => {})
+      void registration
+        ?.heartbeat()
+        .then(() => {
+          heartbeatFailureLogged = false
+        })
+        .catch((error) => {
+          if (heartbeatFailureLogged) return
+          heartbeatFailureLogged = true
+          logMcpDiagnostic(`MCP ${group} heartbeat failed`, error)
+        })
     }, 2_000)
     heartbeat.unref?.()
     await registration.setState('connected')
@@ -163,7 +178,9 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
     // Tool calls that need a running service observe startup failure through the error envelope.
     void serviceRoot()
       .then((root) => ensureRegistration(root))
-      .catch(() => {})
+      .catch((error) =>
+        logMcpDiagnostic(`MCP ${group ?? 'legacy'} startup or registration failed`, error)
+      )
   }
   const transport = new StdioServerTransport()
   let closing
@@ -171,7 +188,11 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
     lifetime.abort()
     if (heartbeat) clearInterval(heartbeat)
     closing ??= server.close().finally(async () => {
-      await registration?.close()
+      try {
+        await registration?.close()
+      } catch (error) {
+        logMcpDiagnostic(`MCP ${group ?? 'legacy'} registry cleanup failed`, error)
+      }
       process.stdin.off('end', close)
       process.off('SIGINT', close)
       process.off('SIGTERM', close)

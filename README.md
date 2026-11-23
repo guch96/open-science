@@ -157,7 +157,7 @@ The former Model settings tab is now **Local capabilities**, covering PDF extrac
 
 If your agent can configure local MCP servers, copy this setup prompt into its chat.
 
-> Follow https://github.com/aipoch/open-science#connect-your-own-agent-through-mcp to connect this client to Open-Science and check the Core, Research, and Literature MCP servers. Discover what the installed version supports and check whether Open-Science and its Notebook are ready. Ask me to sign in only when an operation I request needs it.
+> Follow https://github.com/aipoch/open-science#connect-your-own-agent-through-mcp to connect this client to Open-Science and check the Core, Research, and Literature MCP servers. Discover what the installed version supports, check whether Open-Science and its Notebook are ready, and report what is missing and the next step. Keep the browser closed during this check; ask me to sign in only when an operation I request needs it.
 
 Choose your agent to see its setup options. For clients with local command access, the Open-Science CLI is also available.
 

@@ -20,6 +20,7 @@ import {
   resolveConfigRoot
 } from './config-root.mjs'
 import { isMcpGroup, MCP_GROUP_IDS } from './agent-mcp-groups.mjs'
+import { mcpCapabilityDigest } from './agent-mcp-readiness.mjs'
 import { codexLoginCommand } from './codex-login.mjs'
 import { connectToOpenScience, OpenScienceApiError } from './index.mjs'
 import { locateBackend } from './locate-backend.mjs'
@@ -1609,7 +1610,15 @@ const assertNoClearConflict = (clear, present, label) => {
 }
 
 const runAgentCommand = async ({ command, subcommand, positionals = [], options }, deps) => {
-  const { AgentError, invokeAgentCapability } = await import('./agent-adapter.mjs')
+  const { AgentError, invokeAgentCapability, listMcpCapabilities } =
+    await import('./agent-adapter.mjs')
+  const { version } = await readCliMetadata()
+  const mcpCapabilityDigests = Object.fromEntries(
+    MCP_GROUP_IDS.map((group) => [
+      group,
+      mcpCapabilityDigest(listMcpCapabilities(group).map(({ name }) => name))
+    ])
+  )
   const [operand] = positionals
   let name
   let input
@@ -1639,7 +1648,9 @@ const runAgentCommand = async ({ command, subcommand, positionals = [], options 
   const result = await invokeAgentCapability(name, input, {
     exposure: 'cli',
     configRoot: options.configRoot,
-    connect: deps.connect
+    connect: deps.connect,
+    mcpVersion: version,
+    mcpCapabilityDigests
   })
   deps.log(JSON.stringify({ result: result ?? null }))
 }

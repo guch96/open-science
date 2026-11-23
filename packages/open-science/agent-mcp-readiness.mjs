@@ -18,6 +18,11 @@ export const MCP_GROUP_STATES = Object.freeze([
 const HEARTBEAT_TTL_MS = 10_000
 const REGISTRY_DIRECTORY = join('runtime', 'mcp-groups')
 
+const logMcpDiagnostic = (message, error) => {
+  const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  process.stderr.write(`[open-science:mcp] ${message}: ${detail}\n`)
+}
+
 const registryDirectory = (configRoot) => join(resolve(configRoot), REGISTRY_DIRECTORY)
 
 const entryPath = (directory, group, processId) => join(directory, `${group}-${processId}.json`)
@@ -46,8 +51,9 @@ const readEntries = async (configRoot) => {
       if (MCP_GROUP_IDS.includes(value?.group) && value?.processId && value?.lastSeenAt) {
         entries.push(value)
       }
-    } catch {
+    } catch (error) {
       // A process may be replacing its heartbeat file. Ignore that observation and retry later.
+      logMcpDiagnostic(`Ignoring MCP registry entry ${join(directory, name)}`, error)
     }
   }
   return entries
@@ -75,19 +81,27 @@ export const registerMcpGroup = async ({
   const startedAt = now()
   let closed = false
   let state = 'starting'
+  let pending = Promise.resolve()
+  const enqueue = (task) => {
+    const current = pending.then(task)
+    pending = current.catch(() => {})
+    return current
+  }
   const write = async () => {
-    if (closed) return
-    await writeJson(path, {
-      group,
-      serverName: mcpServerName(group),
-      profile,
-      version,
-      capabilityDigest: digest,
-      processId,
-      pid: process.pid,
-      state,
-      startedAt,
-      lastSeenAt: now()
+    return enqueue(async () => {
+      if (closed) return
+      await writeJson(path, {
+        group,
+        serverName: mcpServerName(group),
+        profile,
+        version,
+        capabilityDigest: digest,
+        processId,
+        pid: process.pid,
+        state,
+        startedAt,
+        lastSeenAt: now()
+      })
     })
   }
   await write()
@@ -107,6 +121,7 @@ export const registerMcpGroup = async ({
     },
     async close() {
       closed = true
+      await pending
       await rm(path, { force: true })
     }
   }
