@@ -5,6 +5,37 @@ and [the original Chinese implementation note](real-agent-loop-implementation-pl
 [spec #54](https://github.com/guch96/open-science/issues/54). An installed package, an Agent
 turn, a Notebook dispatch, and verified files are separate observations.
 
+## Grouped MCP release and host acceptance: November 23, 2026
+
+The grouped MCP acceptance changes were checked from integration commit `a2ba5ab09` on a
+macOS arm64 host (`Darwin 25.5.0`, Node `v24.22.2`, npm `11.19.1`). The focused release test
+creates the npm release staging boundary, packs its entry package, and verifies that
+`agent-mcp-groups.mjs`, `agent-mcp-readiness.mjs`, `mcp.mjs`, `README.md`, and `CLI.md` are in
+the npm inventory. It also compares the root README `mcpServers` JSON with the shared
+`defaultMcpServerConfig()` result and checks all three server names in the packaged README.
+The staged fixture uses a synthetic native package manifest to exercise packaging without
+claiming that a native runtime was built on this host.
+
+The release check passed 7 tests in `scripts/stage-npm-release.test.ts`. MCP unit and readiness
+tests passed 59 tests. Five selected real-stdio integration cases passed for filtered discovery,
+Research and Literature calls, reverse-order startup, required group readiness, and the default
+shell configurations. These tests use temporary profiles and local HTTP fixtures, so they prove
+the grouped protocol and package boundary. They do not prove a real model call, Notebook dispatch,
+file delivery, or `.science` migration.
+
+| Acceptance source                              | Build/package and profile evidence                                                                              | Result                                                                              |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Local package staging                          | Source commit `a2ba5ab09`; npm pack of staged `@aipoch/open-science` entry; temporary test profile; macOS arm64 | Passed package inventory and README/default-config checks                           |
+| Local MCP stdio harness                        | Source CLI entry, three `--group` servers, temporary per-test profiles, local HTTP service fixtures             | Passed selected grouped discovery, calls, and dependency checks                     |
+| Registry installation                          | No registry package was installed for this revision                                                             | Not verified. Local staging does not substitute for registry acceptance             |
+| WorkBuddy, Codex, Claude Code, OpenCode and Pi | No current grouped-package host session was run from this revision                                              | Not verified. Existing historical host evidence predates this grouped release check |
+| Windows and Linux hosts                        | No current grouped-package host run in this checkout                                                            | Not verified                                                                        |
+
+The full `packages/open-science/mcp.integration.test.ts` run still has one existing failure in
+the fresh-profile startup case that occupies a configured port and then waits for a second
+connection. The grouped cases listed above pass independently. No host or registry result is
+inferred from that unrelated failure.
+
 ## Terminal API provider setup: November 21, 2026
 
 The macOS arm64 and headless Linux arm64 npm candidates passed the same installed-package
