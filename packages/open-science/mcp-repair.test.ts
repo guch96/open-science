@@ -9,6 +9,7 @@ import {
   createMcpDependencyError,
   findMcpInstallation,
   repairMcp,
+  repairDesktopMcp,
   repairNpmMcp
 } from './mcp-repair.mjs'
 
@@ -87,6 +88,7 @@ describe('npm MCP repair', () => {
     )
     const cliPath = join(packageRoot, 'cli.mjs')
     const exec = vi.fn().mockResolvedValue({ stdout: '', stderr: '' })
+    const verifyMcp = vi.fn().mockResolvedValue({ initialize: true, toolsList: true, toolCount: 1 })
     let available = false
     const result = await repairNpmMcp({
       cliPath,
@@ -99,6 +101,7 @@ describe('npm MCP repair', () => {
         available = true
         return exec(...args)
       },
+      verifyMcp,
       platform: 'win32',
       arch: 'x64'
     })
@@ -113,6 +116,93 @@ describe('npm MCP repair', () => {
       ['install', '--global', '@aipoch/open-science@latest', '--include=optional'],
       expect.objectContaining({ cwd: dirname(dirname(dirname(packageRoot))) })
     )
+    expect(verifyMcp).toHaveBeenCalledOnce()
+  })
+})
+
+describe('desktop MCP repair', () => {
+  it('detects a packaged desktop installation separately from npm', async () => {
+    await expect(
+      findMcpInstallation({
+        cliPath: 'C:/Open-Science/resources/backend/mcp-repair.mjs',
+        findNpm: async () => undefined,
+        locateDesktop: async () => ({
+          packaged: true,
+          command: 'C:/Open-Science/open-science.exe'
+        })
+      })
+    ).resolves.toEqual({
+      kind: 'desktop',
+      executable: 'C:/Open-Science/open-science.exe'
+    })
+  })
+
+  it('uses the official desktop updater and verifies one same-profile MCP handshake', async () => {
+    const profile = 'C:/profiles/research'
+    const calls: string[] = []
+    const client = {
+      configRoot: profile,
+      callRpc: vi.fn(async (channel: string) => {
+        calls.push(channel)
+        if (channel === 'update:check')
+          return { state: 'available', current: '1.3.2', latest: '1.3.3' }
+        if (channel === 'update:download')
+          return { state: 'ready', current: '1.3.2', latest: '1.3.3' }
+        if (channel === 'update:apply')
+          return { state: 'applying', current: '1.3.2', latest: '1.3.3' }
+        if (channel === 'update:get-app-info')
+          return { name: 'Open-Science', version: '1.3.3', copyright: 'fixture' }
+        throw new Error(`Unexpected update channel: ${channel}`)
+      })
+    }
+    const connect = vi.fn(async () => client)
+    const verifyMcp = vi.fn(async () => ({ initialize: true, toolsList: true, toolCount: 3 }))
+
+    await expect(
+      repairDesktopMcp({
+        profile,
+        cliPath: 'C:/Open-Science/resources/backend/mcp-repair.mjs',
+        installation: { kind: 'desktop', executable: 'C:/Open-Science/open-science.exe' },
+        platform: 'win32',
+        arch: 'x64',
+        connect,
+        verifyMcp,
+        sleep: async () => {}
+      })
+    ).resolves.toMatchObject({
+      status: 'repaired',
+      installation: 'desktop',
+      profile,
+      platform: 'win32',
+      arch: 'x64',
+      version: '1.3.3',
+      verification: { initialize: true, toolsList: true, toolCount: 3 }
+    })
+    expect(calls).toEqual(['update:check', 'update:download', 'update:apply', 'update:get-app-info'])
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(verifyMcp).toHaveBeenCalledOnce()
+    expect(verifyMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ profile, cliPath: 'C:/Open-Science/resources/backend/mcp-repair.mjs' })
+    )
+  })
+
+  it('keeps the desktop installation untouched when the selected profile is not active', async () => {
+    const update = vi.fn()
+    const result = await repairDesktopMcp({
+      profile: 'C:/profiles/research',
+      installation: { kind: 'desktop', executable: 'C:/Open-Science/open-science.exe' },
+      connect: async () => ({
+        configRoot: 'C:/profiles/other',
+        callRpc: update
+      })
+    })
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      installation: 'desktop',
+      error: { code: 'mcp_repair_profile_mismatch' }
+    })
+    expect(update).not.toHaveBeenCalled()
   })
 })
 
