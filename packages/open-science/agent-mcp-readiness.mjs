@@ -122,6 +122,14 @@ const nextFor = (group, profile) => ({
   args: ['mcp', '--group', group, '--profile', profile]
 })
 
+const reconnectableStates = new Set([
+  'missing',
+  'unavailable',
+  'profile_mismatch',
+  'version_mismatch',
+  'unconfirmed'
+])
+
 export const readMcpGroupStatus = async ({
   configRoot,
   version,
@@ -168,6 +176,7 @@ export const readMcpGroupStatus = async ({
       group,
       serverName: MCP_GROUPS[group].serverName,
       status,
+      owner: 'deployment',
       ...(reason ? { reason } : {}),
       ...(current
         ? {
@@ -179,9 +188,7 @@ export const readMcpGroupStatus = async ({
             lastSeenAt: current.lastSeenAt
           }
         : {}),
-      ...(status === 'missing' || status === 'unconfirmed'
-        ? { next: [nextFor(group, profile ?? '<profile>')] }
-        : {})
+      ...(reconnectableStates.has(status) ? { next: [nextFor(group, profile ?? '<profile>')] } : {})
     }
   }
   for (const group of MCP_GROUP_IDS) {
@@ -240,6 +247,9 @@ export const readMcpGroupStatus = async ({
 export const mcpGroupDependency = (status, group) => {
   const current = status?.groups?.[group]
   if (!current || current.status === 'connected') return undefined
+  if (['profile_mismatch', 'version_mismatch', 'unavailable'].includes(current.status)) {
+    return undefined
+  }
   return (
     current.dependency ??
     MCP_GROUPS[group]?.dependsOn.find((id) => status.groups[id]?.status !== 'connected')
@@ -249,11 +259,16 @@ export const mcpGroupDependency = (status, group) => {
 export const mcpGroupDependencyError = (status, group) => {
   const current = status?.groups?.[group]
   const dependency = mcpGroupDependency(status, group)
-  if (!current || !dependency) return undefined
+  const ownFailure =
+    current &&
+    ['profile_mismatch', 'version_mismatch', 'unavailable', 'unconfirmed'].includes(current.status)
+  if (!current || (!dependency && !ownFailure)) return undefined
   return {
     status: current.status,
-    dependency,
+    owner: current.owner ?? 'deployment',
+    ...(current.reason ? { reason: current.reason } : {}),
+    ...(dependency ? { dependency } : {}),
     group,
-    next: current.next ?? [nextFor(dependency, status.profile ?? '<profile>')]
+    next: current.next ?? [nextFor(dependency ?? group, status.profile ?? '<profile>')]
   }
 }

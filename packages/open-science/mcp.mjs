@@ -57,7 +57,10 @@ export const createResearchMcpServer = ({
   server.server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
     const signal = AbortSignal.any([lifetime.signal, extra.signal])
     try {
-      if (group) {
+      const local =
+        group &&
+        listMcpCapabilities(group).some((entry) => entry.name === params.name && entry.local)
+      if (group && !local) {
         const status = await readMcpGroupStatus({
           configRoot: getRegistryRoot(),
           version,

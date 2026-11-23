@@ -226,6 +226,167 @@ it('allows reverse-order grouped MCP startup and reaches dependency readiness af
   })
 })
 
+it('keeps a single Core group connected without claiming full-loop readiness', async () => {
+  const agent = await resourceAgents(() => undefined)
+  const core = await connectMcp(agent.profile, undefined, cli, 'core')
+  await vi.waitFor(async () => {
+    const listed = await core.callTool({ name: 'list_capabilities' })
+    expect(listed.structuredContent).toMatchObject({
+      result: {
+        mcp: {
+          groups: {
+            core: { status: 'connected' },
+            research: { status: 'missing' },
+            literature: { status: 'missing' }
+          },
+          fullLoopReady: false
+        }
+      }
+    })
+  })
+})
+
+it('registers all grouped MCP servers during parallel startup', async () => {
+  const agent = await resourceAgents(() => undefined)
+  const [core] = await Promise.all(
+    (['core', 'research', 'literature'] as const).map((group) =>
+      connectMcp(agent.profile, undefined, cli, group)
+    )
+  )
+  await vi.waitFor(async () => {
+    const listed = await core.callTool({ name: 'list_capabilities' })
+    expect(listed.structuredContent).toMatchObject({
+      result: {
+        mcp: {
+          groups: {
+            core: { status: 'connected' },
+            research: { status: 'connected' },
+            literature: { status: 'connected' }
+          }
+        }
+      }
+    })
+  })
+})
+
+it('recovers a downstream Research group after its Core dependency connects', async () => {
+  let projectRequests = 0
+  const agent = await resourceAgents(async (request, response) => {
+    if (request.url === '/api/v1/projects') {
+      projectRequests += 1
+      response.end(JSON.stringify({ data: [{ id: 'p1', name: 'Recovered project' }] }))
+      return
+    }
+    response.writeHead(404).end(JSON.stringify({ error: { code: 'not_found' } }))
+  })
+  const research = await connectMcp(agent.profile, undefined, cli, 'research')
+  const blocked = await research.callTool({ name: 'list_projects' })
+  expect(blocked.structuredContent).toMatchObject({
+    error: { code: 'mcp_dependency_unavailable', group: 'research', dependency: 'core' }
+  })
+  expect(projectRequests).toBe(0)
+
+  await connectMcp(agent.profile, undefined, cli, 'core')
+  await vi.waitFor(async () => {
+    const recovered = await research.callTool({ name: 'list_projects' })
+    expect(recovered.structuredContent).toEqual({
+      result: [{ id: 'p1', name: 'Recovered project' }]
+    })
+  })
+  expect(projectRequests).toBe(1)
+})
+
+it('re-registers a grouped MCP process after restart', async () => {
+  type GroupStatus = {
+    result: { mcp: { groups: { core: { processId?: string } } } }
+  }
+  const agent = await resourceAgents(() => undefined)
+  const first = await connectMcp(agent.profile, undefined, cli, 'core')
+  const firstStatus = await first.callTool({ name: 'list_capabilities' })
+  const firstProcess = (firstStatus.structuredContent as GroupStatus).result.mcp.groups.core
+    .processId
+  await first.close()
+
+  const second = await connectMcp(agent.profile, undefined, cli, 'core')
+  await vi.waitFor(async () => {
+    const status = await second.callTool({ name: 'list_capabilities' })
+    expect(status.structuredContent).toMatchObject({
+      result: { mcp: { groups: { core: { status: 'connected' } } } }
+    })
+    expect((status.structuredContent as GroupStatus).result.mcp.groups.core.processId).not.toBe(
+      firstProcess
+    )
+  })
+})
+
+it('reconnects a grouped MCP client after the persistent service state moves to a restarted service', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-service-restart-'))
+  cleanup.push(() => rm(profile, { recursive: true, force: true }))
+  const token = 'service-restart-token'
+  let generation = 0
+  let service: ReturnType<typeof createServer>
+  const requests: number[] = []
+  const start = async (): Promise<void> => {
+    generation += 1
+    const current = generation
+    service = createServer((request, response) => {
+      if (request.headers.authorization !== `Bearer ${token}`) {
+        response.writeHead(401).end()
+        return
+      }
+      response.setHeader('content-type', 'application/json')
+      if (request.url === '/api/bootstrap') {
+        response.end(JSON.stringify({ taskCapabilities: ['doctor'] }))
+        return
+      }
+      if (request.url === '/api/v1/doctor') {
+        requests.push(current)
+        response.end(
+          JSON.stringify({
+            data: {
+              ready: true,
+              checks: {
+                runtime: { status: 'ready', framework: 'codex' },
+                provider: { status: 'ready' }
+              }
+            }
+          })
+        )
+        return
+      }
+      response.writeHead(404).end(JSON.stringify({ error: { code: 'not_found' } }))
+    })
+    service.listen(0, '127.0.0.1')
+    await once(service, 'listening')
+    await writeFile(join(profile, 'web-token'), token)
+    await writeFile(
+      join(profile, 'web-service.json'),
+      JSON.stringify({
+        pid: process.pid,
+        port: (service.address() as { port: number }).port,
+        startedAt: new Date().toISOString()
+      })
+    )
+  }
+  await start()
+  cleanup.push(async () => {
+    service.closeAllConnections()
+    await new Promise<void>((done) => service.close(() => done()))
+  })
+
+  const core = await connectMcp(profile, undefined, cli, 'core')
+  expect((await core.callTool({ name: 'doctor' })).structuredContent).toMatchObject({
+    result: { readiness: { service: 'ready', agent: 'ready' } }
+  })
+  service.closeAllConnections()
+  await new Promise<void>((done) => service.close(() => done()))
+  await start()
+  expect((await core.callTool({ name: 'doctor' })).structuredContent).toMatchObject({
+    result: { readiness: { service: 'ready', agent: 'ready' } }
+  })
+  expect(requests).toEqual([1, 2])
+})
+
 async function cliError(
   args: string[],
   input?: string,
