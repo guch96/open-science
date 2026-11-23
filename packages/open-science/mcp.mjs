@@ -9,8 +9,9 @@ import {
   agentGuideUri,
   agentInputSchema,
   invokeAgentCapability,
-  listAgentCapabilities
+  listMcpCapabilities
 } from './agent-adapter.mjs'
+import { mcpServerName } from './agent-mcp-groups.mjs'
 import { connectToOpenScience, OpenScienceApiError } from './index.mjs'
 
 const outputSchema = {
@@ -31,11 +32,12 @@ export const createResearchMcpServer = ({
   configRoot,
   version,
   connect = connectToOpenScience,
-  probe = connect
+  probe = connect,
+  group
 }) => {
-  const server = new McpServer({ name: 'open-science', version })
+  const server = new McpServer({ name: mcpServerName(group), version })
   const lifetime = new AbortController()
-  const tools = listAgentCapabilities('mcp').map((entry) => ({
+  const tools = (group ? listMcpCapabilities(group) : listMcpCapabilities()).map((entry) => ({
     name: entry.name,
     description: entry.description,
     inputSchema: agentInputSchema(entry),
@@ -53,21 +55,24 @@ export const createResearchMcpServer = ({
         configRoot,
         signal,
         connect,
-        probe
+        probe,
+        mcpGroup: group
       })
       return toolResult({ result: result ?? null })
     } catch (error) {
       return toolResult({ error: agentErrorDetails(error) }, true)
     }
   })
-  server.registerResource(
-    'agent_guide',
-    agentGuideUri,
-    { description: 'Local Open-Science guide for external agents.', mimeType: 'text/markdown' },
-    async (uri) => ({
-      contents: [{ uri: uri.href, mimeType: 'text/markdown', text: agentGuide }]
-    })
-  )
+  if (!group || group === 'core') {
+    server.registerResource(
+      'agent_guide',
+      agentGuideUri,
+      { description: 'Local Open-Science guide for external agents.', mimeType: 'text/markdown' },
+      async (uri) => ({
+        contents: [{ uri: uri.href, mimeType: 'text/markdown', text: agentGuide }]
+      })
+    )
+  }
   const onclose = server.server.onclose
   server.server.onclose = () => {
     lifetime.abort()
@@ -76,7 +81,7 @@ export const createResearchMcpServer = ({
   return server
 }
 
-export const runResearchMcpServer = async ({ configRoot, version, startService }) => {
+export const runResearchMcpServer = async ({ configRoot, version, startService, group }) => {
   // The handshake and tool catalog stay responsive while the standalone backend starts.
   const lifetime = new AbortController()
   let startup
@@ -84,6 +89,7 @@ export const runResearchMcpServer = async ({ configRoot, version, startService }
   const server = createResearchMcpServer({
     configRoot,
     version,
+    group,
     probe: connectToOpenScience,
     connect: async ({ signal }) => {
       const attempt = serviceRoot()

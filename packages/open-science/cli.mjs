@@ -19,6 +19,7 @@ import {
   readWebToken,
   resolveConfigRoot
 } from './config-root.mjs'
+import { isMcpGroup, MCP_GROUP_IDS } from './agent-mcp-groups.mjs'
 import { codexLoginCommand } from './codex-login.mjs'
 import { connectToOpenScience, OpenScienceApiError } from './index.mjs'
 import { locateBackend } from './locate-backend.mjs'
@@ -48,7 +49,7 @@ Commands:
   stop --force  Stop the local service even with an App connected; running tasks may be interrupted
   status      Show local service status, App sessions, and persistent running
   url         Print the authenticated web URL
-  mcp         Start or reuse the local service and serve research tools over MCP stdio (--profile <path>)
+  mcp         Start or reuse the local service and serve research tools over MCP stdio (--group core|research|literature --profile <path>)
   tools list [group] [--check-service] --json  Discover capabilities and optionally probe service support
   tools describe <name> --json                Read the capability input schema
   tools call <name> --json                    Invoke with a JSON object on stdin
@@ -215,7 +216,8 @@ const VALUE_OPTIONS = {
   '--offset': 'offset',
   '--duplicates': 'duplicates',
   '--collection': 'collection',
-  '--parent': 'parent'
+  '--parent': 'parent',
+  '--group': 'mcpGroup'
 }
 
 const TASK_COMMANDS = new Set([
@@ -348,7 +350,7 @@ export const parseCliArgs = (argv) => {
       : command === 'paths'
         ? ['--json', '--help', '-h', '--config-root', '--profile']
         : command === 'mcp'
-          ? ['--help', '-h', '--config-root', '--profile']
+          ? ['--help', '-h', '--config-root', '--profile', '--group']
           : command === 'help'
             ? ['--help', '-h']
             : command === 'doctor' || command === 'tools'
@@ -375,7 +377,8 @@ export const parseCliArgs = (argv) => {
   const positionals = []
   while (args.length > 0) {
     const arg = args.shift()
-    if (localOptions && arg.startsWith('-') && !localOptions.includes(arg)) {
+    const inlineMcpGroup = command === 'mcp' && arg.startsWith('--group=')
+    if (localOptions && arg.startsWith('-') && !localOptions.includes(arg) && !inlineMcpGroup) {
       throw new CliUsageError(`Unknown option for ${command}: ${arg}`)
     }
     if (arg.startsWith('--credential-store=')) {
@@ -385,6 +388,7 @@ export const parseCliArgs = (argv) => {
     } else if (arg === '--no-open') options.open = false
     else if (arg.startsWith('--password-store='))
       options.passwordStore = arg.slice('--password-store='.length)
+    else if (inlineMcpGroup) options.mcpGroup = arg.slice('--group='.length)
     else if (arg === '--no-sandbox') options.noSandbox = true
     else if (arg === '--json') options.json = true
     else if (arg === '--check-service' && command === 'tools') options.checkService = true
@@ -459,11 +463,19 @@ export const parseCliArgs = (argv) => {
     options
   }
   if (localOptions) {
+    if (command === 'mcp' && options.mcpGroup !== undefined && !isMcpGroup(options.mcpGroup)) {
+      throw new CliUsageError(
+        `Invalid MCP group: ${options.mcpGroup}. Choose one of ${MCP_GROUP_IDS.join(', ')}.`
+      )
+    }
     if (!options.help && (command === 'doctor' || command === 'tools') && !options.json) {
       throw new CliUsageError(`${command} requires --json.`)
     }
     assertPositionalLimit(command, subcommand, positionals)
     return parsed
+  }
+  if (options.mcpGroup !== undefined) {
+    throw new CliUsageError('--group requires the mcp command.')
   }
   // Help is local: it must not require execution-only options or a running backend.
   if (options.help) return parsed
@@ -2625,6 +2637,7 @@ export const runCli = async (argv = process.argv.slice(2)) => {
     await runResearchMcpServer({
       configRoot: options.configRoot,
       version,
+      group: options.mcpGroup,
       startService: async (signal) => {
         // Let the kernel bind a free loopback port for a new MCP service. Reuse still uses the
         // authenticated profile's existing endpoint. stdout is reserved for MCP messages.
