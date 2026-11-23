@@ -2565,7 +2565,7 @@ it('delivers a pinned Artifact through either entry point without overwriting lo
     })
   )
   await writeFile(join(profile, 'web-token'), token)
-  const mcp = await connectMcp(profile)
+  const mcp = await connectMcp(profile, undefined, cli, 'core')
   const cliArgs = (name: string): string[] => [
     'tools',
     'call',
@@ -2725,6 +2725,104 @@ it('delivers a pinned Artifact through either entry point without overwriting lo
   )
   expect(await readFile(collisionPath, 'utf8')).toBe('xyz')
 }, 20000)
+
+it('runs Core package export, import, query and Fork operations through grouped MCP', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-core-package-'))
+  cleanup.push(() => rm(profile, { recursive: true, force: true }))
+  const sourcePath = join(profile, 'source.science')
+  const exportPath = join(profile, 'exported.science')
+  await writeFile(sourcePath, 'source package')
+  let latest: Record<string, unknown> | undefined
+  const agent = await resourceAgents(
+    async (request, response) => {
+      if (request.url !== '/rpc/sessions%3Apackage-operation') {
+        response.writeHead(404).end(JSON.stringify({ error: { code: 'not_found' } }))
+        return
+      }
+      let body = ''
+      for await (const chunk of request) body += chunk
+      const [input] = JSON.parse(body).args
+      if (input.action === 'agent-export') {
+        await writeFile(input.destinationPath, 'science')
+        latest = {
+          id: '11111111-1111-4111-8111-111111111111',
+          kind: 'export',
+          state: 'succeeded',
+          agent: { correlationId: input.correlationId, destinationPath: input.destinationPath },
+          session: { projectId: 'p1', sessionId: 's1' },
+          result: {
+            filePath: input.destinationPath,
+            fileDigest: {
+              sizeBytes: 7,
+              checksum: '790fad4744a9da8d301e23c83b386f1baabd229611dbe5265df62a97b5357393'
+            }
+          }
+        }
+      } else if (input.action === 'agent-import') {
+        latest = {
+          id: '22222222-2222-4222-8222-222222222222',
+          kind: 'import',
+          state: 'succeeded',
+          agent: { correlationId: input.correlationId, sourcePath: input.sourcePath },
+          importTarget: { projectId: 'p2' },
+          result: { imported: { projectId: 'p2', sessionId: 's2' }, packageSummary: { files: 1 } }
+        }
+      } else if (input.action === 'agent-fork') {
+        latest = {
+          id: '33333333-3333-4333-8333-333333333333',
+          kind: 'fork',
+          state: 'succeeded',
+          agent: { correlationId: input.correlationId },
+          session: { projectId: 'p2', sessionId: 's2' },
+          result: { imported: { projectId: 'p2', sessionId: 's3' } }
+        }
+      } else if (input.action !== 'snapshot') {
+        response.writeHead(400).end(JSON.stringify({ error: { code: 'invalid_request' } }))
+        return
+      }
+      response.end(JSON.stringify({ ok: true, result: latest }))
+    },
+    ['agent-package-operations', 'agent-package-import', 'agent-package-fork']
+  )
+  const core = await connectMcp(agent.profile, undefined, cli, 'core')
+  const exported = await core.callTool({
+    name: 'export_session',
+    arguments: { projectId: 'p1', sessionId: 's1', destinationPath: exportPath, waitMs: 1000 }
+  })
+  expect(exported.structuredContent).toMatchObject({
+    result: { completionStatus: 'completed', delivery: { status: 'verified' } }
+  })
+  const imported = await core.callTool({
+    name: 'import_session',
+    arguments: { sourcePath, targetProjectId: 'p2', waitMs: 1000 }
+  })
+  expect(imported.structuredContent).toMatchObject({
+    result: {
+      completionStatus: 'completed',
+      session: { projectId: 'p2', sessionId: 's2', readOnly: true }
+    }
+  })
+  const forked = await core.callTool({
+    name: 'fork_session',
+    arguments: { projectId: 'p2', sessionId: 's2', waitMs: 1000 }
+  })
+  expect(forked.structuredContent).toMatchObject({
+    result: {
+      completionStatus: 'completed',
+      session: { projectId: 'p2', sessionId: 's3', readOnly: false }
+    }
+  })
+  const operation = await core.callTool({
+    name: 'get_package_operation',
+    arguments: { operationId: '33333333-3333-4333-8333-333333333333' }
+  })
+  expect(operation.structuredContent).toMatchObject({
+    result: {
+      completionStatus: 'completed',
+      session: { projectId: 'p2', sessionId: 's3', readOnly: false }
+    }
+  })
+})
 
 it.each(['EOF', 'SIGTERM', 'SIGINT'] as const)(
   'terminates on %s without writing non-protocol stdout',
