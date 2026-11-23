@@ -129,6 +129,25 @@ URLs. Successful queries exit `0`; missing or invalid version metadata produces 
 than a fallback version. `paths` accepts only the profile, JSON, and help options; `version`
 accepts only JSON and help options, and `help` accepts only one optional command name and help flags.
 
+### MCP installation repair
+
+MCP startup diagnostics never use stdout because MCP stdout is reserved for JSON-RPC. If the
+installed package is missing the MCP SDK, `open-science mcp` writes a structured diagnostic to
+stderr and `doctor --json` returns the same `mcp_dependency_missing` code. An external Agent can
+show that action to the user and, after explicit authorization, repair an npm installation:
+
+```bash
+open-science doctor --profile /absolute/path/to/profile --json
+open-science repair mcp --profile /absolute/path/to/profile --json
+```
+
+The repair command uses the official complete npm distribution with optional dependencies, rather
+than adding a package to the existing installation. It reports `repaired`, `already_healthy`, or a
+structured failure. A successful repair keeps the selected Profile; the Agent must start a fresh
+MCP process with that Profile and verify `initialize` followed by `tools/list` once. Desktop and
+standalone archive updates use their existing official update channels and are not performed by
+this npm repair command.
+
 ## Service lifecycle
 
 Startup waits up to 120 seconds by default. Set `start --timeout-ms <ms>` for a different

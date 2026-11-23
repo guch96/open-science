@@ -24,6 +24,13 @@ import { mcpCapabilityDigest } from './agent-mcp-readiness.mjs'
 import { codexLoginCommand } from './codex-login.mjs'
 import { connectToOpenScience, OpenScienceApiError } from './index.mjs'
 import { locateBackend } from './locate-backend.mjs'
+import {
+  checkMcpDependency,
+  createMcpDependencyError,
+  findNpmInstallation,
+  isMissingMcpDependency,
+  repairNpmMcp
+} from './mcp-repair.mjs'
 import { openBrowser } from './agent-setup-action.mjs'
 import { startLaunchLogReader } from './launch-log.mjs'
 import { protectInstallationStartup } from './installation-startup.cjs'
@@ -51,6 +58,7 @@ Commands:
   status      Show local service status, App sessions, and persistent running
   url         Print the authenticated web URL
   mcp         Start or reuse the local service and serve research tools over MCP stdio (--group core|research|literature --profile <path>)
+  repair mcp  Repair the npm MCP installation and report a machine-readable result
   tools list [group] [--check-service] --json  Discover capabilities and optionally probe service support
   tools describe <name> --json                Read the capability input schema
   tools call <name> --json                    Invoke with a JSON object on stdin
@@ -223,6 +231,7 @@ const VALUE_OPTIONS = {
 
 const TASK_COMMANDS = new Set([
   'doctor',
+  'repair',
   'runtime',
   'project',
   'run',
@@ -239,6 +248,7 @@ const TASK_COMMANDS = new Set([
 ])
 const GROUP_COMMANDS = new Set([
   'codex',
+  'repair',
   'tools',
   'runtime',
   'project',
@@ -260,6 +270,7 @@ const POSITIONAL_LIMITS = new Map([
   ['help', 1],
   ['paths', 0],
   ['mcp', 0],
+  ['repair mcp', 0],
   ['doctor', 0],
   ['tools list', 1],
   ['tools describe', 1],
@@ -1401,7 +1412,20 @@ const TASK_DEPS = {
   stdinIsTTY: process.stdin.isTTY,
   setExitCode: (code) => {
     process.exitCode = code
-  }
+  },
+  checkMcpDependency
+}
+
+export const repairMcpCommand = async (options, deps = TASK_DEPS) => {
+  if (!options.configRoot) throw new CliUsageError('--profile is required for repair mcp.')
+  const result = await (deps.repairMcp ?? repairNpmMcp)({ profile: options.configRoot })
+  if (result.status === 'failed') deps.setExitCode?.(1)
+  deps.log(
+    options.json
+      ? JSON.stringify(result)
+      : `${result.status}: ${result.error?.message ?? 'MCP is ready.'}`
+  )
+  return result
 }
 
 const outputValue = (value, options, deps) => {
@@ -1620,6 +1644,14 @@ const runAgentCommand = async ({ command, subcommand, positionals = [], options 
     ])
   )
   const [operand] = positionals
+  if (command === 'doctor') {
+    const dependency = await deps.checkMcpDependency()
+    if (!dependency.available)
+      throw createMcpDependencyError({
+        configRoot: options.configRoot,
+        installation: (await findNpmInstallation())?.kind ?? 'unknown'
+      })
+  }
   let name
   let input
   if (command === 'doctor') {
@@ -1682,6 +1714,7 @@ const readProviderKey = (target) =>
 export const runTaskCommand = async (parsed, dependencies = {}) => {
   const deps = { ...TASK_DEPS, ...dependencies }
   const { command, subcommand, positionals = [], options } = parsed
+  if (command === 'repair' && subcommand === 'mcp') return repairMcpCommand(options, deps)
   if (command === 'doctor' || command === 'tools') return runAgentCommand(parsed, deps)
   if (command === 'provider' && subcommand === 'setup') {
     if (!deps.stdinIsTTY || !process.stderr.isTTY)
@@ -2516,7 +2549,8 @@ export const reportCliError = (error, argv = process.argv.slice(2), dependencies
     },
     ...dependencies
   }
-  const agentError = error?.name === 'AgentError' ? error.details : undefined
+  const agentError =
+    error?.name === 'AgentError' || error?.name === 'McpDependencyError' ? error.details : undefined
   const code = agentError?.code ?? error?.code ?? 'command_failed'
   const message = error instanceof Error ? error.message : String(error)
   const exitCode =
@@ -2558,7 +2592,7 @@ export const reportCliError = (error, argv = process.argv.slice(2), dependencies
       })
     )
   } else {
-    deps.error(message)
+    deps.error(error?.name === 'McpDependencyError' ? JSON.stringify(agentError) : message)
   }
   deps.setExitCode(exitCode)
   return exitCode
@@ -2643,7 +2677,23 @@ export const runCli = async (argv = process.argv.slice(2)) => {
     console.log(options.json ? JSON.stringify({ version }) : version)
   } else if (command === 'paths') await pathsCommand(options)
   else if (command === 'mcp') {
-    const { runResearchMcpServer } = await import('./mcp.mjs')
+    const dependency = await checkMcpDependency()
+    if (!dependency.available)
+      throw createMcpDependencyError({
+        configRoot: options.configRoot,
+        installation: (await findNpmInstallation())?.kind ?? 'unknown'
+      })
+    let runResearchMcpServer
+    try {
+      ;({ runResearchMcpServer } = await import('./mcp.mjs'))
+    } catch (error) {
+      if (isMissingMcpDependency(error))
+        throw createMcpDependencyError({
+          configRoot: options.configRoot,
+          installation: (await findNpmInstallation())?.kind ?? 'unknown'
+        })
+      throw error
+    }
     const { version } = await readCliMetadata()
     await runResearchMcpServer({
       configRoot: options.configRoot,

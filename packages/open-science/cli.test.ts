@@ -19,6 +19,7 @@ import {
   initCommand,
   parseCliArgs,
   reportCliError,
+  repairMcpCommand,
   runCli,
   runTaskCommand as dispatchTaskCommand,
   startCommand,
@@ -44,7 +45,7 @@ const artifactList = (): Promise<Array<{ id: string; name: string }>> =>
   Promise.resolve([{ id: 'artifact-1', name: 'report.md' }])
 
 describe('CLI help', () => {
-  it.each([undefined, 'run', 'project', 'version', 'paths', 'mcp'])(
+  it.each([undefined, 'run', 'project', 'version', 'paths', 'mcp', 'repair'])(
     'makes help %s equivalent to the help flag',
     async (command) => {
       const log = vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -76,6 +77,18 @@ describe('CLI help', () => {
     ['run', '-v']
   ])('rejects unrelated inputs to local commands: %j', (...argv) => {
     expect(() => parseCliArgs(argv)).toThrow(CliUsageError)
+  })
+
+  it('parses the npm MCP repair command with an explicit profile', () => {
+    expect(parseCliArgs(['repair', 'mcp', '--profile', '/tmp/profile', '--json'])).toMatchObject({
+      command: 'repair',
+      subcommand: 'mcp',
+      options: { configRoot: '/tmp/profile', json: true }
+    })
+    expect(() => parseCliArgs(['repair', 'mcp', '--profile', '/tmp/profile'])).not.toThrow()
+    expect(() => parseCliArgs(['repair', 'mcp', '--profile', '/tmp/profile', 'extra'])).toThrow(
+      'repair mcp accepts no arguments.'
+    )
   })
 
   it('parses and validates an MCP server group', () => {
@@ -182,9 +195,45 @@ describe('CLI help', () => {
       log.mockRestore()
     }
   })
+
+  it('documents MCP repair in command help', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await runCli(['repair', '--help'])
+      expect(log).toHaveBeenLastCalledWith(expect.stringContaining('repair mcp'))
+    } finally {
+      log.mockRestore()
+    }
+  })
 })
 
 describe('task CLI', () => {
+  it('runs MCP repair without connecting to the service', async () => {
+    const log = vi.fn()
+    const repair = vi.fn().mockResolvedValue({
+      status: 'repaired',
+      profile: '/tmp/profile',
+      installation: 'npm',
+      version: '1.3.3',
+      platform: 'win32',
+      arch: 'x64'
+    })
+    await repairMcpCommand(
+      parseCliArgs(['repair', 'mcp', '--profile', '/tmp/profile', '--json']).options,
+      { repairMcp: repair, log }
+    )
+    expect(repair).toHaveBeenCalledWith({ profile: '/tmp/profile' })
+    expect(log).toHaveBeenCalledWith(
+      JSON.stringify({
+        status: 'repaired',
+        profile: '/tmp/profile',
+        installation: 'npm',
+        version: '1.3.3',
+        platform: 'win32',
+        arch: 'x64'
+      })
+    )
+  })
   it('reads only the named API credential environment variable and does not print it', async () => {
     const bootstrap = vi.fn().mockResolvedValue({ ok: true, providerId: 'cli-openai' })
     const log = vi.fn()
