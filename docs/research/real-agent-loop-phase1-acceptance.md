@@ -7,7 +7,7 @@ turn, a Notebook dispatch, and verified files are separate observations.
 
 ## Grouped MCP release and host acceptance: November 23, 2026
 
-The grouped MCP acceptance changes were checked from integration commit `4f0cc5f14` on a
+The grouped MCP acceptance changes were checked from integration commit `1c5be88bc` on a
 macOS arm64 host (`Darwin 25.5.0`, Node `v24.22.2`, npm `11.19.1`). The focused release test
 creates the npm release staging boundary, packs its entry package, and verifies that
 `agent-mcp-groups.mjs`, `agent-mcp-readiness.mjs`, `mcp.mjs`, `README.md`, and `CLI.md` are in
@@ -25,13 +25,13 @@ file delivery, or `.science` migration.
 
 | Acceptance source                              | Build/package and profile evidence                                                                              | Result                                                                              |
 | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Local package staging                          | Source commit `4f0cc5f14`; npm pack of staged `@aipoch/open-science` entry; temporary test profile; macOS arm64 | Passed package inventory and README/default-config checks                           |
+| Local package staging                          | Source commit `1c5be88bc`; npm pack of staged `@aipoch/open-science` entry; temporary test profile; macOS arm64 | Passed package inventory and README/default-config checks                           |
 | Local MCP stdio harness                        | Source CLI entry, three `--group` servers, temporary per-test profiles, local HTTP service fixtures             | Passed selected grouped discovery, calls, and dependency checks                     |
 | Registry installation                          | No registry package was installed for this revision                                                             | Not verified. Local staging does not substitute for registry acceptance             |
 | WorkBuddy, Codex, Claude Code, OpenCode and Pi | No current grouped-package host session was run from this revision                                              | Not verified. Existing historical host evidence predates this grouped release check |
 | Windows and Linux hosts                        | No current grouped-package host run in this checkout                                                            | Not verified                                                                        |
 
-The full four-file MCP/CLI/readiness run passed 251 tests, including the fresh-profile startup
+The full four-file MCP/CLI/readiness run passed 252 tests, including the fresh-profile startup
 case. The fixture now resolves the actual installed dependency tree when this checkout is a
 worktree with its own empty `node_modules` directory; the product startup path is unchanged.
 
