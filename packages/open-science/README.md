@@ -64,6 +64,13 @@ Stopping the service affects all connected clients. For automated tasks, review 
 [permissions and output options](https://github.com/aipoch/open-science/blob/main/packages/open-science/CLI.md)
 and the safety guidance below.
 
+## Connect an external agent through MCP
+
+Use the [README setup prompt](https://github.com/aipoch/open-science#connect-your-own-agent-through-mcp)
+to configure the three required local stdio servers: `open-science-core`,
+`open-science-research`, and `open-science-literature`. The [CLI guide](https://github.com/aipoch/open-science/blob/main/packages/open-science/CLI.md#external-agents-through-mcp)
+has client-specific commands, profiles, and readiness checks.
+
 ## Update or uninstall
 
 Stop services started by this installation before replacing it. Use the same `--config-root`
