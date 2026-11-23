@@ -7,6 +7,7 @@ import {
   readMcpGroupStatus,
   registerMcpGroup
 } from './agent-mcp-readiness.mjs'
+import { defaultMcpServerConfig } from './agent-mcp-groups.mjs'
 
 const cleanup: string[] = []
 afterEach(async () => {
@@ -85,4 +86,62 @@ it('marks an expired heartbeat unconfirmed without claiming the process is conne
   })
   expect(status.groups.core).toMatchObject({ status: 'unconfirmed', reason: 'heartbeat_expired' })
   await core?.close()
+})
+
+it('builds all required local MCP server entries for both shell families', () => {
+  expect(Object.keys(defaultMcpServerConfig())).toEqual([
+    'open-science-core',
+    'open-science-research',
+    'open-science-literature'
+  ])
+  expect(defaultMcpServerConfig()['open-science-research']).toEqual({
+    command: 'npx',
+    args: ['--yes', '@aipoch/open-science@latest', 'mcp', '--group', 'research']
+  })
+  expect(defaultMcpServerConfig({ command: 'cmd.exe' })['open-science-literature']).toEqual({
+    command: 'cmd.exe',
+    args: [
+      '/d',
+      '/c',
+      'npx',
+      '--yes',
+      '@aipoch/open-science@latest',
+      'mcp',
+      '--group',
+      'literature'
+    ]
+  })
+})
+
+it('requires every group and readiness layer before declaring the full loop ready', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'osci-mcp-readiness-full-'))
+  cleanup.push(profile)
+  const entries = await Promise.all(
+    (['core', 'research', 'literature'] as const).map((group) =>
+      registerMcpGroup({
+        configRoot: profile,
+        group,
+        version: '1.3.2',
+        capabilityNames: [group],
+        processId: `${group}-full-process`,
+        now: () => '2026-11-23T00:00:00.000Z'
+      })
+    )
+  )
+  await Promise.all(entries.map((entry) => entry?.setState('connected')))
+  const ready = await readMcpGroupStatus({
+    configRoot: profile,
+    version: '1.3.2',
+    readiness: { agent: 'ready', provider: 'ready', notebook: 'ready' },
+    now: Date.parse('2026-11-23T00:00:05.000Z')
+  })
+  expect(ready.fullLoopReady).toBe(true)
+  const blocked = await readMcpGroupStatus({
+    configRoot: profile,
+    version: '1.3.2',
+    readiness: { agent: 'ready', provider: 'ready', notebook: 'unconfirmed' },
+    now: Date.parse('2026-11-23T00:00:05.000Z')
+  })
+  expect(blocked.fullLoopReady).toBe(false)
+  await Promise.all(entries.map((entry) => entry?.close()))
 })

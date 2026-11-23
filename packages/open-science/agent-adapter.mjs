@@ -538,7 +538,7 @@ const setupCodes = [
   'provider_not_ready'
 ]
 
-async function doctor({ language }, { getClient, configRoot, signal }) {
+async function doctor({ language }, { getClient, configRoot, registryRoot, signal }) {
   const client = await getClient()
   const profile = client.configRoot ?? configRoot
   const [report, deliveryDirectory] = await Promise.all([
@@ -559,9 +559,20 @@ async function doctor({ language }, { getClient, configRoot, signal }) {
       : report?.ready === false
         ? 'blocked'
         : 'unconfirmed'
+  const mcp = await readMcpGroupStatus({
+    configRoot: registryRoot ?? profile,
+    serviceStatus: 'ready',
+    readiness: {
+      agent,
+      provider: readinessStatus(provider?.status),
+      notebook: notebook.status
+    }
+  })
   return {
     ...(profile ? { profile } : {}),
     readiness: { service: 'ready', agent, notebook: notebook.status },
+    mcp,
+    fullLoopReady: mcp.fullLoopReady,
     checks: {
       runtime: {
         status: readinessStatus(runtime?.status),

@@ -48,9 +48,7 @@ export const getMcpGroup = (group) => {
 }
 
 export const mcpGroupForCapability = (entry) => {
-  const match = MCP_GROUP_IDS.find((id) =>
-    MCP_GROUPS[id].capabilityGroups.includes(entry.group)
-  )
+  const match = MCP_GROUP_IDS.find((id) => MCP_GROUPS[id].capabilityGroups.includes(entry.group))
   return match
 }
 
@@ -60,3 +58,20 @@ export const capabilityBelongsToMcpGroup = (entry, group) => {
 }
 
 export const mcpServerName = (group) => getMcpGroup(group)?.serverName ?? 'open-science'
+
+export const defaultMcpServerConfig = ({
+  command = 'npx',
+  packageSpec = '@aipoch/open-science@latest'
+} = {}) =>
+  Object.fromEntries(
+    MCP_GROUP_IDS.map((group) => [
+      mcpServerName(group),
+      {
+        command,
+        args:
+          command === 'cmd.exe'
+            ? ['/d', '/c', 'npx', '--yes', packageSpec, 'mcp', '--group', group]
+            : [...(command === 'npx' ? ['--yes'] : []), packageSpec, 'mcp', '--group', group]
+      }
+    ])
+  )

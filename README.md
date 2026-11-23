@@ -157,7 +157,7 @@ The former Model settings tab is now **Local capabilities**, covering PDF extrac
 
 If your agent can configure local MCP servers, copy this setup prompt into its chat.
 
-> Set up the Open-Science MCP connection for me using https://github.com/aipoch/open-science#connect-your-own-agent-through-mcp. Discover what the installed version supports and check whether the Agent and Notebook are ready. Tell me what is missing and where I need to act. Keep the browser closed during this check.
+> Follow https://github.com/aipoch/open-science#connect-your-own-agent-through-mcp to connect this client to Open-Science and check the Core, Research, and Literature MCP servers. Discover what the installed version supports and check whether Open-Science and its Notebook are ready. Ask me to sign in only when an operation I request needs it.
 
 Choose your agent to see its setup options. For clients with local command access, the Open-Science CLI is also available.
 
@@ -206,25 +206,34 @@ or later and npm on the client's PATH:
 ```json
 {
   "mcpServers": {
-    "open-science": {
+    "open-science-core": {
       "command": "npx",
-      "args": ["--yes", "@aipoch/open-science@latest", "mcp"]
+      "args": ["--yes", "@aipoch/open-science@latest", "mcp", "--group", "core"]
+    },
+    "open-science-research": {
+      "command": "npx",
+      "args": ["--yes", "@aipoch/open-science@latest", "mcp", "--group", "research"]
+    },
+    "open-science-literature": {
+      "command": "npx",
+      "args": ["--yes", "@aipoch/open-science@latest", "mcp", "--group", "literature"]
     }
   }
 }
 ```
 
-If your client edits the whole MCP configuration, merge the `open-science` entry into its
-existing `mcpServers` object. Some clients, including WorkBuddy, ask you to trust the local
-server before they will connect to it. Check the command and arguments before trusting it.
+If your client edits the whole MCP configuration, merge the three `open-science-*` entries into
+its existing `mcpServers` object. Some clients, including WorkBuddy, ask you to trust the local
+servers before they will connect to them. Check the commands and arguments before trusting them.
 
-On Windows, set `"command": "cmd.exe"` and use
-`"args": ["/d", "/c", "npx", "--yes", "@aipoch/open-science@latest", "mcp"]`
-so the client can launch npm's command shim.
+On Windows, use the same three server entries with `"command": "cmd.exe"`. Each entry uses
+`["/d", "/c", "npx", "--yes", "@aipoch/open-science@latest", "mcp", "--group", "<group>"]`
+as its arguments so the client can launch npm's command shim.
 
-If you've already installed a particular build, point your MCP client at that `open-science`
-executable with the argument `mcp`. Use the [MCP guide](packages/open-science/CLI.md#external-agents-through-mcp)
-for custom profiles and capability discovery. A file written inside a Notebook is a working file;
+If you've already installed a particular build, point each MCP entry at that `open-science`
+executable with `mcp --group core`, `mcp --group research`, or `mcp --group literature`. Use the
+[MCP guide](packages/open-science/CLI.md#external-agents-through-mcp) for custom profiles and
+capability discovery. A file written inside a Notebook is a working file;
 publish it as an Artifact to download it through MCP. A `.science` package is the research handoff
 for a separate installation, where you configure your own model provider.
 

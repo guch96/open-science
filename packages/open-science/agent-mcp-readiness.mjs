@@ -127,6 +127,7 @@ export const readMcpGroupStatus = async ({
   version,
   capabilityDigests = {},
   serviceStatus = 'unchecked',
+  readiness,
   now = Date.now()
 }) => {
   const profile = configRoot ? resolve(configRoot) : undefined
@@ -201,10 +202,17 @@ export const readMcpGroupStatus = async ({
       }
     }
   }
+  const groupsReady = MCP_GROUP_IDS.every((group) => statuses[group].status === 'connected')
+  const readinessReady =
+    readiness?.agent === 'ready' &&
+    readiness?.provider === 'ready' &&
+    readiness?.notebook === 'ready'
   return {
     profile,
     service: { status: serviceStatus },
     groups: statuses,
+    fullLoopReady: groupsReady && readinessReady,
+    ...(readiness ? { readiness } : {}),
     entries: entries.map(
       ({
         group,
