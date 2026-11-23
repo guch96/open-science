@@ -25,6 +25,40 @@ async function harness(connect: ReturnType<typeof vi.fn>): Promise<{
   return { server, client }
 }
 
+async function groupedHarness(
+  connect: ReturnType<typeof vi.fn>,
+  group: 'core' | 'research' | 'literature'
+): Promise<{ server: ReturnType<typeof createResearchMcpServer>; client: Client }> {
+  const server = createResearchMcpServer({
+    configRoot: '/test-profile',
+    version: '1.0.3',
+    connect,
+    group
+  })
+  const client = new Client({ name: 'test-agent', version: '1.0.0' })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  cleanup.push(async () => {
+    await client.close()
+    await server.close()
+  })
+  return { server, client }
+}
+
+it.each([
+  ['core', 'doctor', 'get_setup_status', 'list_projects'],
+  ['research', 'list_projects', 'get_run', 'search_literature'],
+  ['literature', 'search_literature', 'get_literature_item', 'list_projects']
+] as const)('exposes only the %s MCP group tools', async (group, expected, alsoExpected, excluded) => {
+  const { client } = await groupedHarness(vi.fn(), group)
+  const { tools } = await client.listTools()
+  const names = tools.map((tool) => tool.name)
+  expect(names).toContain(expected)
+  expect(names).toContain(alsoExpected)
+  expect(names).not.toContain(excluded)
+})
+
 const cases = [
   ['list_runtimes', {}, '/api/v1/runtimes', 'GET', undefined],
   ['list_projects', {}, '/api/v1/projects', 'GET', undefined],

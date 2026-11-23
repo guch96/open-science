@@ -78,6 +78,20 @@ describe('CLI help', () => {
     expect(() => parseCliArgs(argv)).toThrow(CliUsageError)
   })
 
+  it('parses and validates an MCP server group', () => {
+    expect(parseCliArgs(['mcp', '--group', 'core', '--profile', '/tmp/profile'])).toMatchObject({
+      command: 'mcp',
+      options: { mcpGroup: 'core', configRoot: '/tmp/profile' }
+    })
+    expect(parseCliArgs(['mcp', '--group=literature'])).toMatchObject({
+      options: { mcpGroup: 'literature' }
+    })
+    expect(() => parseCliArgs(['mcp', '--group', 'unknown'])).toThrow('Invalid MCP group')
+    expect(() => parseCliArgs(['run', '--group', 'core'])).toThrow(
+      '--group requires the mcp command'
+    )
+  })
+
   it('preserves version-looking prompt values', () => {
     expect(parseCliArgs(['run', '--project', 'demo', '--prompt', '--version'])).toMatchObject({
       command: 'run',

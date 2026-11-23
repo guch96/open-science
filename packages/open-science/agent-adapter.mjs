@@ -8,6 +8,7 @@ import { inspectAgentDeliveryDirectory } from './agent-delivery-directory.mjs'
 import { projectAgentNotebookReadiness, readinessActions } from './agent-notebook-readiness.mjs'
 import { getAgentPackageCapabilities } from './agent-package-capabilities.mjs'
 import { openBrowser, providerTerminalAction, setupAction } from './agent-setup-action.mjs'
+import { capabilityBelongsToMcpGroup, mcpGroupForCapability } from './agent-mcp-groups.mjs'
 import { connectToOpenScience } from './index.mjs'
 
 export const agentGuideUri = 'openscience://agent/guide'
@@ -430,7 +431,7 @@ export const agentErrorDetails = (
   return details
 }
 
-const groups = ['discovery', 'setup', 'research', 'delivery']
+const groups = ['discovery', 'setup', 'research', 'delivery', 'literature']
 const readOnly = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -449,12 +450,13 @@ const localDiscovery = (name, description, inputSchema, handler) => ({
   handler
 })
 
-const describe = ({ name, group, description, annotations, exposure }) => ({
-  name,
-  group,
-  description,
-  annotations,
-  exposure: { cli: exposure?.cli === true, mcp: exposure?.mcp === true }
+const describe = (entry) => ({
+  name: entry.name,
+  group: entry.group,
+  ...(mcpGroupForCapability(entry) ? { mcpGroup: mcpGroupForCapability(entry) } : {}),
+  description: entry.description,
+  annotations: entry.annotations,
+  exposure: { cli: entry.exposure?.cli === true, mcp: entry.exposure?.mcp === true }
 })
 
 // Use the input representation so defaults are visible and callers see which fields may be omitted.
@@ -468,9 +470,18 @@ const isExposed = (entry, exposure) =>
 export const listAgentCapabilities = (exposure) =>
   [...capabilities.values()].filter((entry) => isExposed(entry, exposure))
 
-const getCapability = (name, exposure) => {
+export const listMcpCapabilities = (group) =>
+  group === undefined
+    ? listAgentCapabilities('mcp')
+    : listAgentCapabilities('mcp').filter((entry) => capabilityBelongsToMcpGroup(entry, group))
+
+const getCapability = (name, exposure, mcpGroup) => {
   const entry = capabilities.get(name)
-  if (!entry || !isExposed(entry, exposure)) {
+  if (
+    !entry ||
+    !isExposed(entry, exposure) ||
+    (mcpGroup && !capabilityBelongsToMcpGroup(entry, mcpGroup))
+  ) {
     throw new AgentError('capability_not_exposed')
   }
   return entry
@@ -1100,9 +1111,9 @@ const capabilities = new Map(definitions.map((entry) => [entry.name, entry]))
 export const invokeAgentCapability = async (
   name,
   input,
-  { exposure, configRoot, signal, connect = connectToOpenScience, probe = connect }
+  { exposure, configRoot, signal, connect = connectToOpenScience, probe = connect, mcpGroup }
 ) => {
-  const entry = getCapability(name, exposure)
+  const entry = getCapability(name, exposure, mcpGroup)
   const args = entry.inputSchema.safeParse(input)
   if (!args.success) {
     // Object refinements use messages authored by the capability, without echoing input values.

@@ -43,11 +43,12 @@ const runCli = (
 async function connectMcp(
   profile: string,
   env?: Record<string, string>,
-  entry = cli
+  entry = cli,
+  group?: 'core' | 'research' | 'literature'
 ): Promise<Client> {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [entry, 'mcp', '--profile', profile],
+    args: [entry, 'mcp', ...(group ? ['--group', group] : []), '--profile', profile],
     stderr: 'pipe',
     env
   })
@@ -56,6 +57,26 @@ async function connectMcp(
   await client.connect(transport)
   return client
 }
+
+it('exposes filtered tools through each real stdio MCP group', async () => {
+  const agent = await resourceAgents(() => undefined)
+  const clients = await Promise.all(
+    (['core', 'research', 'literature'] as const).map((group) =>
+      connectMcp(agent.profile, undefined, cli, group)
+    )
+  )
+
+  const tools = await Promise.all(clients.map((client) => client.listTools()))
+  const names = tools.map(({ tools: groupTools }) => new Set(groupTools.map((tool) => tool.name)))
+  expect([...names[0]]).toEqual(expect.arrayContaining(['doctor', 'get_setup_status']))
+  expect(names[0]).not.toContain('list_projects')
+  expect([...names[1]]).toEqual(expect.arrayContaining(['list_projects', 'get_run']))
+  expect(names[1]).not.toContain('search_literature')
+  expect([...names[2]]).toEqual(
+    expect.arrayContaining(['search_literature', 'get_literature_item'])
+  )
+  expect(names[2]).not.toContain('list_projects')
+})
 
 async function cliError(
   args: string[],

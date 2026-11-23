@@ -621,7 +621,7 @@ registerResource(
 )
 registerResource(
   'search_literature',
-  'research',
+  'literature',
   'Search Literature library records by title, author, abstract or identifier; omit query to browse. Optionally limit results to one project. Pages default to 20 records; pass nextOffset as offset to continue. Does not search external providers or read PDF full text.',
   {
     query: z.string().trim().min(1).max(2000).optional(),
@@ -634,7 +634,7 @@ registerResource(
 )
 registerResource(
   'get_literature_item',
-  'research',
+  'literature',
   'Read one Literature library record, including bibliographic metadata, attachments and project links.',
   { itemId: literatureItemId },
   read,
@@ -642,7 +642,7 @@ registerResource(
 )
 registerResource(
   'list_citation_styles',
-  'research',
+  'literature',
   'List the built-in and imported citation styles available to format_references.',
   {},
   read,
@@ -650,7 +650,7 @@ registerResource(
 )
 registerResource(
   'format_references',
-  'research',
+  'literature',
   'Format Literature library records as bibliography entries and in-text citations in one citation style, with BibTeX and RIS exports. Does not modify records or write files.',
   {
     itemIds: z.array(literatureItemId).min(1).max(200),
@@ -662,7 +662,7 @@ registerResource(
 )
 registerResource(
   'get_reference_metadata',
-  'research',
+  'literature',
   'Resolve bibliographic metadata for a DOI (10.x/...), pmid:<n>, pmcid:PMC<n> or arxiv:<id> through external registries. Does not add the record to the library.',
   { identifier: id('DOI, pmid:, pmcid: or arxiv: identifier.').max(2048) },
   { ...read, openWorldHint: true },
@@ -670,7 +670,7 @@ registerResource(
 )
 registerResource(
   'import_literature',
-  'research',
+  'literature',
   'Import BibTeX, RIS or NBIB text, or item objects, into the Literature library. Call with mode "preview" first to inspect entries, duplicates and warnings without saving; then call "commit" with the same source. duplicatePolicy defaults to reuse. Optionally add committed records to a collection and link them to a project.',
   {
     mode: z.enum(['preview', 'commit']),
@@ -710,7 +710,7 @@ registerResource(
 )
 registerResource(
   'create_literature_item',
-  'research',
+  'literature',
   'Add one record to the Literature library from a DOI, pmid:<n>, pmcid:PMC<n> or arxiv:<id>. Metadata is resolved through external registries; an existing record with the same identifier is reused.',
   { identifier: id('DOI, pmid:, pmcid: or arxiv: identifier.').max(2048) },
   { ...libraryAdd, idempotentHint: true, openWorldHint: true },
@@ -718,7 +718,7 @@ registerResource(
 )
 registerResource(
   'update_project_literature',
-  'research',
+  'literature',
   'Link Literature records to a project, or unlink them with included false. Unlinking does not delete records.',
   { projectId, itemIds: literatureItemIds, included: z.boolean() },
   libraryUpdate,
@@ -727,7 +727,7 @@ registerResource(
 )
 registerResource(
   'create_literature_collection',
-  'research',
+  'literature',
   'Create a Literature collection, optionally nested under a parent collection. Collection names must be unique.',
   {
     name: id('Collection name.').max(200),
@@ -739,7 +739,7 @@ registerResource(
 )
 registerResource(
   'update_collection_items',
-  'research',
+  'literature',
   'Add Literature records to a collection, or remove them with included false. Removing does not delete records.',
   { collectionId, itemIds: literatureItemIds, included: z.boolean() },
   libraryUpdate,
@@ -748,7 +748,7 @@ registerResource(
 )
 registerResource(
   'set_reading_status',
-  'research',
+  'literature',
   'Set the personal reading status of Literature records.',
   { itemIds: literatureItemIds, readingStatus: z.enum(['unread', 'reading', 'read']) },
   libraryUpdate,
@@ -757,7 +757,7 @@ registerResource(
 )
 registerResource(
   'set_literature_lifecycle',
-  'research',
+  'literature',
   'Move Literature records to the trash with state "deleted", or restore them with "active". Records are not permanently deleted.',
   { itemIds: literatureItemIds, state: z.enum(['active', 'deleted']) },
   libraryUpdate,
