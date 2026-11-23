@@ -178,11 +178,19 @@ describe('desktop MCP repair', () => {
       version: '1.3.3',
       verification: { initialize: true, toolsList: true, toolCount: 3 }
     })
-    expect(calls).toEqual(['update:check', 'update:download', 'update:apply', 'update:get-app-info'])
+    expect(calls).toEqual([
+      'update:check',
+      'update:download',
+      'update:apply',
+      'update:get-app-info'
+    ])
     expect(connect).toHaveBeenCalledTimes(2)
     expect(verifyMcp).toHaveBeenCalledOnce()
     expect(verifyMcp).toHaveBeenCalledWith(
-      expect.objectContaining({ profile, cliPath: 'C:/Open-Science/resources/backend/mcp-repair.mjs' })
+      expect.objectContaining({
+        profile,
+        cliPath: 'C:/Open-Science/resources/backend/mcp-repair.mjs'
+      })
     )
   })
 

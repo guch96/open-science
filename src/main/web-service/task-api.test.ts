@@ -231,6 +231,7 @@ const taskQuestionHarness = (status: 'running' | 'waiting-for-user'): TaskQuesti
       {
         commands: commandsFrom(async (channel) => {
           if (channel === 'sessions:load-all') return { sessions: [structuredClone(session)] }
+          if (channel === 'sessions:load-one') return structuredClone(session)
           throw new Error(`Unexpected Task command: ${channel}`)
         }),
         agent: createAgent({
@@ -1220,8 +1221,12 @@ describe('HeadlessTaskApi adapter', () => {
         }
       })
     const api = new HeadlessTaskApi({
-      commands: commandsFrom(async (channel) => {
+      commands: commandsFrom(async (channel, _callerContext, args) => {
         if (channel === 'sessions:load-all') return { sessions: [session, imported] }
+        if (channel === 'sessions:load-one') {
+          const request = args[0] as { sessionId: string }
+          return structuredClone(request.sessionId === imported.id ? imported : session)
+        }
         throw new Error(`Unexpected Task command: ${channel}`)
       }),
       agent: createAgent(),
@@ -1610,6 +1615,7 @@ describe('HeadlessTaskApi adapter', () => {
         if (channel === 'sessions:load-all') {
           return { sessions: [durable], manifest: { version: 1 } }
         }
+        if (channel === 'sessions:load-one') return structuredClone(durable)
         if (channel === 'sessions:update-configuration') {
           durable = { ...(args[0] as PersistedChatSession), revision: 5 }
           return durable
@@ -2513,6 +2519,7 @@ describe('HeadlessTaskApi adapter', () => {
       if (channel === 'sessions:load-all') {
         return { sessions: [persisted], manifest: { version: 1 } }
       }
+      if (channel === 'sessions:load-one') return structuredClone(persisted)
       if (channel === 'acp:get-plan-projection') return projection()
       if (channel === 'acp:respond-plan') {
         persisted.runtimeContext = {
@@ -3497,10 +3504,13 @@ describe('HeadlessTaskApi adapter', () => {
     await api.waitForRun(run.id)
 
     expect(invoke).toHaveBeenCalledWith('projects:list', context, [])
-    expect(invoke).toHaveBeenCalledWith('sessions:load-all', context, [])
     expect(invoke).toHaveBeenCalledWith('sessions:save-session', context, [
       expect.objectContaining({ status: 'running' })
     ])
+    expect(invoke).toHaveBeenCalledWith('sessions:load-one', taskCallerContext(), [
+      { projectId: project.id, sessionId: 'session-context' }
+    ])
+    expect(invoke.mock.calls.some(([channel]) => channel === 'sessions:load-all')).toBe(false)
     expect(invoke).toHaveBeenCalledWith('sessions:settle-task-completion', taskCallerContext(), [
       expect.objectContaining({ sessionId: 'session-context' })
     ])
@@ -3531,14 +3541,18 @@ describe('HeadlessTaskApi adapter', () => {
 
   it('does not enter the direct Agent port after captured remote authorization expires', async () => {
     let authorizationCurrent = true
-    const invoke = vi.fn(async (channel: string) => {
-      if (channel === 'projects:list') return [project]
-      if (channel === 'sessions:load-all') {
-        authorizationCurrent = false
-        return { sessions: [], manifest: { version: 1 } }
+    const invoke = vi.fn(
+      async (channel: string, _callerContext: CallerContext, args: unknown[]) => {
+        if (channel === 'projects:list') {
+          authorizationCurrent = false
+          return [project]
+        }
+        if (channel === 'sessions:save-session') {
+          return args[0]
+        }
+        throw new Error(`Unexpected Task command: ${channel}`)
       }
-      throw new Error(`Unexpected Task command: ${channel}`)
-    })
+    )
     const agent = createAgent()
     const api = new HeadlessTaskApi({ commands: commandsFrom(invoke), agent })
     const context = createTaskCallerContext({

@@ -299,7 +299,8 @@ export const repairDesktopMcp = async ({
     return repairFailure({
       ...base,
       code: 'mcp_repair_update_unavailable',
-      message: 'The official desktop updater is unavailable; the existing installation was not changed.',
+      message:
+        'The official desktop updater is unavailable; the existing installation was not changed.',
       cause
     })
   }
@@ -307,7 +308,8 @@ export const repairDesktopMcp = async ({
     return repairFailure({
       ...base,
       code: 'mcp_repair_update_unavailable',
-      message: 'No verified official desktop update is available; the existing installation was not changed.'
+      message:
+        'No verified official desktop update is available; the existing installation was not changed.'
     })
 
   let downloaded
@@ -318,7 +320,8 @@ export const repairDesktopMcp = async ({
       ...base,
       targetVersion: checked.latest,
       code: 'mcp_repair_update_failed',
-      message: 'The official desktop update failed before activation; the existing installation was preserved.',
+      message:
+        'The official desktop update failed before activation; the existing installation was preserved.',
       cause
     })
   }
@@ -346,7 +349,8 @@ export const repairDesktopMcp = async ({
       ...base,
       targetVersion,
       code: 'mcp_repair_update_failed',
-      message: 'The official desktop updater rejected the replacement; the existing installation was preserved.',
+      message:
+        'The official desktop updater rejected the replacement; the existing installation was preserved.',
       cause: applyError
     })
 
@@ -365,7 +369,8 @@ export const repairDesktopMcp = async ({
       ...base,
       targetVersion,
       code: 'mcp_repair_update_failed',
-      message: 'The verified desktop replacement did not become active; the existing installation was preserved.',
+      message:
+        'The verified desktop replacement did not become active; the existing installation was preserved.',
       retryable: true,
       cause
     })
@@ -386,7 +391,8 @@ export const repairDesktopMcp = async ({
       ...base,
       targetVersion,
       code: 'mcp_repair_verification_failed',
-      message: 'The desktop replacement started, but MCP initialize/tools/list verification failed.',
+      message:
+        'The desktop replacement started, but MCP initialize/tools/list verification failed.',
       cause
     })
   }
@@ -494,7 +500,8 @@ export const repairNpmMcp = async ({
       profile,
       error: {
         code: 'mcp_repair_verification_failed',
-        message: 'The repaired npm installation did not pass MCP initialize/tools/list verification.',
+        message:
+          'The repaired npm installation did not pass MCP initialize/tools/list verification.',
         owner: 'deployment',
         requiresUser: true,
         retryable: false,
