@@ -7,6 +7,8 @@ import {
   buildMcpDependencyDiagnostic,
   checkMcpDependency,
   createMcpDependencyError,
+  findMcpInstallation,
+  repairMcp,
   repairNpmMcp
 } from './mcp-repair.mjs'
 
@@ -111,5 +113,42 @@ describe('npm MCP repair', () => {
       ['install', '--global', '@aipoch/open-science@latest', '--include=optional'],
       expect.objectContaining({ cwd: dirname(dirname(dirname(packageRoot))) })
     )
+  })
+})
+
+describe('standalone archive MCP repair dispatch', () => {
+  it('classifies a standalone archive before the npm fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'osci-mcp-archive-dispatch-'))
+    roots.push(root)
+    const archive = join(root, 'open-science-cli-1.3.2-win32-x64')
+    await mkdir(join(archive, 'backend'), { recursive: true })
+    await mkdir(join(archive, 'node-runtime'), { recursive: true })
+    await writeFile(join(archive, 'backend', 'cli.mjs'), '')
+    await writeFile(join(archive, 'node-runtime', 'node.exe'), '')
+    await writeFile(
+      join(archive, 'release.json'),
+      JSON.stringify({ version: '1.3.2', target: 'win32-x64', sourceSha: 'a'.repeat(40) })
+    )
+    const cliPath = join(archive, 'backend', 'cli.mjs')
+    await expect(
+      findMcpInstallation({ cliPath, platform: 'win32', arch: 'x64' })
+    ).resolves.toMatchObject({
+      kind: 'archive',
+      root: archive,
+      target: 'win32-x64'
+    })
+    await expect(
+      repairMcp({
+        profile: join(root, 'profile'),
+        cliPath,
+        platform: 'win32',
+        arch: 'x64',
+        checkDependency: async () => ({ available: true })
+      })
+    ).resolves.toMatchObject({
+      status: 'already_healthy',
+      installation: 'archive',
+      root: archive
+    })
   })
 })

@@ -27,9 +27,9 @@ import { locateBackend } from './locate-backend.mjs'
 import {
   checkMcpDependency,
   createMcpDependencyError,
-  findNpmInstallation,
+  findMcpInstallation,
   isMissingMcpDependency,
-  repairNpmMcp
+  repairMcp
 } from './mcp-repair.mjs'
 import { openBrowser } from './agent-setup-action.mjs'
 import { startLaunchLogReader } from './launch-log.mjs'
@@ -58,7 +58,7 @@ Commands:
   status      Show local service status, App sessions, and persistent running
   url         Print the authenticated web URL
   mcp         Start or reuse the local service and serve research tools over MCP stdio (--group core|research|literature --profile <path>)
-  repair mcp  Repair the npm MCP installation and report a machine-readable result
+  repair mcp  Repair the MCP installation through its official distribution channel
   tools list [group] [--check-service] --json  Discover capabilities and optionally probe service support
   tools describe <name> --json                Read the capability input schema
   tools call <name> --json                    Invoke with a JSON object on stdin
@@ -1418,7 +1418,7 @@ const TASK_DEPS = {
 
 export const repairMcpCommand = async (options, deps = TASK_DEPS) => {
   if (!options.configRoot) throw new CliUsageError('--profile is required for repair mcp.')
-  const result = await (deps.repairMcp ?? repairNpmMcp)({ profile: options.configRoot })
+  const result = await (deps.repairMcp ?? repairMcp)({ profile: options.configRoot })
   if (result.status === 'failed') deps.setExitCode?.(1)
   deps.log(
     options.json
@@ -1649,7 +1649,7 @@ const runAgentCommand = async ({ command, subcommand, positionals = [], options 
     if (!dependency.available)
       throw createMcpDependencyError({
         configRoot: options.configRoot,
-        installation: (await findNpmInstallation())?.kind ?? 'unknown'
+        installation: (await findMcpInstallation())?.kind ?? 'unknown'
       })
   }
   let name
@@ -2681,7 +2681,7 @@ export const runCli = async (argv = process.argv.slice(2)) => {
     if (!dependency.available)
       throw createMcpDependencyError({
         configRoot: options.configRoot,
-        installation: (await findNpmInstallation())?.kind ?? 'unknown'
+        installation: (await findMcpInstallation())?.kind ?? 'unknown'
       })
     let runResearchMcpServer
     try {
@@ -2690,7 +2690,7 @@ export const runCli = async (argv = process.argv.slice(2)) => {
       if (isMissingMcpDependency(error))
         throw createMcpDependencyError({
           configRoot: options.configRoot,
-          installation: (await findNpmInstallation())?.kind ?? 'unknown'
+          installation: (await findMcpInstallation())?.kind ?? 'unknown'
         })
       throw error
     }

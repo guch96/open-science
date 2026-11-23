@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { basename, dirname, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { findStandaloneInstallation, repairStandaloneMcp } from './mcp-archive-repair.mjs'
 
 export const MCP_DEPENDENCY_NAME = '@modelcontextprotocol/sdk'
 const MCP_ENTRY = `${MCP_DEPENDENCY_NAME}/server/mcp.js`
@@ -93,6 +94,14 @@ export const findNpmInstallation = async ({
   }
 }
 
+export const findMcpInstallation = async ({
+  cliPath = fileURLToPath(import.meta.url),
+  platform = process.platform,
+  arch = process.arch
+} = {}) =>
+  (await findStandaloneInstallation({ cliPath, platform, arch })) ??
+  (await findNpmInstallation({ cliPath }))
+
 export const repairNpmMcp = async ({
   profile,
   cliPath = fileURLToPath(import.meta.url),
@@ -131,7 +140,7 @@ export const repairNpmMcp = async ({
   }
   try {
     await exec(
-      process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      platform === 'win32' ? 'npm.cmd' : 'npm',
       ['install', '--global', '@aipoch/open-science@latest', '--include=optional'],
       { cwd: installation.prefix, windowsHide: true }
     )
@@ -179,4 +188,24 @@ export const repairNpmMcp = async ({
     arch,
     profile
   }
+}
+
+export const repairMcp = async ({
+  profile,
+  cliPath = fileURLToPath(import.meta.url),
+  platform = process.platform,
+  arch = process.arch,
+  ...dependencies
+} = {}) => {
+  const installation = await findStandaloneInstallation({ cliPath, platform, arch })
+  if (installation)
+    return repairStandaloneMcp({
+      profile,
+      installation,
+      platform,
+      arch,
+      checkDependency: dependencies.checkDependency ?? checkMcpDependency,
+      ...dependencies
+    })
+  return repairNpmMcp({ profile, cliPath, platform, arch, ...dependencies })
 }

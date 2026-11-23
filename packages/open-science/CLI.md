@@ -141,12 +141,14 @@ open-science doctor --profile /absolute/path/to/profile --json
 open-science repair mcp --profile /absolute/path/to/profile --json
 ```
 
-The repair command uses the official complete npm distribution with optional dependencies, rather
-than adding a package to the existing installation. It reports `repaired`, `already_healthy`, or a
-structured failure. A successful repair keeps the selected Profile; the Agent must start a fresh
-MCP process with that Profile and verify `initialize` followed by `tools/list` once. Desktop and
-standalone archive updates use their existing official update channels and are not performed by
-this npm repair command.
+The repair command uses the official complete distribution for the detected installation. npm
+installations use the complete npm distribution with optional dependencies; standalone archives
+download and verify a complete compatible Release archive before extracting it beside the old
+directory. It never adds a package to an existing installation. The command reports `repaired`,
+`already_healthy`, or a structured failure. A successful repair keeps the selected Profile; the
+repair verification starts one fresh MCP process with that Profile and requires `initialize`
+followed by `tools/list` before activation. Failed downloads, verification, extraction, or MCP
+handshakes leave the old archive available.
 
 ## Service lifecycle
 
