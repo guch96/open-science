@@ -9,6 +9,7 @@ import { projectAgentNotebookReadiness, readinessActions } from './agent-noteboo
 import { getAgentPackageCapabilities } from './agent-package-capabilities.mjs'
 import { openBrowser, providerTerminalAction, setupAction } from './agent-setup-action.mjs'
 import { capabilityBelongsToMcpGroup, mcpGroupForCapability } from './agent-mcp-groups.mjs'
+import { readMcpGroupStatus } from './agent-mcp-readiness.mjs'
 import { connectToOpenScience } from './index.mjs'
 
 export const agentGuideUri = 'openscience://agent/guide'
@@ -268,6 +269,11 @@ const policies = {
     'service',
     'The operation failed. Check service readiness and the original state before repeating any write.',
     { action: 'doctor' }
+  ],
+  mcp_dependency_unavailable: [
+    'deployment',
+    'A required Open-Science MCP group is missing or not ready. Connect the dependency and retry the same operation.',
+    { action: 'list_capabilities' }
   ]
 }
 
@@ -487,7 +493,7 @@ const getCapability = (name, exposure, mcpGroup) => {
   return entry
 }
 
-async function catalog({ group, checkService }, { probeService }) {
+async function catalog({ group, checkService }, { probeService, configRoot, registryRoot }) {
   const selected = listAgentCapabilities().filter((entry) => !group || entry.group === group)
   const { support, ...service } = checkService
     ? await probeService(selected)
@@ -505,7 +511,11 @@ async function catalog({ group, checkService }, { probeService }) {
             : (support?.[entry.name] ?? 'unknown')
       }))
   }
-  return { groups: catalogGroups, service }
+  const mcp = await readMcpGroupStatus({
+    configRoot: registryRoot ?? configRoot,
+    serviceStatus: service.status
+  })
+  return { groups: catalogGroups, service, mcp }
 }
 
 const readinessStatus = (value) =>
@@ -1111,7 +1121,15 @@ const capabilities = new Map(definitions.map((entry) => [entry.name, entry]))
 export const invokeAgentCapability = async (
   name,
   input,
-  { exposure, configRoot, signal, connect = connectToOpenScience, probe = connect, mcpGroup }
+  {
+    exposure,
+    configRoot,
+    signal,
+    connect = connectToOpenScience,
+    probe = connect,
+    mcpGroup,
+    registryRoot
+  }
 ) => {
   const entry = getCapability(name, exposure, mcpGroup)
   const args = entry.inputSchema.safeParse(input)
@@ -1128,6 +1146,7 @@ export const invokeAgentCapability = async (
   const context = {
     exposure,
     configRoot,
+    registryRoot,
     signal,
     getClient: async (requestSignal = signal) => {
       requestSignal?.throwIfAborted()

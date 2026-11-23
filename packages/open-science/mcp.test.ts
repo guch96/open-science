@@ -50,13 +50,32 @@ it.each([
   ['core', 'doctor', 'get_setup_status', 'list_projects'],
   ['research', 'list_projects', 'get_run', 'search_literature'],
   ['literature', 'search_literature', 'get_literature_item', 'list_projects']
-] as const)('exposes only the %s MCP group tools', async (group, expected, alsoExpected, excluded) => {
-  const { client } = await groupedHarness(vi.fn(), group)
-  const { tools } = await client.listTools()
-  const names = tools.map((tool) => tool.name)
-  expect(names).toContain(expected)
-  expect(names).toContain(alsoExpected)
-  expect(names).not.toContain(excluded)
+] as const)(
+  'exposes only the %s MCP group tools',
+  async (group, expected, alsoExpected, excluded) => {
+    const { client } = await groupedHarness(vi.fn(), group)
+    const { tools } = await client.listTools()
+    const names = tools.map((tool) => tool.name)
+    expect(names).toContain(expected)
+    expect(names).toContain(alsoExpected)
+    expect(names).not.toContain(excluded)
+  }
+)
+
+it('blocks Research calls before service work when Core is not registered', async () => {
+  const connect = vi.fn()
+  const { client } = await groupedHarness(connect, 'research')
+  const result = await client.callTool({ name: 'list_projects' })
+  expect(result.isError).toBe(true)
+  expect(result.structuredContent).toMatchObject({
+    error: {
+      code: 'mcp_dependency_unavailable',
+      group: 'research',
+      dependency: 'core',
+      status: 'missing'
+    }
+  })
+  expect(connect).not.toHaveBeenCalled()
 })
 
 const cases = [

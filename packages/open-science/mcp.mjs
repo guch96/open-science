@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import {
+  AgentError,
   agentErrorDetails,
   agentGuide,
   agentGuideUri,
@@ -12,6 +13,11 @@ import {
   listMcpCapabilities
 } from './agent-adapter.mjs'
 import { mcpServerName } from './agent-mcp-groups.mjs'
+import {
+  mcpGroupDependencyError,
+  readMcpGroupStatus,
+  registerMcpGroup
+} from './agent-mcp-readiness.mjs'
 import { connectToOpenScience, OpenScienceApiError } from './index.mjs'
 
 const outputSchema = {
@@ -33,7 +39,8 @@ export const createResearchMcpServer = ({
   version,
   connect = connectToOpenScience,
   probe = connect,
-  group
+  group,
+  getRegistryRoot = () => configRoot
 }) => {
   const server = new McpServer({ name: mcpServerName(group), version })
   const lifetime = new AbortController()
@@ -50,13 +57,25 @@ export const createResearchMcpServer = ({
   server.server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
     const signal = AbortSignal.any([lifetime.signal, extra.signal])
     try {
+      if (group) {
+        const status = await readMcpGroupStatus({
+          configRoot: getRegistryRoot(),
+          version,
+          serviceStatus: 'unchecked'
+        })
+        const dependency = mcpGroupDependencyError(status, group)
+        if (dependency) {
+          throw new AgentError('mcp_dependency_unavailable', dependency)
+        }
+      }
       const result = await invokeAgentCapability(params.name, params.arguments ?? {}, {
         exposure: 'mcp',
         configRoot,
         signal,
         connect,
         probe,
-        mcpGroup: group
+        mcpGroup: group,
+        registryRoot: getRegistryRoot()
       })
       return toolResult({ result: result ?? null })
     } catch (error) {
@@ -85,11 +104,29 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
   // The handshake and tool catalog stay responsive while the standalone backend starts.
   const lifetime = new AbortController()
   let startup
+  let registration
+  let heartbeat
+  const getRegistryRoot = () => registration?.configRoot ?? configRoot
+  const ensureRegistration = async (root) => {
+    if (!group || registration || !root) return
+    registration = await registerMcpGroup({
+      configRoot: root,
+      group,
+      version,
+      capabilityNames: listMcpCapabilities(group).map((entry) => entry.name)
+    })
+    heartbeat = setInterval(() => {
+      void registration?.heartbeat().catch(() => {})
+    }, 2_000)
+    heartbeat.unref?.()
+    await registration.setState('connected')
+  }
   const serviceRoot = () => (startup ??= startService(lifetime.signal))
   const server = createResearchMcpServer({
     configRoot,
     version,
     group,
+    getRegistryRoot,
     probe: connectToOpenScience,
     connect: async ({ signal }) => {
       const attempt = serviceRoot()
@@ -107,18 +144,23 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
         listener[Symbol.dispose]()
       }
       signal.throwIfAborted()
+      await ensureRegistration(runningRoot)
       return connectToOpenScience({ configRoot: runningRoot, signal })
     }
   })
   server.server.oninitialized = () => {
     // Tool calls that need a running service observe startup failure through the error envelope.
-    void serviceRoot().catch(() => {})
+    void serviceRoot()
+      .then((root) => ensureRegistration(root))
+      .catch(() => {})
   }
   const transport = new StdioServerTransport()
   let closing
   const close = () => {
     lifetime.abort()
-    closing ??= server.close().finally(() => {
+    if (heartbeat) clearInterval(heartbeat)
+    closing ??= server.close().finally(async () => {
+      await registration?.close()
       process.stdin.off('end', close)
       process.off('SIGINT', close)
       process.off('SIGTERM', close)
