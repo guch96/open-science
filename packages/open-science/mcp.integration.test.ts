@@ -84,6 +84,22 @@ it('exposes filtered tools through each real stdio MCP group', async () => {
   expect(names[2]).not.toContain('list_projects')
 })
 
+it('waits for grouped registration before the first setup call', async () => {
+  const agent = await resourceAgents((request, response) => {
+    if (request.url === '/api/v1/doctor') {
+      response.end(JSON.stringify({ data: { ready: true, checks: {} } }))
+      return
+    }
+    response.writeHead(404).end(JSON.stringify({ error: { code: 'not_found' } }))
+  })
+  const core = await connectMcp(agent.profile, undefined, cli, 'core')
+  const result = await core.callTool({ name: 'get_setup_status' })
+  expect(result.isError).not.toBe(true)
+  expect(result.structuredContent).toMatchObject({
+    result: { profile: agent.profile, readiness: { service: 'ready' } }
+  })
+})
+
 it('runs Research and Literature operations through their grouped stdio servers', async () => {
   const literaturePage = { entries: [{ id: 'item-grouped', item: { title: 'Grouped Atlas' } }] }
   const agent = await resourceAgents(
@@ -2385,6 +2401,59 @@ it.each(['messages', 'chat-completions', 'responses'])(
     expect(JSON.stringify(result)).not.toContain('not-a-terminal-key')
   }
 )
+
+it('publishes disjoint official and custom provider draft schemas', async () => {
+  const agent = await resourceAgents(() => undefined, ['provider-setup'])
+  const client = await connectMcp(agent.profile, undefined, cli, 'core')
+  const { tools } = await client.listTools()
+  const tool = tools.find(({ name }) => name === 'save_api_provider')
+  const schema = tool?.inputSchema as {
+    properties?: Record<string, { const?: string; description?: string }>
+    oneOf?: Array<{
+      required?: string[]
+      properties?: Record<string, { const?: string; description?: string }>
+    }>
+  }
+  expect(tool?.description).toMatch(/default is a terminal handoff/i)
+  expect(schema.properties?.apiKeyEnv?.description).toMatch(/explicitly chosen/i)
+  expect(schema.properties?.credentialRef?.description).toMatch(/explicitly chosen/i)
+  expect(schema.properties?.providerType).toMatchObject({
+    type: 'string',
+    enum: ['official', 'custom']
+  })
+  expect(schema.properties?.providerType).not.toHaveProperty('const')
+  const official = schema.oneOf?.find(
+    (variant) => variant.properties?.providerType?.const === 'official'
+  )
+  const custom = schema.oneOf?.find(
+    (variant) => variant.properties?.providerType?.const === 'custom'
+  )
+  expect(official).toBeDefined()
+  expect(official?.required).toEqual(expect.arrayContaining(['vendorId']))
+  expect(official?.properties).not.toHaveProperty('baseUrl')
+  expect(official?.properties).not.toHaveProperty('protocol')
+  expect(custom).toBeDefined()
+  expect(custom?.required).toEqual(expect.arrayContaining(['baseUrl', 'protocol']))
+  expect(custom?.properties).not.toHaveProperty('vendorId')
+  expect(custom?.properties).not.toHaveProperty('region')
+})
+
+it('explains the official provider protocol constraint', async () => {
+  const agent = await resourceAgents(() => undefined, ['provider-setup'])
+  const response = await agent.mcp('save_api_provider', {
+    providerType: 'official',
+    framework: 'opencode',
+    model: 'deepseek-v4-pro',
+    vendorId: 'deepseek',
+    protocol: 'chat-completions'
+  })
+  expect(response.structuredContent).toMatchObject({
+    error: {
+      code: 'invalid_request',
+      message: expect.stringContaining('derive the protocol')
+    }
+  })
+})
 
 it('discovers, saves and explicitly activates an API provider through CLI and MCP', async () => {
   const key = 'synthetic-provider-secret'

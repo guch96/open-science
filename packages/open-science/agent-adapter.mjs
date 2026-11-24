@@ -23,7 +23,7 @@ Use the capability catalog and detail schemas to find the operations the install
 
 For the README setup request, install or connect MCP, discover capabilities, check readiness, and report what is missing and the next step. Keep the browser closed. If the user only asks where to act, give the page name or menu path. For requested setup changes, prefer the installed CLI or MCP capabilities. Use open_setup only when the user explicitly asks to open Web or when carrying out the chosen provider's sign-in flow requires a browser handoff.
 
-Use list_runtimes and list_providers to find the runtime, providers, and models supported by this version. Ask the user to choose when they have not made a selection. Select and prepare only an authorized runtime. For a custom API provider, collect the base URL, model ID, and exact API protocol in this conversation; for an official provider, use the vendor and region from discovery. Save and verify with save_api_provider. If it returns enter_provider_credential, display its command verbatim for the user to run in a terminal on the Open-Science host. After the user finishes, follow verify, and match the returned provider ID, model and lastValidated protocol. Use activate_provider only for the user's authorized selection and with the active selection you observed before setup. Use configure_provider for the offered keyless option. Reuse a user-chosen credentialRef or apiKeyEnv when available. Never request a secret in chat or pass its value as a tool argument. For OAuth, use the supported sign-in handoff and let the user complete consent. Recheck the same profile afterward.
+Use list_runtimes and list_providers to find the runtime, providers, and models supported by this version. Ask the user to choose when they have not made a selection. Select and prepare only an authorized runtime. For a custom API provider, collect the base URL, model ID, and exact API protocol in this conversation; for an official provider, use the vendor and region from discovery. Save and verify with save_api_provider. For a new API key, omit both apiKeyEnv and credentialRef: this is the default terminal handoff. If it returns enter_provider_credential, display its command verbatim for the user to run in a terminal on the Open-Science host; do not ask the user to choose an environment variable or credential reference first. After the user finishes, follow verify, and match the returned provider ID, model and lastValidated protocol. Use activate_provider only for the user's authorized selection and with the active selection you observed before setup. Use configure_provider for the offered keyless option. Set credentialRef or apiKeyEnv only when the user explicitly names an existing one. Never request a secret in chat or pass its value as a tool argument. For OAuth, use the supported sign-in handoff and let the user complete consent. Recheck the same profile afterward.
 
 Notebook status includes Python and R. For a general setup request, report both without picking or installing a language. Check the requested language before research. With authorization, prepare that language using prepare_notebook_environment. Generate and keep an operationId before submitting. After a timeout or disconnect, call get_notebook_environment_operation with the same language and ID. To cancel, use cancel_notebook_environment_operation with that same target and check the result. Use repair_notebook_environment only for a requested repair of the selected app-managed default environment. Recheck readiness after installation: environment setup, binding approval and Notebook execution are separate. System dependencies, isolation and memory can still block execution independently.
 
@@ -107,7 +107,7 @@ const policies = {
   ],
   provider_credential_missing: [
     'user',
-    'The provider needs an API key. Select an existing credential reference or a variable available to the installed CLI or MCP process. Never enter a key in chat or in a tool argument.',
+    'The provider needs an API key. Use the returned terminal command for hidden local input; only use an existing credential reference or explicitly named environment variable when the user chose one. Never enter a key in chat or in a tool argument.',
     { action: 'list_providers' }
   ],
   provider_validation_failed: [
@@ -314,6 +314,25 @@ const requestReferences = (error, args) => {
   }
   return references
 }
+
+const providerDraftInputMessage = (name, input) => {
+  if (name !== 'save_api_provider' || !input || typeof input !== 'object') return undefined
+  if (input.providerType === 'official') {
+    if (input.vendorId === undefined || input.baseUrl !== undefined || input.protocol !== undefined)
+      return 'For official providers, provide vendorId and let Open-Science derive the protocol from the vendor and model; omit baseUrl and protocol.'
+  }
+  if (input.providerType === 'custom') {
+    if (
+      input.baseUrl === undefined ||
+      input.protocol === undefined ||
+      input.vendorId !== undefined ||
+      input.region !== undefined
+    )
+      return 'For custom providers, provide baseUrl and protocol and omit vendorId and region.'
+  }
+  return undefined
+}
+
 export const agentErrorDetails = (
   error,
   { capability, configRoot, readOnly, connected, args = {} } = {}
@@ -466,7 +485,31 @@ const describe = (entry) => ({
 })
 
 // Use the input representation so defaults are visible and callers see which fields may be omitted.
-export const agentInputSchema = ({ inputSchema }) => z.toJSONSchema(inputSchema, { io: 'input' })
+// MCP requires the root input schema to declare an object even when Zod emits an object-only union.
+export const agentInputSchema = ({ inputSchema }) => {
+  const schema = z.toJSONSchema(inputSchema, { io: 'input' })
+  if (!schema.type && schema.oneOf?.every((variant) => variant?.type === 'object')) {
+    const propertyNames = new Set(
+      schema.oneOf.flatMap((variant) => Object.keys(variant.properties ?? {}))
+    )
+    const properties = Object.fromEntries(
+      [...propertyNames].map((name) => {
+        const variants = schema.oneOf.map((variant) => variant.properties?.[name]).filter(Boolean)
+        const constants = variants
+          .map((variant) => variant.const)
+          .filter((value) => value !== undefined)
+        if (constants.length === variants.length && new Set(constants).size > 1) {
+          const property = { ...variants[0] }
+          delete property.const
+          return [name, { ...property, enum: [...new Set(constants)] }]
+        }
+        return [name, variants[0]]
+      })
+    )
+    return { ...schema, type: 'object', properties, additionalProperties: false }
+  }
+  return schema
+}
 
 const isExposed = (entry, exposure) =>
   exposure
@@ -632,16 +675,27 @@ async function doctor(
 const DEFAULT_RUNTIME_TIMEOUT_MS = 600_000
 const frameworkInput = z.enum(frameworks).describe('Agent runtime from list_runtimes; no default.')
 const providerProtocol = z.enum(['messages', 'chat-completions', 'responses'])
-const providerDraftSchema = z.strictObject({
-  providerType: z.enum(['official', 'custom']),
-  framework: frameworkInput,
-  model: z.string().trim().min(1).max(512),
-  name: z.string().trim().min(1).max(128).optional(),
-  vendorId: safeId.optional(),
-  region: safeId.optional(),
-  baseUrl: z.string().trim().min(1).max(2048).optional(),
-  protocol: providerProtocol.optional()
-})
+const providerDraftSchemaFor = (extra = {}) =>
+  z.discriminatedUnion('providerType', [
+    z.strictObject({
+      providerType: z.literal('official'),
+      framework: frameworkInput,
+      model: z.string().trim().min(1).max(512),
+      name: z.string().trim().min(1).max(128).optional(),
+      vendorId: safeId,
+      region: safeId.optional(),
+      ...extra
+    }),
+    z.strictObject({
+      providerType: z.literal('custom'),
+      framework: frameworkInput,
+      model: z.string().trim().min(1).max(512),
+      name: z.string().trim().min(1).max(128).optional(),
+      baseUrl: z.string().trim().min(1).max(2048),
+      protocol: providerProtocol,
+      ...extra
+    })
+  ])
 const providerTerminalSupport = 'provider-terminal-setup'
 const languageInput = z
   .enum(['python', 'r'])
@@ -745,9 +799,9 @@ export const saveProviderInTerminal = async (
       throw new AgentError('invalid_request')
     let terminalDraft
     try {
-      terminalDraft = providerDraftSchema
-        .extend({ expectedEndpoint: z.url().max(4096) })
-        .parse(JSON.parse(Buffer.from(encodedDraft, 'base64url').toString('utf8')))
+      terminalDraft = providerDraftSchemaFor({ expectedEndpoint: z.url().max(4096) }).parse(
+        JSON.parse(Buffer.from(encodedDraft, 'base64url').toString('utf8'))
+      )
     } catch {
       throw new AgentError('invalid_request')
     }
@@ -934,13 +988,20 @@ const definitions = [
     name: 'save_api_provider',
     group: 'setup',
     description:
-      'Validate and save a new API provider for the selected framework and exact model without activating it. Official providers take a vendorId and optional region; custom providers take a baseUrl and the exact API protocol. Reuse an available credentialRef or apiKeyEnv if the user chose it. On enter_provider_credential, show the returned command to the user and then verify the exact provider ID, model and protocol. Never ask for a key in chat.',
-    inputSchema: providerDraftSchema.extend({
+      'Validate and save a new API provider for the selected framework and exact model without activating it. Official providers take a vendorId and optional region; custom providers take a baseUrl and the exact API protocol. For a new API key, omit apiKeyEnv and credentialRef: the default is a terminal handoff with hidden local input. Do not ask the user to choose a credential method first. Set credentialRef or apiKeyEnv only when the user explicitly names an existing one. On enter_provider_credential, show the returned command to the user and then verify the exact provider ID, model and protocol. Never ask for a key in chat.',
+    inputSchema: providerDraftSchemaFor({
       apiKeyEnv: z
         .string()
         .regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/)
+        .describe(
+          'Existing environment variable explicitly chosen by the user; omit for the default terminal handoff.'
+        )
         .optional(),
-      credentialRef: safeId.optional()
+      credentialRef: safeId
+        .describe(
+          'Existing credential reference explicitly chosen by the user; omit for the default terminal handoff.'
+        )
+        .optional()
     }),
     annotations: { ...setupWrite, idempotentHint: false },
     exposure: { cli: true, mcp: true },
@@ -1159,9 +1220,10 @@ export const invokeAgentCapability = async (
   if (!args.success) {
     // Object refinements use messages authored by the capability, without echoing input values.
     const issue = args.error.issues.find(({ code, path }) => code === 'custom' && path.length === 0)
+    const message = issue?.message ?? providerDraftInputMessage(name, input)
     throw new AgentError('invalid_request', {
       ...requestReferences(undefined, input),
-      ...(issue ? { message: issue.message } : {})
+      ...(message ? { message } : {})
     })
   }
 
