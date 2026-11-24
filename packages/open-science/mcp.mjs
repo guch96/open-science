@@ -46,7 +46,8 @@ export const createResearchMcpServer = ({
   connect = connectToOpenScience,
   probe = connect,
   group,
-  getRegistryRoot = () => configRoot
+  getRegistryRoot = () => configRoot,
+  beforeCall
 }) => {
   const server = new McpServer({ name: mcpServerName(group), version })
   const lifetime = new AbortController()
@@ -67,6 +68,9 @@ export const createResearchMcpServer = ({
   server.server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
     const signal = AbortSignal.any([lifetime.signal, extra.signal])
     try {
+      // Group registration happens asynchronously after the MCP handshake. Wait for it before
+      // checking dependencies so the first real tool call cannot observe an old heartbeat.
+      await beforeCall?.()
       const local =
         group &&
         listMcpCapabilities(group).some((entry) => entry.name === params.name && entry.local)
@@ -121,6 +125,7 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
   const lifetime = new AbortController()
   let startup
   let registration
+  let ready
   let heartbeat
   let heartbeatFailureLogged = false
   const getRegistryRoot = () => registration?.configRoot ?? configRoot
@@ -148,11 +153,27 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
     await registration.setState('connected')
   }
   const serviceRoot = () => (startup ??= startService(lifetime.signal))
+  const ensureReady = () => {
+    if (!ready) {
+      // An explicit profile is enough to register this MCP process. Do not wait for backend
+      // startup here; the capability handler will start or reuse the service after dependency
+      // checks. A profile-less legacy server still has to resolve its root first.
+      const root = configRoot ? Promise.resolve(configRoot) : serviceRoot()
+      ready = root
+        .then((root) => ensureRegistration(root))
+        .catch((error) => {
+          ready = undefined
+          throw error
+        })
+    }
+    return ready
+  }
   const server = createResearchMcpServer({
     configRoot,
     version,
     group,
     getRegistryRoot,
+    beforeCall: group ? ensureReady : undefined,
     probe: connectToOpenScience,
     connect: async ({ signal }) => {
       const attempt = serviceRoot()
@@ -175,9 +196,10 @@ export const runResearchMcpServer = async ({ configRoot, version, startService, 
     }
   })
   server.server.oninitialized = () => {
-    // Tool calls that need a running service observe startup failure through the error envelope.
+    // Start the backend in the background, while sharing the registration promise with the
+    // first grouped tool call.
     void serviceRoot()
-      .then((root) => ensureRegistration(root))
+      .then(() => ensureReady())
       .catch((error) =>
         logMcpDiagnostic(`MCP ${group ?? 'legacy'} startup or registration failed`, error)
       )
