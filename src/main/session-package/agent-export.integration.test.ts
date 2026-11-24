@@ -12,7 +12,7 @@ import { configureTestRuntimeMetadata } from '../../../test/runtime-metadata'
 import type { ResolveArtifactVersionDescriptorsRequest } from '../../shared/artifacts'
 import { createLinearConversationGraph } from '../../shared/conversation-graph'
 import type { PackageOperationRequest } from '../../shared/session-package'
-import type { PersistedChatSession } from '../../shared/session-persistence'
+import type { LoadSessionRequest, PersistedChatSession } from '../../shared/session-persistence'
 import { createApplicationCommandRouter } from '../application-command-router'
 import type { ApplicationCommandByNameDispatcher } from '../application-command-composition-contract'
 import { ApplicationEventHub } from '../application-events'
@@ -289,13 +289,25 @@ async function withPackageService(
       tasks: new HeadlessTaskApi(
         {
           commands: {
-            commandNames: () => ['projects:list'],
+            commandNames: () => [
+              'projects:list',
+              'sessions:load-all',
+              'sessions:load-one',
+              'artifacts:resolve-version-descriptors'
+            ],
             invoke: async (name, { args }) => {
+              if (name === 'sessions:load-one') {
+                const request = args[0] as LoadSessionRequest
+                const projectId =
+                  request.projectId ?? (await sessions.locateSession(request.sessionId))?.projectId
+                return projectId ? sessions.loadSession(projectId, request.sessionId) : undefined
+              }
               if (name === 'sessions:load-all') return sessions.loadAll()
-              if (name === 'artifacts:resolve-version-descriptors')
+              if (name === 'artifacts:resolve-version-descriptors') {
                 return provenance.resolveVersionDescriptors(
                   args[0] as ResolveArtifactVersionDescriptorsRequest
                 )
+              }
               if (name !== 'projects:list') throw new Error(`Unexpected task command: ${name}`)
               const projects = await fixture.client.project.findMany({
                 select: { id: true, name: true }
