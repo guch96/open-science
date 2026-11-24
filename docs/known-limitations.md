@@ -8,8 +8,8 @@ for suspected vulnerabilities; do not add undisclosed exploit details here.
 
 ## Review baseline
 
-The entries below were reviewed against source and documentation at [`v1.2.1`](https://github.com/aipoch/open-science/tree/v1.2.1)
-(commit `a18fd48055b0`, application version **1.2.1**) on **2026-11-11**. Each entry's scope applies to that
+The entries below were reviewed against source and documentation at [`v1.3.3`](https://github.com/aipoch/open-science/tree/v1.3.3)
+(commit `eed4e76bb473`, application version **1.3.3**) on **2026-11-22**. Each entry's scope applies to that
 baseline; historical affected ranges and later fixes must be established separately. Independent
 packages retain their own versions. This review does not constitute new runtime testing, a security
 certification, or a claim that every release/platform combination has been exercised.
@@ -17,7 +17,7 @@ certification, or a claim that every release/platform combination has been exerc
 All entries share that review date unless an entry records a newer one. **Documented boundary** means
 the limitation remains relevant at this baseline, not that a fix is scheduled. **Verification gap**
 means the stated assurance has not been established by this review. Release-specific changes belong
-in the [release notes](../release-notes/1.2.1/en.md).
+in the [release notes](../release-notes/1.3.3/en.md).
 
 ## Source risk detection is bounded
 
@@ -47,20 +47,25 @@ in the [release notes](../release-notes/1.2.1/en.md).
 
 - **Scope / status:** The Notebook gateway's public read channel, excluding the separate WSL2 path;
   documented boundary.
-- **Trigger and impact:** When its local CA is available, the gateway can admit restricted GET/HEAD
-  requests to otherwise unknown public DNS hosts on port 443. URL paths and query parameters can
-  carry sensitive data even without a request body. The 8192-byte target limit is not an aggregate
-  data limit; there is no per-command request-count quota.
+- **Trigger and impact:** In the default Relaxed mode, when its local CA is available, the gateway can
+  admit restricted GET/HEAD requests to otherwise unknown public DNS hosts on port 443. URL paths and
+  query parameters can carry sensitive data even without a request body. The 8192-byte target limit is
+  not an aggregate
+  data limit; there is no per-command request-count quota. In Strict mode, unmatched requests are
+  blocked without an authorization offer, so this channel admits only whitelisted destinations; the
+  whitelist is managed manually and its built-in destinations are seeded once.
 - **Precautions:** Do not assume an unlisted public host cannot receive data. Use explicit deny rules
   for known destinations and an externally enforced restricted environment when the task requires
-  strict egress control. Review the TLS inspection behavior before using this channel.
+  strict egress control, or switch Notebook networking to Strict mode and review its seeded whitelist
+  rules. Review the TLS inspection behavior before using this channel.
 - **Details:** [Gateway policy](../packages/notebook-network-sandbox/README.md#scope) and
   [execution security model](security.md#code-and-notebook-execution).
 
 ## Local-first storage does not prevent external disclosure
 
-- **Scope / status:** Model/scenario requests, Connectors, MCP servers, source-link previews, remote jobs, research-film
-  narration resources, and exports;
+- **Scope / status:** Model/scenario requests, image generation and editing, built-in web search and page fetch,
+  Connectors, MCP servers, source-link previews, remote jobs, research-film narration resources,
+  organization case sharing, and exports;
   documented boundary.
 - **Trigger and impact:** Requests disclose the content prepared for their recipients. Read-only
   calls still disclose arguments. Cancelling a request or deleting local content cannot retract
@@ -131,6 +136,31 @@ in the [release notes](../release-notes/1.2.1/en.md).
   target, command, resources, and outputs in the per-job approval.
 - **Details:** [Extension and automation precautions](usage-scope.md#extensions-remote-access-and-automation)
   and [Compute safety](../packages/compute/README.md#safety-and-integration).
+
+## Scheduled tasks run unattended with project-granted authority
+
+- **Scope / status:** Scheduled session and Notebook tasks (v1.3.0); documented boundary.
+- **Trigger and impact:** While the app is running, a schedule launches its session or Notebook
+  run without a further confirmation. The run acts with the project's identity and the folders,
+  credentials, and network access already granted to that project, and it consumes the configured
+  provider quota.
+- **Precautions:** Review each schedule's target and cadence, and keep the owning project's grants
+  scoped to what the recurring run needs. Pause or delete schedules that are no longer wanted
+  instead of relying on grants to expire.
+- **Details:** [Agent actions and permissions](security.md#agent-actions-and-permissions) and
+  [automation](usage-scope.md#extensions-remote-access-and-automation).
+
+## The first update from 1.3.0 may need a manual installation
+
+- **Scope / status:** In-app updates that start from version 1.3.0, all platforms; documented
+  boundary for that transition, addressed for updates that start from 1.3.1.
+- **Trigger and impact:** The 1.3.0 updater can treat the app's own background log process as
+  another program using the installation and refuse to install. A fixed target version cannot
+  change the updater that is already running in 1.3.0.
+- **Precautions:** If the update reports that another process is using the installation, fully
+  quit Open-Science and its background service, then install the downloaded 1.3.1 package
+  manually. Profiles and research data need no migration or deletion.
+- **Details:** [Updating from an affected 1.3.0 client](compatibility.md#updating-from-an-affected-130-client).
 
 ## Maintaining this register
 

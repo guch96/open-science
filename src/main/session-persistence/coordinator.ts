@@ -1,11 +1,14 @@
+import { recoverDetachedIdleRun } from './turn-outcome-authority'
 import { assertLiteratureAttachmentsUnreferenced } from './literature-attachment-removal'
 import { ProjectFilesReconciliationError } from '../project-files/repository'
 import type { ProjectFileSource, ProjectFilesChangedEvent } from '../../shared/project-files'
 import type { ReconcilePendingArtifactsRequest } from '../../shared/artifacts'
 import {
   SessionDeletionCommittedError,
+  SessionDetailsConflictError,
   SessionRevisionConflictError,
   isSessionRevisionConflictError,
+  isPreparedSessionRun,
   sessionRevision,
   deleteSessionRecoveryFileRequestSchema,
   type DeleteSessionRecoveryFileRequest,
@@ -16,6 +19,7 @@ import {
   type PersistedSideChat,
   type PersistedSideChatRelay,
   type SaveSessionOptions,
+  type SetSessionPinnedRequest,
   type SaveSessionManifestRequest,
   type FailTaskSessionRunRequest,
   type SettleTaskSessionCompletionRequest,
@@ -53,11 +57,15 @@ import type {
 import type { SessionDeletionReceipt } from '../artifacts/provenance-message-snapshot'
 import type { ManagedFileSoftDeleteToken } from '../project-files/repository'
 import * as computeHostAccess from '../compute/session-compute-host-access'
-import type { ProjectSessionDeletionState, SessionRecoverySnapshot } from './repository'
+import type {
+  ProjectSessionDeletionState,
+  SessionLocation,
+  SessionRecoverySnapshot
+} from './repository'
 import { createLogger, diagnosticErrorFields, type Logger } from '@aipoch/diagnostics/node'
 import { startDiagnosticOperation } from '@aipoch/diagnostics/node'
 import type { AcpRuntimeEvent } from '../../shared/acp'
-import { saveSessionWithRevision } from './save-session'
+import { saveSessionWithRevision, type MainSessionSaveOptions } from './save-session'
 import { observeSessionRecordWrites } from './record-facts'
 import {
   SessionPersistenceStateOwner,
@@ -94,6 +102,7 @@ import {
   SessionDelegatedWorkPersistenceOwner
 } from './delegated-work-owner'
 import { SessionPersistenceOperationScheduler } from './operation-scheduler'
+import type { RuntimeSessionMutationOptions } from './runtime-session-mutation'
 import { assertSessionIdentityOwnership, isSessionCatalogAuthoritative } from './catalog-authority'
 import {
   createSafeSessionUpdatePublisher as safeSessionUpdates,
@@ -101,6 +110,7 @@ import {
 } from './session-update-publication'
 import { sanitizeRendererSaveSessionOptions } from './renderer-save-options'
 import { mutateSessionDetailsAuthority } from './session-details-authority'
+import type { WebEvidenceLifecycle } from '../web/evidence-lifecycle'
 
 // Main-process package publisher supplies only a successfully persisted Session. The optional
 // context certifies that this operation's new Project is still hidden by its staging barrier.
@@ -113,7 +123,9 @@ export type PublishedSessionHandoff = {
 
 const SESSION_CPU_TRACE_ENABLED = process.env.OPEN_SCIENCE_PERF_SESSION_TRACE === '1'
 type SessionMutationRepository = {
+  shouldPreserveRuntimeState?(projectId: string, sessionId: string): boolean
   hasLiveRuntimeSession?(projectId: string, sessionId: string): boolean
+  locateSession?(sessionId: string): Promise<SessionLocation | undefined>
   deleteRecoveryFile?(request: DeleteSessionRecoveryFileRequest): Promise<void>
   loadAllWithDiagnostics(options?: {
     mode?: 'repair' | 'read-only'
@@ -160,7 +172,7 @@ type SessionMutationRepository = {
   saveSession(
     session: PersistedChatSession,
     expectedRevision?: number,
-    onJsonCommitted?: (session: PersistedChatSession) => void
+    options?: MainSessionSaveOptions
   ): Promise<PersistedChatSession>
   saveSessionWithBindingRepair?(
     session: PersistedChatSession,
@@ -215,6 +227,14 @@ type SessionDeletionHandlers = {
   commit(sessionIds: string[]): Promise<void>
   reconcile(existingSessionIds: string[], archivedSessionIds: string[]): Promise<void>
 }
+
+const preservesRecoveryRuntime = (
+  repository: SessionMutationRepository,
+  { projectId, id }: PersistedChatSession
+): boolean =>
+  repository.shouldPreserveRuntimeState?.(projectId, id) ??
+  repository.hasLiveRuntimeSession?.(projectId, id) ??
+  false
 
 const emitRecoverableDiagnostic = (
   log: Logger,
@@ -480,7 +500,8 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
         operation: () => Promise<T>
       ): Promise<T>
       withProjectStopped<T>(projectId: string, operation: () => Promise<T>): Promise<T>
-    }
+    },
+    private readonly webEvidence?: WebEvidenceLifecycle
   ) {
     const publishSessionUpdate = safeSessionUpdates(onDelegatedWorkSessionUpdated, log)
     this.notifySessionRecordProblems = publishSessionUpdate
@@ -518,6 +539,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     })
     this.repository = repository
     this.stateOwner = new SessionPersistenceStateOwner({
+      webEvidence,
       repository,
       fileIndex,
       provenance,
@@ -566,6 +588,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       computeJobs,
       workspaceOwnership,
       preparePackageDeletion,
+      webEvidence,
       log,
       assertArchiveMutable: (projectId, sessionId) => {
         if (this.deletedProjects.has(projectId)) {
@@ -632,6 +655,21 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
     })
   }
 
+  findSessionForContinuation(
+    projectId: string,
+    sessionId: string
+  ): Promise<PersistedChatSession | undefined> {
+    return this.operationScheduler.runSession(projectId, sessionId, async () => {
+      const loaded = await this.repository.loadSessionWithDiagnostics(projectId, sessionId, {
+        mode: 'read-only'
+      })
+      if (loaded.status === 'missing') return undefined
+      if (loaded.status !== 'found')
+        throw new Error(`Cannot prepare a durable continuation for a ${loaded.status} Session.`)
+      return structuredClone(loaded.session)
+    })
+  }
+
   loadSessionForContinuation(projectId: string, sessionId: string): Promise<PersistedChatSession> {
     return this.operationScheduler.runSession(projectId, sessionId, async () => {
       const loaded = await this.repository.loadSessionWithDiagnostics(projectId, sessionId)
@@ -663,6 +701,7 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
       }
       // Ordinary reads remain authoritative whenever they can see the Session.
       const durable = loaded.status === 'found' ? loaded.session : session
+      await this.webEvidence?.confirmPublication(durable)
       await assertSessionIdentityOwnership(this.repository, this.stateOwner, durable)
       this.stateOwner.invalidateBindingTopology(projectId, sessionId)
       this.stateOwner.recordSession(durable)
@@ -949,16 +988,22 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
           if (actualRevision !== expectedRevision)
             throw new SessionRevisionConflictError(expectedRevision, actualRevision)
           // Normal reads preserve active runtime state. Never restart an owned run or preparation.
-          if (loaded.session.activeRun || this.stateOwner.ownsPromptPreparation(loaded.session))
+          if (
+            this.stateOwner.ownsPromptPreparation(loaded.session) ||
+            preservesRecoveryRuntime(this.repository, loaded.session)
+          )
             return loaded.session
           // Runtime ownership can change without a JSON revision. Replan from the validated read so
           // stale restore normalization cannot resurrect a released run or disturb a new owner.
-          const recovered = recoverInterruptedDelegatedWorkSession(loaded.session)
-          const session = recovered.interrupted.length
-            ? await (this.repository.saveRecoveredSession
-                ? this.repository.saveRecoveredSession(recovered.session, expectedRevision)
-                : saveSessionWithRevision(this.repository, recovered.session, expectedRevision))
-            : loaded.session
+          const detached = recoverDetachedIdleRun(loaded.session)
+          if (detached.activeRun && !isPreparedSessionRun(detached)) return loaded.session
+          const recovered = recoverInterruptedDelegatedWorkSession(detached)
+          const session =
+            recovered.session !== loaded.session
+              ? await (this.repository.saveRecoveredSession
+                  ? this.repository.saveRecoveredSession(recovered.session, expectedRevision)
+                  : saveSessionWithRevision(this.repository, recovered.session, expectedRevision))
+              : loaded.session
           const outcome = await this.reconciliationOwner.reconcileLoadedSessions({
             result: { sessions: [session], manifest: { version: 1 } },
             allowDestructiveCleanup: false,
@@ -1106,11 +1151,19 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
         let recoveryFailureCount = 0
         for (let index = 0; index < sessions.length; index += 1) {
           try {
-            const recovery = recoverInterruptedDelegatedWorkSession(sessions[index])
-            if (recovery.interrupted.length === 0) continue
+            if (
+              this.stateOwner.ownsPromptPreparation(sessions[index]) ||
+              preservesRecoveryRuntime(this.repository, sessions[index])
+            )
+              continue
+            const recovery = recoverInterruptedDelegatedWorkSession(
+              recoverDetachedIdleRun(sessions[index])
+            )
+            if (recovery.session === sessions[index]) continue
             const persistedRecovery = await saveSessionWithRevision(
               this.repository,
-              recovery.session
+              recovery.session,
+              sessionRevision(sessions[index])
             )
             sessions = sessions.map((candidate, candidateIndex) =>
               candidateIndex === index ? persistedRecovery : candidate
@@ -1471,13 +1524,30 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
   // Finds a persisted Session's owner for runtime admission. Fresh, unsaved sessions have no durable
   // archive state and deliberately return undefined.
   sessionProjectId(sessionId: string): Promise<string | undefined> {
-    return this.operationScheduler.runSessionIdentity(sessionId, async () =>
-      this.stateOwner.sessionProjectId(sessionId)
-    )
+    return this.operationScheduler.runSessionIdentity(sessionId, async () => {
+      const metadataProjectId = this.stateOwner.sessionProjectId(sessionId)
+      if (metadataProjectId !== undefined) return metadataProjectId
+      return (await this.repository.locateSession?.(sessionId))?.projectId
+    })
   }
 
-  // Dedicated main-owned archive mutation. Unlike full renderer saves it preserves updatedAt and
-  // never allows a stale renderer projection to alter archive state.
+  // Metadata commands retain field-level optimistic concurrency without carrying a transcript.
+  setSessionPinned(request: SetSessionPinnedRequest): Promise<PersistedChatSession> {
+    return this.mutateSessionDetailsAuthority(request.projectId, request.sessionId, (session) => {
+      if ((session.pinned === true) !== request.expectedPinned) {
+        throw new SessionDetailsConflictError(
+          'Session pin changed elsewhere. Reload and try again.'
+        )
+      }
+      // Pinning is a sidebar preference and must not reorder the recent-conversation list.
+      return { ...session, pinned: request.pinned }
+    }).then((session) => {
+      if (!session) throw new Error('Session not found.')
+      return session
+    })
+  }
+
+  // Dedicated main-owned archive mutation preserves updatedAt and archive authority.
   updateArchive(
     request: UpdateSessionArchiveRequest,
     isRuntimeBusy: () => boolean | Promise<boolean> = () => false
@@ -1522,13 +1592,13 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
           const reservation = this.exportingSessions.get(sessionKey(session.projectId, session.id))
           if (reservation) return { released: reservation.released }
           await assertSessionIdentityOwnership(this.repository, this.stateOwner, session)
-          return {
-            saved: await this.stateOwner.saveSession(
+          const save = (): Promise<PersistedChatSession> =>
+            this.stateOwner.saveSession(
               session,
               sanitizeRendererSaveSessionOptions(options, session),
               authority
             )
-          }
+          return { saved: await save() }
         }
       )
       if (result.saved) {
@@ -1683,10 +1753,10 @@ class SessionPersistenceCoordinator implements DelegatedWorkRecordCommands {
   mutateRuntimeSession(
     scope: { projectId: string; sessionId: string },
     mutate: (session: PersistedChatSession) => PersistedChatSession,
-    onJsonCommitted?: () => void
+    options?: RuntimeSessionMutationOptions
   ): Promise<PersistedChatSession> {
     return this.operationScheduler.runSession(scope.projectId, scope.sessionId, () =>
-      this.stateOwner.mutateRuntimeSession(scope, mutate, onJsonCommitted)
+      this.stateOwner.mutateRuntimeSession(scope, mutate, options)
     )
   }
 

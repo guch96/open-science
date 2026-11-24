@@ -1,4 +1,7 @@
+import { sessionMetadataReceipt } from '../../shared/session-persistence'
+import type { ImageTaskOwner } from '../image-model/tasks'
 import { hasCallerAuthority } from '../caller-context'
+import type { ScheduleManagement } from '../schedules/management'
 import type { composeResearchFilm } from './research-film'
 import type { LocalModelApi } from '../../shared/local-models'
 import { UseCaseCatalog } from '../session-package/use-case-catalog'
@@ -28,9 +31,16 @@ import { ManagedFileVersionService } from '../managed-file-versions/service'
 import { createRuntimeWorkflows } from '../notebook/runtime-workflows'
 import { TaskNotificationService } from '../notifications/task-notifications'
 import { broadcastToRenderers } from '../renderer-broadcast'
+import { LIFECYCLE_CHANNELS } from '../../shared/lifecycle-events'
+import { createPptxEditCommands } from '../pptx-edit/application-commands'
+import { createPptxDraftCommands } from '../pptx-edit/draft-commands'
 import { linkPdfContextWithCapability } from '../session-persistence/pdf-context-link-workflow'
 import { SETTINGS_INSTALL_LOG_CHANNEL } from '../settings/ipc'
-import { withDataRootWrite } from '../storage/migration-state'
+import {
+  withDataRootWrite,
+  isMigrationInProgress,
+  isMigrationPending
+} from '../storage/migration-state'
 import type { composeAgentWorkflows } from './agent-completion'
 import type { composeAgentRuntime } from './agent-runtime'
 import type { composeArtifactSurfaces } from './artifact-surfaces'
@@ -47,6 +57,7 @@ import type { composeResearchCatalog } from './research-catalog'
 import { registerReviewerComposition } from './reviewer'
 import type { composeSessionAuthority } from './session-authority'
 import type { composeSessionFoundation } from './session-foundation'
+import type { OrgCaseService } from '../session-package/org-cases'
 import type { composeSessionPackageSurfaces, composeSessionPackages } from './session-packages'
 import type { composeSessionSurfaces } from './session-surfaces'
 import type { composeSettingsBootstrap } from './settings-bootstrap'
@@ -54,6 +65,8 @@ import type { composeSettingsEffects } from './settings-effects'
 import type { composeStorageStartup } from './storage-startup'
 
 export function composeCommandDependencies({
+  schedules,
+  imageTasks,
   localeOwner,
   reportUploadProgress,
   sideChatCommands,
@@ -95,9 +108,11 @@ export function composeCommandDependencies({
   storageHandoff,
   artifactSurfaces,
   sessionPackageSurfaces,
+  orgCases,
   reviewerCommandOwner,
   listAppIconPreviews
 }: {
+  imageTasks: ImageTaskOwner
   reportUploadProgress: ((clientId: string, progress: UploadTransferProgress) => void) | undefined
   localeOwner: LocalePreferenceOwner
   sideChatCommands: SideChatCommandOwner
@@ -109,7 +124,9 @@ export function composeCommandDependencies({
   runtimeRef: { current: ReturnType<typeof createAcpRuntime> | undefined }
   sessionFoundation: Awaited<ReturnType<typeof composeSessionFoundation>>
   sessionPackages: Awaited<ReturnType<typeof composeSessionPackages>>
+  orgCases?: Pick<OrgCaseService, 'listCases' | 'getCase' | 'importCase' | 'cancelImport'>
   managedFiles: ReturnType<typeof composeManagedFiles>
+  schedules: ScheduleManagement
   sessionAuthority: Awaited<ReturnType<typeof composeSessionAuthority>>
   researchFilm: Awaited<ReturnType<typeof composeResearchFilm>>
   localModels: LocalModelApi
@@ -166,6 +183,7 @@ export function composeCommandDependencies({
     pdfTranslation: documentReading.pdfTranslationOwner,
     sessionReplay,
     specialist: sessionSurfaces.specialistApplicationOwner,
+    schedules,
     bookmarks: documentReading.bookmarkService,
     pdfAnnotations: documentReading.pdfAnnotationService,
     acp: {
@@ -181,6 +199,12 @@ export function composeCommandDependencies({
     },
     notebook: {
       workflows: notebookRuntime.notebookCommands,
+      resourceReleaseBlockedReason: () =>
+        sessionPackages.packageHandoffHeld.current
+          ? 'package-handoff'
+          : isMigrationInProgress() || isMigrationPending()
+            ? 'data-migration'
+            : undefined,
       readInputPreview: (request) => sessionAuthority.notebookInputRegistry.readPreview(request)
     },
     notebookEnvironment: notebookEnvironmentLifecycle,
@@ -213,6 +237,7 @@ export function composeCommandDependencies({
     },
     settingsRuntime: {
       workflows: settingsEffects.settingsWorkflows.runtime,
+      lab: settingsBootstrap.settingsService,
       snapshotCommits: settingsBootstrap.settingsSnapshotCommits
     },
     compute: {
@@ -266,7 +291,42 @@ export function composeCommandDependencies({
     },
     dataContent: {
       useCaseCatalog,
+      orgCases: orgCases ?? {
+        listCases: async () => ({ ok: false, errorCode: 'unconfigured' }),
+        getCase: async () => ({ ok: false, errorCode: 'unconfigured' }),
+        importCase: async (caseId: string) => ({
+          status: 'failed',
+          caseId,
+          errorCode: 'unconfigured'
+        }),
+        cancelImport: () => ({ cancelled: false })
+      },
       officePreviewCommands,
+      pptxEditCommands: createPptxEditCommands({
+        sessions: managedFiles.pptxEditSessions,
+        withDataRootWrite,
+        onSaved: (request, result) => {
+          if (result.kind !== 'created' || result.replayed) return
+          const identity = managedFiles.pptxEditSessions.identityOf(request.sessionId)
+          if (!identity) return
+          broadcastToRenderers('project-files:changed', {
+            projectId: identity.projectId,
+            sources: [identity.source],
+            kind: 'upsert'
+          })
+        }
+      }),
+      pptxDraftCommands: createPptxDraftCommands({
+        drafts: managedFiles.pptxDrafts,
+        review: managedFiles.pptxDraftReview,
+        withDataRootWrite,
+        onSaved: (identity) =>
+          broadcastToRenderers('project-files:changed', {
+            projectId: identity.projectId,
+            sources: [identity.source],
+            kind: 'upsert'
+          })
+      }),
       fileSaveCommands,
       reproducibility: artifactSurfaces.reproducibilityCommands,
       managedFileVersions: projectLifecycle.managedFileVersionHandlers,
@@ -281,7 +341,12 @@ export function composeCommandDependencies({
         cancelSessionDiagnostics: (invocation) =>
           sessionFoundation.sessionDiagnosticsDesktop.cancel(invocation.args[0]),
         sessionPackageOperation: async (invocation) =>
-          sessionPackageSurfaces.sessionPackageDesktop.respond(invocation.args[0]),
+          invocation.callerContext.surface === 'electron'
+            ? sessionPackageSurfaces.sessionPackageDesktop.respond(
+                invocation.args[0],
+                invocation.callerContext.clientId
+              )
+            : sessionPackageSurfaces.sessionPackageDesktop.respond(invocation.args[0]),
         forkSession: (invocation) =>
           sessionPackageSurfaces.sessionPackageDesktop.fork(
             invocation.args[0],
@@ -353,6 +418,7 @@ export function composeCommandDependencies({
       },
       events: applicationEvents,
       managedPreview: managedFiles.managedPreviewOwners,
+      imageTasks,
       researchVideoPresentation: researchFilm.researchVideoPresentation,
       videoExportTools: researchFilm.videoExportTools,
       preview: {
@@ -425,6 +491,21 @@ export function composeCommandDependencies({
           return context
         },
         editDetails: (request) => sessionSurfaces.sessionDetailsOwner.edit(request),
+        rename: async (request) =>
+          sessionMetadataReceipt(await sessionSurfaces.sessionDetailsOwner.rename(request)),
+        setPinned: async (request) => {
+          const session =
+            await sessionAuthority.sessionPersistenceCoordinator.setSessionPinned(request)
+          try {
+            applicationEvents.publish(LIFECYCLE_CHANNELS.sessionUpdated, {
+              session,
+              originClientId: 'main:session-pin'
+            })
+          } catch {
+            // A derived notification cannot turn a durable metadata commit into a failed write.
+          }
+          return sessionMetadataReceipt(session)
+        },
         bindTaskSession: (request) =>
           sessionAuthority.sessionPersistenceCoordinator.bindTaskSession(request),
         admitTaskTurn: (request) =>

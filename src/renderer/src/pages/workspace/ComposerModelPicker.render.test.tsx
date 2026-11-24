@@ -5,14 +5,16 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type {
+  AgentFrameworkView,
+  ProviderView,
+  SessionAgentConfiguration
+} from '../../../../shared/settings'
 import {
   CLAUDE_ISOLATED_PROVIDER_ID,
   CLAUDE_SHARED_PROVIDER_ID,
-  CODEX_SHARED_PROVIDER_ID,
-  type AgentFrameworkView,
-  type ProviderView,
-  type SessionAgentConfiguration
-} from '../../../../shared/settings'
+  CODEX_SHARED_PROVIDER_ID
+} from '../../../../shared/settings-runtime'
 import {
   reasoningEffortProfile,
   resolveReasoningEffortControl
@@ -931,7 +933,8 @@ describe('ComposerModelPicker', () => {
           type: 'official',
           vendorId: 'openai',
           name: 'OpenAI',
-          models: ['gpt-5.2', 'gpt-5.5']
+          models: ['gpt-5.2', 'gpt-5.5'],
+          modelCatalog: { fetchedAt: 1, models: [{ id: 'gpt-5.2' }, { id: 'gpt-5.5' }] }
         }),
         provider({ id: 'gw', name: 'Gateway', apiEndpoints: ['chat-completions'], models: ['gm'] })
       ],

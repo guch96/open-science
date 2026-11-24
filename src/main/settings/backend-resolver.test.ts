@@ -1,3 +1,5 @@
+import { codeBuddyAccounts } from '../../shared/codebuddy-subscription'
+import { ProviderRuntimeProjectionOwner } from './provider-runtime-projection'
 import { releaseResolvedAgentBackendLeases } from '../agent-framework'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -9,7 +11,7 @@ import { SideChatRuntimeOwner } from '../side-chat/runtime-owner'
 import { SideChatRelayOwner } from '../acp/side-chat-relay-owner'
 import type { ResolvedAgentBackend } from '../agent-framework'
 
-import { SETTINGS_FILE_VERSION } from '../../shared/settings'
+import { SETTINGS_FILE_VERSION } from '../../shared/settings-runtime'
 import type { AgentConfigFile, AgentFrameworkId } from '../agent-framework'
 import { opencodeTransportProviderId } from '../agent-framework/opencode'
 import { SKILL_IMPORT_SYSTEM_PROMPT_APPEND } from '../skills/mcp-server'
@@ -1127,6 +1129,25 @@ describe('AgentBackendResolver configured and explicit targets', () => {
     await backend.providerTransportLease?.release()
   })
 
+  it('sets the Claude output budget only for a restricted target with a known limit', async () => {
+    const harness = makeHarness({
+      targetOverride: () => ({ provider: { maxOutputTokens: 64_000 } })
+    })
+    const target = await harness.resolver.captureExplicitTarget()
+    const restricted = await harness.resolver.resolveExplicitTarget(target, {
+      includeSkillAndConnectorContext: false,
+      useResolvedModelOutputLimit: true
+    })
+    const main = await harness.resolver.resolveActiveBackend()
+    try {
+      expect(restricted.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('64000')
+      expect(main.env).not.toHaveProperty('CLAUDE_CODE_MAX_OUTPUT_TOKENS')
+    } finally {
+      await restricted.messagesBridgeLease?.release()
+      await main.messagesBridgeLease?.release()
+    }
+  })
+
   it('keeps a single Claude target behind loopback and projects its model target', async () => {
     const harness = makeHarness()
     const backend = await harness.resolver.resolveActiveBackend()
@@ -1267,6 +1288,22 @@ describe('AgentBackendResolver configured and explicit targets', () => {
     await expect(harness.resolver.resolveActiveModelChangeTarget()).resolves.toMatchObject({
       route: 'opencode-openai'
     })
+  })
+
+  it('uses loadable skill names as directory IDs for OpenCode 2.x', async () => {
+    const harness = makeHarness({ settings: makeSettings({ agentFrameworkId: 'opencode' }) })
+    harness.runtime.probeOpencodeVersion.mockResolvedValue('2.2.7')
+
+    const backend = await harness.resolver.resolveActiveBackend()
+
+    expect(harness.runtime.prepareAgentSkillDiscovery).toHaveBeenCalledWith(
+      expect.anything(),
+      join('/storage', 'opencode', 'config', 'opencode'),
+      expect.any(Set),
+      undefined,
+      { directoryLayout: 'agent-facing-shared' }
+    )
+    await backend.providerTransportLease?.release()
   })
 
   it('does not pass removed listener flags to OpenCode 2.x ACP', async () => {
@@ -1940,6 +1977,40 @@ describe('AgentBackendResolver bridge predicates', () => {
       await backend.providerTransportLease?.release()
     }
   )
+
+  it('opens a saved China conversation through its original account after activating the international account', async () => {
+    const providers = Object.values(codeBuddyAccounts).map((identity) => ({
+      ...identity,
+      type: 'codebuddy-subscription' as const,
+      model: 'shared-model',
+      apiEndpoints: ['chat-completions' as const]
+    }))
+    const projection = new ProviderRuntimeProjectionOwner()
+    const harness = makeHarness({
+      settings: makeSettings({
+        providers,
+        activeProviderId: codeBuddyAccounts.external.id,
+        agentFrameworkId: 'codebuddy'
+      })
+    })
+    harness.resolveRuntimeTarget.mockImplementation((record, selection, framework) =>
+      projection.resolveRuntimeTarget(record, selection, framework)
+    )
+    const backend = await harness.resolver.resolveExplicitTarget({
+      frameworkId: 'codebuddy',
+      providerId: codeBuddyAccounts.internal.id,
+      model: { kind: 'required', id: 'shared-model' },
+      reasoningEffort: 'default'
+    })
+    expect(backend).toMatchObject({
+      providerId: codeBuddyAccounts.internal.id,
+      backendId: 'codebuddy:' + codeBuddyAccounts.internal.id,
+      modelRoute: 'codebuddy-subscription',
+      sessionModelRequired: true,
+      env: { CODEBUDDY_INTERNET_ENVIRONMENT: 'internal' }
+    })
+    expect(backend.env).not.toHaveProperty('CODEBUDDY_BASE_URL')
+  })
 
   it('provisions an isolated Connector Skill runtime for CodeBuddy', async () => {
     const harness = makeHarness({ connectorIds: ['pubmed'] })

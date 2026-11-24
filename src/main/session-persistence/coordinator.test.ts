@@ -2,7 +2,7 @@ import { configureTestRuntimeMetadata } from '../../../test/runtime-metadata'
 import { ProjectFilesReconciliationError } from '../project-files/repository'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('electron', () => ({
@@ -600,6 +600,24 @@ describe('published Session adoption', () => {
 })
 
 describe('SessionPersistenceCoordinator', () => {
+  it('resolves a cold Session owner from the locator without hydrating the catalog', async () => {
+    const session = createSession({ id: 'cold-session', projectId: 'project-cold' })
+    const locateSession = vi.fn(async () => ({
+      sessionId: session.id,
+      projectId: session.projectId,
+      storagePath: `sessions/${session.projectId}/${session.id}.json`
+    }))
+    const repository = createSessionRepository({ locateSession })
+    repository.loadAllWithDiagnostics = vi.fn(async () => {
+      throw new Error('Targeted owner lookup must not hydrate the Session catalog.')
+    })
+    const coordinator = new SessionPersistenceCoordinator(repository, createFileIndex())
+
+    await expect(coordinator.sessionProjectId(session.id)).resolves.toBe(session.projectId)
+    expect(locateSession).toHaveBeenCalledWith(session.id)
+    expect(repository.loadAllWithDiagnostics).not.toHaveBeenCalled()
+  })
+
   it('defers late renderer saves until export releases without occupying other persistence lanes', async () => {
     const repository = createSessionRepository()
     const coordinator = new SessionPersistenceCoordinator(repository, createFileIndex())
@@ -7127,23 +7145,20 @@ describe('SessionPersistenceCoordinator', () => {
     const root = await mkdtemp(join(tmpdir(), 'open-science-bounded-cache-'))
     try {
       initDataRoot(root)
-      const reads: string[] = []
-      const repository = new SessionRepository(root, {
-        readSessionFile: async (path) => {
-          reads.push(path)
-          return readFile(path, 'utf8')
-        }
-      })
+      const repository = new SessionRepository(root)
       for (let index = 0; index < 33; index++) {
         await repository.saveSession(createSession({ id: `history-${index}` }))
       }
+      const loadAll = vi.spyOn(repository, 'loadAllWithDiagnostics')
       const coordinator = new SessionPersistenceCoordinator(repository, createFileIndex())
       const first = await coordinator.loadAll()
       expect(first.sessions).toHaveLength(33)
-      reads.length = 0
+      expect(loadAll).toHaveBeenCalledTimes(1)
       const second = await coordinator.loadAll()
       expect(second.sessions).toHaveLength(33)
-      expect(reads.some((path) => basename(path) === 'history-0.json')).toBe(true)
+      // New Sessions live in JSONL, so authority re-reads bypass readSessionFile. The observable
+      // contract is that an over-count catalog is never reused for a later load.
+      expect(loadAll).toHaveBeenCalledTimes(2)
       expect(await coordinator.loadSessionForContinuation('project-1', 'history-0')).toMatchObject({
         id: 'history-0',
         title: 'Session'
@@ -7157,12 +7172,7 @@ describe('SessionPersistenceCoordinator', () => {
     const root = await mkdtemp(join(tmpdir(), 'open-science-byte-cache-'))
     try {
       initDataRoot(root)
-      const reads: string[] = []
       const repository = new SessionRepository(root, {
-        readSessionFile: async (path) => {
-          reads.push(path)
-          return readFile(path, 'utf8')
-        },
         hasLiveRuntimeSession: (_projectId, sessionId) => sessionId === 'live'
       })
       await repository.saveSession(
@@ -7183,11 +7193,13 @@ describe('SessionPersistenceCoordinator', () => {
           messages: [createUserMessage('prompt', 1)]
         })
       )
+      const loadAll = vi.spyOn(repository, 'loadAllWithDiagnostics')
       const coordinator = new SessionPersistenceCoordinator(repository, createFileIndex())
       await coordinator.loadAll()
-      reads.length = 0
+      expect(loadAll).toHaveBeenCalledTimes(1)
       const next = await coordinator.loadAll()
-      expect(reads.some((path) => basename(path) === 'large-history.json')).toBe(true)
+      expect(loadAll).toHaveBeenCalledTimes(2)
+      expect(next.sessions.some((session) => session.id === 'large-history')).toBe(true)
       expect(next.manifest.lastSessionId).toBe('selected')
       expect(await coordinator.loadSessionForContinuation('project-1', 'selected')).toMatchObject({
         id: 'selected'
@@ -7207,26 +7219,21 @@ describe('SessionPersistenceCoordinator', () => {
     const root = await mkdtemp(join(tmpdir(), 'open-science-cache-expiry-'))
     try {
       initDataRoot(root)
-      const reads: string[] = []
-      const repository = new SessionRepository(root, {
-        readSessionFile: async (path) => {
-          reads.push(path)
-          return readFile(path, 'utf8')
-        }
-      })
+      const repository = new SessionRepository(root)
       await repository.saveSession(
         createSession({ messages: [createUserMessage('preserved-history', 1)] })
       )
       await repository.saveManifest({ lastSessionId: 'session-1' })
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const loadAll = vi.spyOn(repository, 'loadAllWithDiagnostics')
       const coordinator = new SessionPersistenceCoordinator(repository, createFileIndex())
       await coordinator.loadAll()
-      reads.length = 0
+      expect(loadAll).toHaveBeenCalledTimes(1)
       await coordinator.loadAll()
-      expect(reads).toEqual([])
+      expect(loadAll).toHaveBeenCalledTimes(1)
       await vi.advanceTimersByTimeAsync(30_001)
       const expired = await coordinator.loadAll()
-      expect(reads.some((path) => basename(path) === 'session-1.json')).toBe(true)
+      expect(loadAll).toHaveBeenCalledTimes(2)
       expect(expired.manifest.lastSessionId).toBe('session-1')
       expect(expired.sessions[0].messages[0].content).toBe('preserved-history')
     } finally {

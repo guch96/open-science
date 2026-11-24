@@ -23,3 +23,13 @@ export function resolveNativeLatinAccents(
   offset: number
   letter: string
 }>
+export function resolveNativeNegatedEqualities(
+  objects: Array<NativeMathObject & { baseline?: number }>,
+  allowLegacySlash?: boolean
+): Array<{
+  indices: number[]
+  label: string
+  baseline: number
+  negatedEquality: true
+  bounds: [number, number, number, number]
+}>

@@ -1,3 +1,9 @@
+import { isDesktopRenderer } from '@/lib/interface-scale'
+import { ResearchVideoDialog } from '@/components/research-video-button'
+import type { ResearchVideoPresentationRequest } from '../../../../shared/research-video-presentation'
+import type { ScheduleSummary } from '../../../../shared/session-schedules'
+import { OverlayLayerProvider } from '@/components/ui/overlay-layer'
+import { SchedulePage } from './schedules/SchedulePage'
 import { useSessionStore } from '@/stores/session-store'
 import { usePreviewWorkbenchStore } from '@/stores/preview-workbench-store'
 import { useNavigationStore } from '@/stores/navigation-store'
@@ -14,8 +20,10 @@ import {
   ChevronRight,
   Download,
   Files,
+  Clock,
   Cpu,
   Lock,
+  FolderOpen,
   MoreVertical,
   PanelLeft,
   Plus,
@@ -23,6 +31,7 @@ import {
   Settings,
   Store,
   Toolbox,
+  Video,
   X
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -84,6 +93,7 @@ type WorkspaceSidebarProps = {
   onOpenProject?: (projectId: string) => void
   sessions: ChatSession[]
   credentialPendingSessionIds?: ReadonlySet<string>
+  activeFilmSessionIds?: ReadonlySet<string>
   activeSessionId: string | undefined
   canCreateConversation: boolean
   canMutateConversations: boolean
@@ -96,6 +106,11 @@ type WorkspaceSidebarProps = {
   onOpenLiterature?: () => void
   isMarketplaceOpen?: boolean
   onOpenMarketplace?: () => void
+  isScheduleOpen?: boolean
+  scheduleSessionId?: string
+  onScheduleDetail?: (task?: ScheduleSummary) => void
+  scheduleDetailId?: string
+  onOpenSchedule?: () => void
   isComputeOpen?: boolean
   onOpenCompute?: () => void
   onOpenSession: (sessionId: string) => void
@@ -139,7 +154,7 @@ type WorkspaceSidebarProps = {
   sidebarToggleButtonRef?: React.Ref<HTMLButtonElement>
   mobileMode?: boolean
   isMobileOpen?: boolean
-  onMobileClose?: () => void
+  onMobileClose?: () => HTMLElement | null | void
 }
 
 type WorkspaceSidebarViewProps = WorkspaceSidebarProps & {
@@ -180,6 +195,7 @@ type SessionRowCallbacks = Pick<
   | 'onSessionActionsOpenChange'
 > & {
   onOpenSession: (sessionId: string, clickDetail?: number) => void
+  onOpenResearchFilm?: (session: ChatSession) => Promise<void>
   onSessionContextMenu?: () => void
 }
 
@@ -242,6 +258,7 @@ const sessionStatusLabelKeys = {
 
 const ACTIVE_SESSION_GRACE_MS = 15 * 60_000
 const EMPTY_CREDENTIAL_SESSION_IDS = new Set<string>()
+const EMPTY_ACTIVE_FILM_SESSION_IDS: ReadonlySet<string> = new Set()
 const EMPTY_PENDING_INTERACTION_FACTS = new Map<string, SessionPendingInteractionFacts>()
 const INITIAL_PROJECT_MENU_LIMIT = 5
 const FIRST_PROJECT_MENU_DESTINATION_SELECTOR = '[data-project-id], [data-project-new]'
@@ -290,7 +307,8 @@ const getSessionSections = (
   sessions: ChatSession[],
   now: number,
   credentialPendingSessionIds: ReadonlySet<string>,
-  pendingInteractionFactsBySession: ReadonlyMap<string, SessionPendingInteractionFacts>
+  pendingInteractionFactsBySession: ReadonlyMap<string, SessionPendingInteractionFacts>,
+  activeFilmSessionIds: ReadonlySet<string>
 ): SidebarSessionSection[] => {
   const imports = sessions.filter(isImportedSession)
   const children = new Map(imports.map((source) => [source.id, [] as ChatSession[]]))
@@ -308,6 +326,7 @@ const getSessionSections = (
     if (session.pinned) {
       pinned.push(session)
     } else if (
+      activeFilmSessionIds.has(session.id) ||
       isLiveSession(session, credentialPendingSessionIds, pendingInteractionFactsBySession) ||
       (session.status === 'idle' && now - session.updatedAt < ACTIVE_SESSION_GRACE_MS)
     ) {
@@ -349,9 +368,33 @@ const sessionRowClassName = cn(
 )
 
 const sessionRowActionClassName =
-  'absolute right-1.5 top-1/2 z-10 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded text-text-100 opacity-0 transition-opacity duration-200 ease-out hover:!opacity-100 hover:bg-bg-400 hover:text-text-000 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100'
+  'absolute right-1.5 top-1/2 z-10 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded text-text-100 opacity-0 transition-opacity duration-200 ease-out hover:!opacity-100 hover:bg-bg-400 hover:text-text-000 focus-visible:opacity-100 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100 data-[state=open]:opacity-100'
+
+// A generating film mark rests in the actions slot, so the actions fade in and accept pointer
+// hits only after the mark has slid clear of it, and drop pointer hits immediately on leave.
+// Reduced motion drops the transition altogether: an instant swap cannot overlap.
+const filmRowActionClassName = cn(
+  'pointer-events-none transition-[opacity,pointer-events] [transition-behavior:allow-discrete] [transition-duration:200ms,0ms]',
+  'group-hover:delay-100 group-hover:duration-200 group-hover:pointer-events-auto',
+  'group-has-[:focus-visible]:delay-100 group-has-[:focus-visible]:duration-200 group-has-[:focus-visible]:pointer-events-auto',
+  'focus-visible:duration-200 focus-visible:pointer-events-auto',
+  'data-[state=open]:duration-200 data-[state=open]:pointer-events-auto',
+  'motion-reduce:transition-none'
+)
+
+// `mr-7` keeps the mark's flow slot reserved so the title truncates the same in every state; the
+// resting position is a translate into the actions slot. The mark yields that slot whenever the
+// actions are shown (hover, keyboard focus, or open menu) and returns only once they have faded.
+const filmSlotSwapClassName = cn(
+  'translate-x-7 transition-transform duration-150 ease-out delay-200 motion-reduce:transition-none',
+  'group-hover:translate-x-0 group-hover:delay-0',
+  'group-has-[:focus-visible]:translate-x-0 group-has-[:focus-visible]:delay-0',
+  'group-has-[[data-state=open]]:translate-x-0 group-has-[[data-state=open]]:delay-0'
+)
 
 const SESSION_ACTION_TARGET_PREFIX = 'session:'
+const sessionButtonId = (sessionId: string, mobile?: boolean): string =>
+  `sidebar-session-${mobile ? 'mobile' : 'desktop'}-${sessionId}`
 const sessionActionDangerClassName =
   'text-danger-000 data-[highlighted]:bg-danger-900 data-[highlighted]:text-danger-000'
 // Shared icon wrapper inside each project menu item row.
@@ -360,21 +403,36 @@ const sessionMenuIconClassName = 'flex size-4 shrink-0 items-center justify-cent
 const SessionActionDropdown = ({
   session,
   mobileMode,
+  showShortcut,
+  filmMarkSharesSlot,
   onOpenChange
 }: {
   session: ChatSession
   mobileMode: boolean
+  showShortcut: boolean
+  filmMarkSharesSlot: boolean
   onOpenChange?: (open: boolean) => void
 }): React.JSX.Element => {
   const { t } = useTranslation()
   const { entries, execute, renderLabel } = useActionMenuTarget<SessionActionId>()
+  const suppressCloseFocusRef = useRef(false)
 
   return (
-    <DropdownMenu onOpenChange={onOpenChange}>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        if (open) suppressCloseFocusRef.current = false
+        onOpenChange?.(open)
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className={cn(sessionRowActionClassName, mobileMode && 'opacity-100')}
+          className={cn(
+            sessionRowActionClassName,
+            filmMarkSharesSlot && filmRowActionClassName,
+            mobileMode && 'opacity-100',
+            showShortcut && 'invisible'
+          )}
           aria-label={t('Open actions for {{title}}', { title: session.title })}
         >
           <span className="flex size-3.5 items-center justify-center" aria-hidden="true">
@@ -388,6 +446,20 @@ const SessionActionDropdown = ({
         side="right"
         align="start"
         sideOffset={6}
+        onPointerDownOutside={() => {
+          // Clicking outside the menu must not bounce Chromium's `:focus-visible` back onto the
+          // row trigger, which would keep the action button visible and the film mark shifted.
+          suppressCloseFocusRef.current = true
+        }}
+        onEscapeKeyDown={() => {
+          suppressCloseFocusRef.current = false
+        }}
+        onCloseAutoFocus={(event) => {
+          if (suppressCloseFocusRef.current) {
+            suppressCloseFocusRef.current = false
+            event.preventDefault()
+          }
+        }}
       >
         <ActionMenuItems
           entries={entries}
@@ -466,6 +538,7 @@ type SessionRowProps = {
   imported: boolean
   shortcutNumber?: number
   presentedStatus: SessionStatus
+  filmInProgress: boolean
   archiveAvailable: boolean
   mobileMode: boolean
   isMac: boolean
@@ -518,6 +591,7 @@ const SessionRow = memo(function SessionRow({
   imported,
   shortcutNumber,
   presentedStatus,
+  filmInProgress,
   archiveAvailable,
   mobileMode,
   isMac,
@@ -552,6 +626,7 @@ const SessionRow = memo(function SessionRow({
       : undefined,
     onViewNotebook: (target) => actions.onViewNotebook(target),
     onViewReplay: actions.onViewReplay,
+    onOpenResearchFilm: actions.onOpenResearchFilm,
     onDiscussSession: imported ? actions.onDiscussSession : undefined,
     onExportSession: canExportSession ? (target) => actions.onExportSession?.(target) : undefined,
     onForkSession: canForkSession
@@ -573,6 +648,8 @@ const SessionRow = memo(function SessionRow({
   })
   const sessionActionIdentityKey = JSON.stringify([
     session.id,
+    session.isPending,
+    session.firstPromptDraft,
     imported,
     session.updatedAt,
     session.pinned ?? false,
@@ -591,9 +668,15 @@ const SessionRow = memo(function SessionRow({
     packageBusy,
     archiveAvailable
   ])
+  const showShortcut = showSessionShortcuts && shortcutNumber !== undefined
+  const filmActivityLabel = filmInProgress ? t('Research film in progress') : undefined
+  // Only a row whose end is free shares the actions slot: mobile keeps the actions visible, and an
+  // imported row keeps its read-only lock there.
+  const filmMarkSharesSlot = Boolean(filmActivityLabel) && !mobileMode && !imported
   const openSessionButton = (
     <button
       type="button"
+      id={sessionButtonId(session.id, mobileMode)}
       data-slot="session-open-button"
       title={imported ? t('Read-only') : undefined}
       className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left after:absolute after:inset-0 after:rounded-[inherit]"
@@ -636,10 +719,32 @@ const SessionRow = memo(function SessionRow({
           />
         )}
       </span>
-      {showSessionShortcuts && shortcutNumber ? (
+      {filmActivityLabel && (
+        <span
+          role="img"
+          aria-label={filmActivityLabel}
+          title={filmActivityLabel}
+          className={cn(
+            'relative z-[2] inline-flex size-5 shrink-0 items-center justify-center rounded-md bg-session-running/10 text-session-running',
+            // Keep the flow slot reserved while the actions share it; drop `mr-7` when the
+            // shortcut pill takes its own flex slot at the row end so wider hints (`Ctrl+1`) never
+            // overlap the mark.
+            !(filmMarkSharesSlot && showShortcut) && 'mr-7',
+            filmMarkSharesSlot && !showShortcut && filmSlotSwapClassName
+          )}
+        >
+          <Video className="size-3.5" aria-hidden="true" />
+        </span>
+      )}
+      {showShortcut ? (
         <kbd
           aria-hidden="true"
-          className="relative z-[2] mr-5 shrink-0 rounded-full bg-bg-300 px-1.5 py-0.5 font-sans text-[11px] font-medium leading-none tabular-nums text-text-100"
+          className={cn(
+            'pointer-events-none z-[3] rounded-full bg-bg-300 px-1.5 py-0.5 font-sans text-[11px] font-medium leading-none tabular-nums text-text-100',
+            filmMarkSharesSlot
+              ? 'relative -mr-1 shrink-0'
+              : 'absolute right-1.5 top-1/2 -translate-y-1/2'
+          )}
         >
           {isMac ? `⌘${shortcutNumber}` : `Ctrl+${shortcutNumber}`}
         </kbd>
@@ -650,8 +755,8 @@ const SessionRow = memo(function SessionRow({
           aria-label={t('Read-only')}
           className={cn(
             'relative z-[2] inline-flex size-4 shrink-0 items-center justify-center text-text-200 transition-opacity motion-reduce:transition-none',
-            mobileMode ? 'mr-5' : 'group-hover:opacity-0 group-focus-within:opacity-0',
-            !mobileMode && previewSuppressed && 'opacity-0'
+            mobileMode ? 'mr-5' : 'group-hover:opacity-0 group-has-[:focus-visible]:opacity-0',
+            ((!mobileMode && previewSuppressed) || showShortcut) && 'opacity-0'
           )}
         >
           <Lock className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
@@ -701,6 +806,8 @@ const SessionRow = memo(function SessionRow({
           <SessionActionDropdown
             session={session}
             mobileMode={mobileMode}
+            showShortcut={showShortcut}
+            filmMarkSharesSlot={filmMarkSharesSlot}
             onOpenChange={(open) => actions.onSessionActionsOpenChange?.(session.id, open)}
           />
         </div>
@@ -770,6 +877,7 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
     onOpenProject,
     sessions,
     credentialPendingSessionIds = EMPTY_CREDENTIAL_SESSION_IDS,
+    activeFilmSessionIds = EMPTY_ACTIVE_FILM_SESSION_IDS,
     pendingInteractionFactsBySession = EMPTY_PENDING_INTERACTION_FACTS,
     activeSessionId,
     canCreateConversation,
@@ -783,6 +891,8 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
     onOpenLiterature,
     isMarketplaceOpen = false,
     onOpenMarketplace,
+    isScheduleOpen = false,
+    onOpenSchedule,
     isComputeOpen = false,
     onOpenCompute,
     onPreviewSession,
@@ -823,7 +933,8 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
     sessions,
     now,
     credentialPendingSessionIds,
-    pendingInteractionFactsBySession
+    pendingInteractionFactsBySession,
+    activeFilmSessionIds
   )
   const activeSectionLabel = sections.find((section) =>
     section.items.some((session) => session.id === activeSessionId)
@@ -835,6 +946,40 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
       .map((session, index) => [session.id, index + 1])
   )
   const isMac = window.api?.platform === 'darwin'
+  const scheduleProjectId = isScheduleOpen ? importProjectId : undefined
+  const sidebarControls = (
+    <>
+      {!mobileMode && sidebarToggle && sidebarToggle.state !== 'collapsed' ? (
+        <button
+          ref={sidebarToggleButtonRef}
+          type="button"
+          data-testid="workspace-sidebar-toggle"
+          className={cn(
+            'grid size-7 shrink-0 cursor-pointer place-items-center rounded-lg text-action-panel-toggle hover:bg-bg-300',
+            sidebarInteractiveTransitionClassName
+          )}
+          aria-label={t('Collapse sidebar panel')}
+          aria-expanded={true}
+          aria-controls="left-panel"
+          aria-keyshortcuts={isMac ? 'Meta+B' : 'Control+B'}
+          title={t('Collapse sidebar panel')}
+          onClick={sidebarToggle.onToggle}
+        >
+          <PanelLeft className="size-4" strokeWidth={2} fill="none" aria-hidden="true" />
+        </button>
+      ) : null}
+      {mobileMode ? (
+        <button
+          type="button"
+          onClick={onMobileClose}
+          className="grid size-8 shrink-0 place-items-center rounded-lg text-text-300 hover:bg-bg-300 hover:text-text-000"
+          aria-label={t('Close navigation')}
+        >
+          <X className="size-4" aria-hidden="true" />
+        </button>
+      ) : null}
+    </>
+  )
   const projectMatches = providedProjectMatches ?? matchProjects(otherProjects, projectQuery)
   const visibleProjectMatches = showAllProjects
     ? projectMatches
@@ -855,7 +1000,23 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
       )}
     >
       <div className="m-[0.7px] flex min-h-0 flex-1 flex-col rounded-lg bg-rail-card-bg shadow-card">
-        <div className="px-3 pt-3">
+        {scheduleProjectId && (
+          <OverlayLayerProvider value={mobileMode ? 70 : 40}>
+            <SchedulePage
+              key={scheduleProjectId}
+              projectId={scheduleProjectId}
+              sessionId={props.scheduleSessionId}
+              onBack={onOpenSchedule}
+              onScheduleDetail={props.onScheduleDetail}
+              scheduleDetailId={props.scheduleDetailId}
+              headerActions={sidebarControls}
+              onNavigate={mobileMode ? onMobileClose : undefined}
+            />
+          </OverlayLayerProvider>
+        )}
+        <div
+          className={scheduleProjectId ? 'shrink-0 border-t border-border px-3 py-2' : 'px-3 pt-3'}
+        >
           <div className="flex items-center">
             <button
               type="button"
@@ -867,7 +1028,11 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
                 sidebarInteractiveTransitionClassName
               )}
             >
-              <ChevronLeft className="size-4" strokeWidth={2} aria-hidden="true" />
+              {scheduleProjectId ? (
+                <FolderOpen className="size-4" aria-hidden="true" />
+              ) : (
+                <ChevronLeft className="size-4" strokeWidth={2} aria-hidden="true" />
+              )}
             </button>
             <DropdownMenu onOpenChange={onProjectMenuOpenChange}>
               <DropdownMenuTrigger asChild>
@@ -875,7 +1040,10 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
                   type="button"
                   title={projectName}
                   className={cn(
-                    'flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-lg py-1 pl-1 pr-2 text-left font-serif text-[15px] font-bold tracking-[-0.02em] text-text-000 hover:bg-bg-300 data-[state=open]:bg-bg-300',
+                    'flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-lg py-1 pl-1 pr-2 text-left hover:bg-bg-300 data-[state=open]:bg-bg-300',
+                    scheduleProjectId
+                      ? 'text-sm font-medium text-muted-foreground'
+                      : 'font-serif text-[15px] font-bold tracking-[-0.02em] text-text-000',
                     sidebarInteractiveTransitionClassName
                   )}
                 >
@@ -891,7 +1059,7 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
               <DropdownMenuContent
                 aria-label={t('Project actions')}
                 className={cn(
-                  'max-h-[var(--radix-dropdown-menu-content-available-height)] w-72 max-w-[calc(100vw-1rem)] overflow-y-auto',
+                  'flex max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] w-56 flex-col overflow-hidden',
                   mobileMode && 'z-[80]'
                 )}
                 side="bottom"
@@ -899,11 +1067,15 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
                 sideOffset={6}
                 collisionPadding={8}
                 onFocus={(event) => {
-                  if (event.target !== event.currentTarget) return
+                  if (
+                    event.target !== event.currentTarget ||
+                    (event.relatedTarget instanceof Node &&
+                      event.currentTarget.contains(event.relatedTarget))
+                  )
+                    return
                   const search =
                     event.currentTarget.querySelector<HTMLInputElement>('[data-project-search]')
-                  if (!search) return
-                  search.focus()
+                  search?.focus({ preventScroll: true })
                 }}
               >
                 <DropdownMenuItem
@@ -1035,91 +1207,98 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
                     ) : null}
                   </div>
                 ) : null}
-                {projectQuery.trim() && projectMatches.length === 0 ? (
-                  <p role="status" className="px-2 py-3 text-center text-sm text-muted-foreground">
-                    {t('No matching projects')}
-                  </p>
-                ) : null}
-                {visibleProjectMatches.map(
-                  ({ project, description, titlePositions, descriptionPositions }, index) => (
-                    <DropdownMenuItem
-                      key={project.id}
-                      data-project-id={project.id}
-                      className="items-start py-2"
-                      disabled={!onOpenProject}
-                      onSelect={() => onOpenProject?.(project.id)}
-                      onKeyDown={(event) => {
-                        if (index !== 0 || event.key !== 'ArrowUp') return
-                        const search = event.currentTarget
-                          .closest<HTMLElement>('[role="menu"]')
-                          ?.querySelector<HTMLInputElement>('[data-project-search]')
-                        if (!search) return
-                        event.preventDefault()
-                        event.stopPropagation()
-                        search.focus()
-                      }}
+                <div data-project-list className="min-h-0 overflow-y-auto overscroll-contain">
+                  {projectQuery.trim() && projectMatches.length === 0 ? (
+                    <p
+                      role="status"
+                      className="px-2 py-3 text-center text-sm text-muted-foreground"
                     >
-                      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span
-                          data-project-title
-                          className="truncate font-medium"
-                          title={project.name}
-                        >
-                          <HighlightedText
-                            text={project.name}
-                            positions={titlePositions}
-                            highlightClassName="bg-transparent text-primary"
-                          />
-                        </span>
-                        {description ? (
+                      {t('No matching projects')}
+                    </p>
+                  ) : null}
+                  {visibleProjectMatches.map(
+                    ({ project, description, titlePositions, descriptionPositions }, index) => (
+                      <DropdownMenuItem
+                        key={project.id}
+                        data-project-id={project.id}
+                        className="items-start py-2"
+                        disabled={!onOpenProject}
+                        onSelect={() => onOpenProject?.(project.id)}
+                        onKeyDown={(event) => {
+                          if (index !== 0 || event.key !== 'ArrowUp') return
+                          const search = event.currentTarget
+                            .closest<HTMLElement>('[role="menu"]')
+                            ?.querySelector<HTMLInputElement>('[data-project-search]')
+                          if (!search) return
+                          event.preventDefault()
+                          event.stopPropagation()
+                          search.focus()
+                        }}
+                      >
+                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                           <span
-                            data-project-description
-                            className="line-clamp-2 break-words text-xs leading-4 text-muted-foreground"
+                            data-project-title
+                            className="truncate font-medium"
+                            title={project.name}
                           >
                             <HighlightedText
-                              text={description}
-                              positions={descriptionPositions}
+                              text={project.name}
+                              positions={titlePositions}
                               highlightClassName="bg-transparent text-primary"
                             />
                           </span>
-                        ) : null}
-                      </span>
-                    </DropdownMenuItem>
-                  )
-                )}
-                {!showAllProjects && remainingProjectCount > 0 ? (
-                  <DropdownMenuItem
-                    asChild
-                    onSelect={(event) => {
-                      event.preventDefault()
-                      const menu = (event.currentTarget as HTMLElement).closest<HTMLElement>(
-                        '[role="menu"]'
-                      )
-                      onShowAllProjectsChange?.(true)
-                      // The selected control unmounts after expansion; restore focus after that commit.
-                      window.setTimeout(() => {
-                        menu?.querySelector<HTMLElement>('[data-project-id]')?.focus()
-                      }, 0)
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className="min-h-0! w-fit! gap-1 rounded-sm! bg-transparent! px-2 py-1 text-[11px]! text-muted-foreground! hover:bg-transparent! focus:bg-transparent! focus-visible:ring-[3px] focus-visible:ring-ring/50 data-[highlighted]:bg-transparent! data-[highlighted]:text-foreground!"
+                          {description ? (
+                            <span
+                              data-project-description
+                              className="line-clamp-2 break-words text-xs leading-4 text-muted-foreground"
+                            >
+                              <HighlightedText
+                                text={description}
+                                positions={descriptionPositions}
+                                highlightClassName="bg-transparent text-primary"
+                              />
+                            </span>
+                          ) : null}
+                        </span>
+                      </DropdownMenuItem>
+                    )
+                  )}
+                  {!showAllProjects && remainingProjectCount > 0 ? (
+                    <DropdownMenuItem
+                      asChild
+                      onSelect={(event) => {
+                        event.preventDefault()
+                        const menu = (event.currentTarget as HTMLElement).closest<HTMLElement>(
+                          '[role="menu"]'
+                        )
+                        onShowAllProjectsChange?.(true)
+                        // Continue at the first newly revealed project when the expand control unmounts.
+                        window.setTimeout(() => {
+                          menu
+                            ?.querySelectorAll<HTMLElement>('[data-project-id]')
+                            [visibleProjectMatches.length]?.focus()
+                        }, 0)
+                      }}
                     >
-                      <ChevronDown
-                        className="size-3.5 shrink-0"
-                        strokeWidth={2}
-                        aria-hidden="true"
-                      />
-                      <span>
-                        {t('Show remaining {{count}} projects', {
-                          count: remainingProjectCount,
-                          defaultValue_one: 'Show remaining {{count}} project'
-                        })}
-                      </span>
-                    </button>
-                  </DropdownMenuItem>
-                ) : null}
+                      <button
+                        type="button"
+                        className="min-h-0! w-fit! gap-1 rounded-sm! bg-transparent! px-2 py-1 text-[11px]! text-muted-foreground! hover:bg-transparent! focus:bg-transparent! focus-visible:ring-[3px] focus-visible:ring-ring/50 data-[highlighted]:bg-transparent! data-[highlighted]:text-foreground!"
+                      >
+                        <ChevronDown
+                          className="size-3.5 shrink-0"
+                          strokeWidth={2}
+                          aria-hidden="true"
+                        />
+                        <span>
+                          {t('Show remaining {{count}} projects', {
+                            count: remainingProjectCount,
+                            defaultValue_one: 'Show remaining {{count}} project'
+                          })}
+                        </span>
+                      </button>
+                    </DropdownMenuItem>
+                  ) : null}
+                </div>
                 {otherProjects.length > 0 ? <DropdownMenuSeparator /> : null}
                 <DropdownMenuItem
                   data-project-new
@@ -1143,39 +1322,14 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            {!mobileMode && sidebarToggle && sidebarToggle.state !== 'collapsed' ? (
-              <button
-                ref={sidebarToggleButtonRef}
-                type="button"
-                data-testid="workspace-sidebar-toggle"
-                className={cn(
-                  'grid size-7 shrink-0 cursor-pointer place-items-center rounded-lg text-action-panel-toggle hover:bg-bg-300',
-                  sidebarInteractiveTransitionClassName
-                )}
-                aria-label={t('Collapse sidebar panel')}
-                aria-expanded={true}
-                aria-controls="left-panel"
-                aria-keyshortcuts={isMac ? 'Meta+B' : 'Control+B'}
-                title={t('Collapse sidebar panel')}
-                onClick={sidebarToggle.onToggle}
-              >
-                <PanelLeft className="size-4" strokeWidth={2} fill="none" aria-hidden="true" />
-              </button>
-            ) : null}
-            {mobileMode ? (
-              <button
-                type="button"
-                onClick={onMobileClose}
-                className="grid size-8 shrink-0 place-items-center rounded-lg text-text-300 hover:bg-bg-300 hover:text-text-000"
-                aria-label={t('Close navigation')}
-              >
-                <X className="size-4" aria-hidden="true" />
-              </button>
-            ) : null}
+            {!scheduleProjectId && sidebarControls}
           </div>
         </div>
 
-        <nav aria-label={t('Sessions')} className="flex min-h-0 flex-1 flex-col">
+        <nav
+          aria-label={t('Sessions')}
+          className={scheduleProjectId ? 'hidden' : 'flex min-h-0 flex-1 flex-col'}
+        >
           {/* New stays disabled until persistence hydration has reconciled restored sessions. */}
           <div className="flex h-9 items-center gap-1 px-1.5">
             <button
@@ -1256,6 +1410,27 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
                 <Cpu className="size-3.5" strokeWidth={2} />
               </span>
               <span>{t('Compute')}</span>
+            </button>
+          </div>
+          <div className="flex h-9 items-center gap-1 px-1.5">
+            <button
+              type="button"
+              className={cn(
+                'flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left text-sm text-text-000 hover:bg-bg-300 disabled:cursor-not-allowed disabled:opacity-50',
+                isScheduleOpen && 'bg-bg-300',
+                sidebarInteractiveTransitionClassName
+              )}
+              aria-expanded={isScheduleOpen}
+              disabled={!onOpenSchedule}
+              onClick={onOpenSchedule}
+            >
+              <span
+                className="flex size-3.5 shrink-0 items-center justify-center"
+                aria-hidden="true"
+              >
+                <Clock className="size-3.5" strokeWidth={2} />
+              </span>
+              <span>{t('Schedule')}</span>
             </button>
           </div>
           <div className="flex h-9 items-center gap-1 px-1.5">
@@ -1356,6 +1531,7 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
                           imported={isImportedSession(session)}
                           shortcutNumber={shortcutNumberBySessionId.get(session.id)}
                           presentedStatus={presentedStatus}
+                          filmInProgress={activeFilmSessionIds.has(session.id)}
                           archiveAvailable={canArchiveSession?.(session) ?? false}
                           mobileMode={mobileMode}
                           isMac={isMac}
@@ -1419,6 +1595,9 @@ const WorkspaceSidebarView = (props: WorkspaceSidebarViewProps): React.JSX.Eleme
 
 const WorkspaceSidebarConnectedView = (props: WorkspaceSidebarViewProps): React.JSX.Element => {
   const { t } = useTranslation()
+  const [film, setFilm] = useState<ResearchVideoPresentationRequest>()
+  const filmInvocation = useRef(0)
+  const filmReturnFocus = useRef<HTMLElement | null>(null)
   const mounted = useRef(true)
   const pendingOpen = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const cancelPendingOpen = useCallback(() => {
@@ -1474,6 +1653,32 @@ const WorkspaceSidebarConnectedView = (props: WorkspaceSidebarViewProps): React.
   })
   const rowActions = useMemo<SessionRowCallbacks>(
     () => ({
+      onOpenResearchFilm: isDesktopRenderer()
+        ? async (session) => {
+            const revision = ++filmInvocation.current
+            const sidebar = latestProps.current
+            filmReturnFocus.current = sidebar.mobileMode
+              ? (sidebar.onMobileClose?.() ?? null)
+              : document.getElementById(sessionButtonId(session.id, false))
+            const request = { projectId: session.projectId, sessionId: session.id }
+            const source =
+              session.contentLoaded === false ? await window.api.sessions.loadOne(request) : session
+            if (
+              !mounted.current ||
+              revision !== filmInvocation.current ||
+              !latestProps.current.sessions.some(
+                (row) => row.id === session.id && row.projectId === session.projectId
+              )
+            )
+              return
+            const graph = source?.conversationGraph
+            setFilm({
+              ...request,
+              branchId: graph?.frames.find((frame) => frame.id === graph.rootFrameId)
+                ?.activeBranchId
+            })
+          }
+        : undefined,
       onSessionContextMenu: cancelPendingOpen,
       onOpenSession: (sessionId, clickDetail = 0) => {
         cancelPendingOpen()
@@ -1522,7 +1727,22 @@ const WorkspaceSidebarConnectedView = (props: WorkspaceSidebarViewProps): React.
     }),
     [cancelPendingOpen]
   )
-  return <WorkspaceSidebarView {...props} rowActions={rowActions} />
+  return (
+    <>
+      <WorkspaceSidebarView {...props} rowActions={rowActions} />
+      {film && (
+        <ResearchVideoDialog
+          key={JSON.stringify(film)}
+          {...film}
+          onDismiss={() => {
+            setFilm(undefined)
+            filmReturnFocus.current?.focus()
+            filmReturnFocus.current = null
+          }}
+        />
+      )}
+    </>
+  )
 }
 
 const WorkspaceSidebar = (props: WorkspaceSidebarProps): React.JSX.Element => {
@@ -1530,6 +1750,7 @@ const WorkspaceSidebar = (props: WorkspaceSidebarProps): React.JSX.Element => {
   const packageBusy = usePackageOperationStore((state) => packageOperationActive(state.operation))
   const {
     credentialPendingSessionIds = EMPTY_CREDENTIAL_SESSION_IDS,
+    activeFilmSessionIds = EMPTY_ACTIVE_FILM_SESSION_IDS,
     onOpenSession,
     sessions
   } = props
@@ -1550,7 +1771,6 @@ const WorkspaceSidebar = (props: WorkspaceSidebarProps): React.JSX.Element => {
   )
   const nextSectionRefreshAt = getNextSessionSectionRefreshAt(sessions, now)
   const isMac = window.api?.platform === 'darwin'
-
   // Reclassify recent completions after their 15-minute grace period without waiting for unrelated
   // Session activity to trigger a render.
   useEffect(() => {
@@ -1592,7 +1812,8 @@ const WorkspaceSidebar = (props: WorkspaceSidebarProps): React.JSX.Element => {
         sessions,
         now,
         credentialPendingSessionIds,
-        pendingInteractionFactsBySession
+        pendingInteractionFactsBySession,
+        activeFilmSessionIds
       )
         .flatMap((section) => section.items)
         .at(shortcutNumber - 1)
@@ -1617,6 +1838,7 @@ const WorkspaceSidebar = (props: WorkspaceSidebarProps): React.JSX.Element => {
       window.removeEventListener('blur', hideSessionShortcuts)
     }
   }, [
+    activeFilmSessionIds,
     credentialPendingSessionIds,
     isMac,
     now,

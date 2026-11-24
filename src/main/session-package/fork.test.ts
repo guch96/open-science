@@ -465,7 +465,6 @@ it.each(['local', 'imported'] as const)(
       sessionPackageService: service,
       translate: englishNativeTranslator,
       archiveCoordinator: archive,
-      sessionPersistenceCoordinator: persistence,
       applicationEvents: {
         publish: (channel, payload) => {
           if (channel === 'session:created')
@@ -836,6 +835,56 @@ it('reforks Notebook files without copying the previous publication ownership ma
   await expect(
     service.importFrom(archive, undefined, undefined, undefined, { projectId: source.projectId })
   ).resolves.toBeDefined()
+})
+
+it('preserves large immutable Notebook output through fork, refork and archive import', async () => {
+  const { fixture, service } = await setup()
+  const source = { projectId: 'project-1', sessionId: 'session-1' }
+  const lane = createFrameNotebookLane(source.projectId, source.sessionId, 'root-frame')
+  const document = await fixture.notebookRepository.loadOrCreate({
+    ...source,
+    lane,
+    workspaceCwd: fixture.storageRoot
+  })
+  const stdout = 'Research result\n'.repeat(10000)
+  await fixture.notebookRepository.appendRun({
+    ...source,
+    lane,
+    run: {
+      runId: 'large-run',
+      cellId: 'large-cell',
+      source: 'agent',
+      kernelKind: 'python',
+      script: 'print("Research result")',
+      status: 'completed',
+      startedAt: 1,
+      endedAt: 2,
+      text: { stdout, stderr: '', traceback: '', plain: [] },
+      outputs: [],
+      artifacts: [],
+      workingFiles: []
+    }
+  })
+  expect(
+    JSON.parse(await readFile(join(document.notebookSessionRoot, 'run.json'), 'utf8')).version
+  ).toBe(2)
+  const first = await service.fork(source)
+  const second = await service.fork(first)
+  const archive = join(fixture.storageRoot, 'large-output.science')
+  await service.exportTo(second, archive)
+  const imported = await service.importFrom(archive, undefined, undefined, undefined, {
+    projectId: source.projectId
+  })
+  for (const target of [first, second, imported]) {
+    const root = join(fixture.storageRoot, 'notebooks', target.projectId, target.sessionId)
+    const paths = await fileSystem.readdir(root, { recursive: true })
+    expect(paths.some((path) => path.includes('.run-records'))).toBe(false)
+    const runPath = paths.find((path) => path.endsWith('run.json'))!
+    const stored = JSON.parse(await readFile(join(root, runPath), 'utf8'))
+    expect(stored.version).toBe(1)
+    expect(stored.runs[0].text.stdout).toBe(stdout)
+    expect(stored.runs[0].runId).not.toBe('large-run')
+  }
 })
 
 it('numbers sibling forks and nests the direct source title', async () => {
@@ -1380,3 +1429,66 @@ it.each(['session', 'project', 'origin'] as const)(
     }
   }
 )
+
+it('forks pending Run history without publishing the source manifest', async () => {
+  const { fixture, service } = await setup()
+  const projectId = 'project-1',
+    sessionId = 'session-1'
+  const lane = createFrameNotebookLane(projectId, sessionId, 'root-frame')
+  const request = { projectId, sessionId, lane }
+  const doc = await fixture.notebookRepository.loadOrCreate({
+    ...request,
+    workspaceCwd: fixture.storageRoot
+  })
+  const manifest = join(doc.notebookSessionRoot, 'run.json')
+  const run = {
+    runId: 'pending',
+    cellId: 'cell',
+    source: 'agent' as const,
+    kernelKind: 'bash' as const,
+    script: 'echo result',
+    status: 'queued' as const,
+    startedAt: 1,
+    text: { stdout: '', stderr: '', traceback: '', plain: [] },
+    outputs: [],
+    workingFiles: [],
+    submissionIdentity: 'submission',
+    submissionFingerprint: 'a'.repeat(64)
+  }
+  const cold = JSON.parse(await readFile(manifest, 'utf8'))
+  cold.runs = Array.from({ length: 32 }, (_, i) => ({
+    ...run,
+    runId: 'old-' + i,
+    submissionIdentity: 'old-' + i,
+    status: 'completed',
+    script: 'x'.repeat(34 * 1024)
+  }))
+  const bytes = JSON.stringify(cold)
+  await writeFile(manifest, bytes)
+  await fixture.notebookRepository.appendOrGetRun({ ...request, run })
+  await expect(service.fork({ projectId, sessionId })).rejects.toThrow(/Wait for Notebook runs/)
+  await fixture.notebookRepository.transitionRun({
+    ...request,
+    expectedStatus: 'queued',
+    run: { ...run, status: 'running' }
+  })
+  await fixture.notebookRepository.commitTerminalRun({
+    ...request,
+    expectedStatus: 'running',
+    run: {
+      ...run,
+      status: 'completed',
+      endedAt: 2,
+      text: { ...run.text, stdout: 'pending result'.repeat(10000) }
+    }
+  })
+  const copy = await service.fork({ projectId, sessionId })
+  const docs = await fixture.notebookRepository.readSessionDocuments(copy.projectId, copy.sessionId)
+  expect(docs.flatMap((d) => d.runs)).toHaveLength(33)
+  expect(docs.flatMap((d) => d.runs).at(-1)?.text.stdout).toBe('pending result'.repeat(10000))
+  expect(await readFile(manifest, 'utf8')).toBe(bytes)
+  for (const d of docs)
+    await expect(stat(join(d.notebookSessionRoot, '.pending-runs'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+})

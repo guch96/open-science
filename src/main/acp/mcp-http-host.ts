@@ -1,52 +1,42 @@
+import { createWebMcpServer, type WebMcpHandler } from '../web/mcp-server'
 import {
   HarnessToolReceipts,
   HARNESS_RECEIPTS,
   HARNESS_INVOCATION,
   HARNESS_RECEIPT_METHOD,
-  receiptQuerySchema
+  receiptQuerySchema,
+  type ReceiptQuery
 } from '../harness-acp/tool-receipts'
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { McpServer } from '@agentclientprotocol/sdk'
 import {
-  createSkillRuntimeMcpServer,
+  type SkillRuntimeEnvironment,
   environmentFromProcess,
-  isOwnedSkillRuntimeAcpServer,
-  type SkillRuntimeEnvironment
-} from '../skills/runtime-mcp-server'
+  isOwnedSkillRuntimeAcpServer
+} from '../skills/runtime-mcp-config'
 
 import type { McpServer as ModelContextProtocolServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { CancelledNotificationSchema, isJSONRPCRequest } from '@modelcontextprotocol/sdk/types.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 
-import { createArtifactMcpServer, type ArtifactMcpEnvironment } from '../artifacts/mcp-server'
-import { ArtifactRepository } from '../artifacts/repository'
-import { createNotebookMcpServer, type NotebookMcpEnvironment } from '../notebook/mcp-server'
-import {
-  createLiteratureLibraryMcpServer,
-  type LiteratureLibraryMcpHandler
-} from '../literature/library-mcp-server'
-import { createLiteratureMcpServer, type LiteratureMcpHandler } from '../literature/mcp-server'
-import {
-  callGitHubSkillImportRpc,
-  callSkillImportRpc,
-  createSkillImportMcpServer,
-  type SkillImportMcpEnvironment
-} from '../skills/mcp-server'
-import {
-  createPlanMcpServerForEnvironment,
-  type PlanMcpEnvironment
-} from '../session-plan/plan-mcp-server'
-import {
-  createHostMessageMcpServer,
-  type HostMessageMcpHandler
-} from '../side-chat/host-message-mcp-server'
+import type { ArtifactMcpEnvironment } from '../artifacts/mcp-server'
+import type { NotebookMcpEnvironment } from '../notebook/mcp-server'
+import type { LiteratureLibraryMcpHandler } from '../literature/library-mcp-server'
+import type { LiteratureMcpHandler } from '../literature/mcp-server'
+import type { PptxMcpHandler } from '../pptx-edit/mcp-server'
+import type { SkillImportMcpEnvironment } from '../skills/mcp-server'
+import type { PlanMcpEnvironment } from '../session-plan/plan-mcp-server'
+import type { HostMessageMcpHandler } from '../side-chat/host-message-mcp-server'
+import type { ImageMcpEnvironment } from '../image-model/mcp-server'
 import { createLogger } from '@aipoch/diagnostics/node'
 import {
   LOCAL_RESOURCE_BUDGETS,
   ResourceBudgetExceededError,
   readBoundedJsonBody
 } from '../resource-budget'
+
+type StreamableHTTPServerTransport =
+  import('@modelcontextprotocol/sdk/server/streamableHttp.js').StreamableHTTPServerTransport
 
 const log = createLogger('mcp-http-host')
 
@@ -58,13 +48,17 @@ type HostConnection = {
 // The MCP server kinds this host serves; each maps to a factory + a per-session environment.
 const SERVER_KINDS = [
   'artifact',
+  'image',
   'notebook',
   'skill-import',
   'skills',
   'plan',
   'host-message',
+  'schedule',
   'library',
-  'literature'
+  'literature',
+  'pptx',
+  'web'
 ] as const
 type ServerKind = (typeof SERVER_KINDS)[number]
 
@@ -76,24 +70,33 @@ type SessionEntry = {
   receiptScopes?: Partial<Record<ServerKind, string>>
   skills?: SkillRuntimeEnvironment
   artifact?: ArtifactMcpEnvironment
+  image?: ImageMcpEnvironment
   notebook?: NotebookMcpEnvironment
+  notebookRouteToken?: string
   skillImport?: SkillImportMcpEnvironment
   plan?: PlanMcpEnvironment
   planRouteToken?: string
+  schedule?: { token: string; server: () => ModelContextProtocolServer }
   hostMessage?: HostMessageMcpHandler
   library?: { handler: LiteratureLibraryMcpHandler; token: symbol }
+  web?: { handler: WebMcpHandler; token: string }
   literature?: { handler: LiteratureMcpHandler; token: symbol }
+  pptx?: { handler: PptxMcpHandler; token: symbol }
 }
 
 const RECEIPT_AUTHORITY_KEYS = {
   artifact: 'artifact',
+  image: 'image',
   notebook: 'notebook',
   'skill-import': 'skillImport',
   skills: 'skills',
   plan: 'planRouteToken',
   'host-message': 'hostMessage',
+  schedule: 'schedule',
   library: 'library',
-  literature: 'literature'
+  literature: 'literature',
+  pptx: 'pptx',
+  web: 'web'
 } as const
 const receiptAuthority = (entry: SessionEntry | undefined, kind: ServerKind): unknown =>
   entry?.[RECEIPT_AUTHORITY_KEYS[kind]]
@@ -210,10 +213,27 @@ class AgentMcpHttpHost {
     this.sessions.set(routingId, entry)
   }
 
-  registerNotebook(routingId: string, environment: NotebookMcpEnvironment): void {
+  registerImage(routingId: string, environment: ImageMcpEnvironment): void {
+    this.cancelToolRoute('image', routingId)
     const entry = this.sessions.get(routingId) ?? {}
-    entry.notebook = environment
+    entry.image = environment
     this.sessions.set(routingId, entry)
+  }
+
+  registerNotebook(routingId: string, environment: NotebookMcpEnvironment): () => void {
+    const entry = this.sessions.get(routingId) ?? {}
+    const previousEnvironment = entry.notebook
+    const previousRouteToken = entry.notebookRouteToken
+    const routeToken = randomUUID()
+    entry.notebook = environment
+    entry.notebookRouteToken = routeToken
+    this.sessions.set(routingId, entry)
+    return () => {
+      const current = this.sessions.get(routingId)
+      if (current?.notebookRouteToken !== routeToken) return
+      current.notebook = previousEnvironment
+      current.notebookRouteToken = previousRouteToken
+    }
   }
 
   registerSkillImport(routingId: string, environment: SkillImportMcpEnvironment): void {
@@ -281,8 +301,77 @@ class AgentMcpHttpHost {
     this.sessions.set(routingId, entry)
   }
 
+  registerWeb(routingId: string, handler: WebMcpHandler): () => void {
+    this.cancelToolRoute('web', routingId)
+    const entry = this.sessions.get(routingId) ?? {}
+    const token = randomUUID()
+    entry.web = { handler, token }
+    this.sessions.set(routingId, entry)
+    return () => {
+      const current = this.sessions.get(routingId)
+      if (current?.web?.token !== token) return
+      delete current.web
+      this.cancelToolRoute('web', routingId)
+    }
+  }
+
+  rebindWeb(routingId: string, handler: WebMcpHandler): void {
+    const entry = this.sessions.get(routingId)
+    if (!entry?.web) throw new Error('No Web route to bind')
+    entry.web = { ...entry.web, handler }
+  }
+
+  captureWebRoute(routingId: string): (() => void) | undefined {
+    const entry = this.sessions.get(routingId)
+    const web = entry?.web
+    if (!web) return undefined
+    const scope = entry.receiptScopes?.web
+    return () => {
+      this.cancelToolRoute('web', routingId)
+      const restored = this.sessions.get(routingId) ?? {}
+      restored.web = web
+      if (scope) restored.receiptScopes = { ...restored.receiptScopes, web: scope }
+      this.sessions.set(routingId, restored)
+    }
+  }
+
+  webRouteRevision(routingId: string): string | undefined {
+    return this.sessions.get(routingId)?.web?.token
+  }
+
+  private async recoverToolReceipt(
+    scope: string,
+    ownedQuery: ReceiptQuery,
+    assertCurrent: () => void,
+    handler?: WebMcpHandler
+  ): Promise<{ status: 'unknown' | 'completed'; result?: CallToolResult }> {
+    assertCurrent()
+    let receipt = await this.receipts!.read(scope, ownedQuery)
+    assertCurrent()
+    if (receipt.status === 'unknown' && handler?.reconcileResult) {
+      const known = await handler?.reconcileResult(ownedQuery)
+      assertCurrent()
+      if (known) {
+        const { CallToolResultSchema } = await import('@modelcontextprotocol/sdk/types.js')
+        assertCurrent()
+        try {
+          await this.receipts!.complete(scope, ownedQuery, CallToolResultSchema.parse(known))
+        } catch (error) {
+          if ((await this.receipts!.read(scope, ownedQuery)).status !== 'completed') throw error
+        }
+        receipt = await this.receipts!.read(scope, ownedQuery)
+        assertCurrent()
+      }
+    }
+    if (receipt.status === 'completed' && receipt.result) {
+      receipt.result = (await handler?.receiptCommitted?.(receipt.result)) ?? receipt.result
+      assertCurrent()
+    }
+    return receipt
+  }
+
   registerLiterature(routingId: string, handler: LiteratureMcpHandler): () => void {
-    this.cancelLiteratureRoute('literature', routingId)
+    this.cancelToolRoute('literature', routingId)
     const entry = this.sessions.get(routingId) ?? {}
     const token = Symbol('literature')
     entry.literature = { handler, token }
@@ -291,12 +380,50 @@ class AgentMcpHttpHost {
       const current = this.sessions.get(routingId)
       if (current?.literature?.token !== token) return
       delete current.literature
-      this.cancelLiteratureRoute('literature', routingId)
+      this.cancelToolRoute('literature', routingId)
+    }
+  }
+
+  registerSchedule(
+    routingId: string,
+    create: (ownsRoute: () => boolean) => ModelContextProtocolServer
+  ): string {
+    const entry = this.sessions.get(routingId) ?? {}
+    const token = randomUUID()
+    entry.schedule = {
+      token,
+      server: () => create(() => this.sessions.get(routingId)?.schedule?.token === token)
+    }
+    this.sessions.set(routingId, entry)
+    return this.urlFor('schedule', routingId) + '?token=' + encodeURIComponent(token)
+  }
+
+  captureScheduleRoute(routingId: string): (() => void) | undefined {
+    const entry = this.sessions.get(routingId)
+    const schedule = entry?.schedule
+    if (!schedule) return
+    const scope = entry.receiptScopes?.schedule
+    return () => {
+      const restored = this.sessions.get(routingId) ?? {}
+      restored.schedule = schedule
+      if (scope) restored.receiptScopes = { ...restored.receiptScopes, schedule: scope }
+      this.sessions.set(routingId, restored)
+    }
+  }
+
+  registerPptx(routingId: string, handler: PptxMcpHandler): () => void {
+    const entry = this.sessions.get(routingId) ?? {}
+    const token = Symbol('pptx')
+    entry.pptx = { handler, token }
+    this.sessions.set(routingId, entry)
+    return () => {
+      const current = this.sessions.get(routingId)
+      if (current?.pptx?.token === token) delete current.pptx
     }
   }
 
   registerLiteratureLibrary(routingId: string, handler: LiteratureLibraryMcpHandler): () => void {
-    this.cancelLiteratureRoute('library', routingId)
+    this.cancelToolRoute('library', routingId)
     const entry = this.sessions.get(routingId) ?? {}
     const token = Symbol('library')
     entry.library = { handler, token }
@@ -305,11 +432,14 @@ class AgentMcpHttpHost {
       const current = this.sessions.get(routingId)
       if (current?.library?.token !== token) return
       delete current.library
-      this.cancelLiteratureRoute('library', routingId)
+      this.cancelToolRoute('library', routingId)
     }
   }
 
-  private cancelLiteratureRoute(kind: 'literature' | 'library', routingId: string): void {
+  private cancelToolRoute(
+    kind: 'literature' | 'library' | 'image' | 'web',
+    routingId: string
+  ): void {
     for (const [response, pending] of this.readingToolRequests) {
       if (pending.routingId !== routingId || pending.kind !== kind) continue
       this.readingToolRequests.delete(response)
@@ -353,10 +483,16 @@ class AgentMcpHttpHost {
     }
 
     const route = `${this.endpoint}/mcp/${kind}/${encodeURIComponent(routingId)}`
-    if (kind !== 'plan') return route
+    if (kind === 'web') {
+      const token = this.sessions.get(routingId)?.web?.token
+      if (!token) throw new Error('No registered Web route')
+      return `${route}?token=${encodeURIComponent(token)}`
+    }
+    if (kind !== 'plan' && kind !== 'notebook') return route
 
-    const routeToken = this.sessions.get(routingId)?.planRouteToken
-    if (!routeToken) throw new Error(`No registered plan MCP session: ${routingId}`)
+    const entry = this.sessions.get(routingId)
+    const routeToken = kind === 'plan' ? entry?.planRouteToken : entry?.notebookRouteToken
+    if (!routeToken) throw new Error(`No registered ${kind} MCP session: ${routingId}`)
     // `token` is covered by the shared diagnostic URL redactor if this provider config is logged.
     return `${route}?token=${encodeURIComponent(routeToken)}`
   }
@@ -371,11 +507,18 @@ class AgentMcpHttpHost {
     const entry = this.sessions.get(routingId)
 
     if (!entry) return undefined
-    if (kind === 'skills')
-      return entry.skills ? createSkillRuntimeMcpServer(entry.skills) : undefined
+    if (kind === 'skills') {
+      if (!entry.skills) return undefined
+      const { createSkillRuntimeMcpServer } = await import('../skills/runtime-mcp-server')
+      return createSkillRuntimeMcpServer(entry.skills)
+    }
 
     if (kind === 'artifact') {
       if (!entry.artifact) return undefined
+      const [{ createArtifactMcpServer }, { ArtifactRepository }] = await Promise.all([
+        import('../artifacts/mcp-server'),
+        import('../artifacts/repository')
+      ])
 
       return createArtifactMcpServer(
         new ArtifactRepository(entry.artifact.storageRoot),
@@ -383,31 +526,62 @@ class AgentMcpHttpHost {
       )
     }
 
+    if (kind === 'image') {
+      if (!entry.image) return undefined
+      const { createImageMcpServer } = await import('../image-model/mcp-server')
+      return createImageMcpServer(entry.image, `http:${routingId}`)
+    }
+
     if (kind === 'notebook') {
-      if (!entry.notebook) return undefined
+      if (!entry.notebook || !routeToken || routeToken !== entry.notebookRouteToken)
+        return undefined
+      const { createNotebookMcpServer } = await import('../notebook/mcp-server')
 
       return createNotebookMcpServer(entry.notebook)
     }
 
     if (kind === 'plan') {
       if (!entry.plan || !routeToken || routeToken !== entry.planRouteToken) return undefined
+      const { createPlanMcpServerForEnvironment } = await import('../session-plan/plan-mcp-server')
       return createPlanMcpServerForEnvironment(entry.plan)
     }
 
     if (kind === 'host-message') {
-      return entry.hostMessage ? createHostMessageMcpServer(entry.hostMessage) : undefined
+      if (!entry.hostMessage) return undefined
+      const { createHostMessageMcpServer } = await import('../side-chat/host-message-mcp-server')
+      return createHostMessageMcpServer(entry.hostMessage)
     }
 
+    if (kind === 'web')
+      return entry.web && routeToken === entry.web.token
+        ? createWebMcpServer(entry.web.handler)
+        : undefined
     if (kind === 'literature') {
-      return entry.literature ? createLiteratureMcpServer(entry.literature.handler) : undefined
+      if (!entry.literature) return undefined
+      const { createLiteratureMcpServer } = await import('../literature/mcp-server')
+      return createLiteratureMcpServer(entry.literature.handler)
+    }
+
+    if (kind === 'schedule')
+      return entry.schedule && entry.schedule.token === routeToken
+        ? entry.schedule.server()
+        : undefined
+    if (kind === 'pptx') {
+      if (!entry.pptx) return undefined
+      const { createPptxMcpServer } = await import('../pptx-edit/mcp-server')
+      return createPptxMcpServer(entry.pptx.handler)
     }
 
     if (kind === 'library') {
-      return entry.library ? createLiteratureLibraryMcpServer(entry.library.handler) : undefined
+      if (!entry.library) return undefined
+      const { createLiteratureLibraryMcpServer } = await import('../literature/library-mcp-server')
+      return createLiteratureLibraryMcpServer(entry.library.handler)
     }
 
     const skillImportEnvironment = entry.skillImport
     if (!skillImportEnvironment) return undefined
+    const { callGitHubSkillImportRpc, callSkillImportRpc, createSkillImportMcpServer } =
+      await import('../skills/mcp-server')
 
     return createSkillImportMcpServer({
       requestImport: (attachmentUri, turnToken) =>
@@ -453,14 +627,20 @@ class AgentMcpHttpHost {
       return
     }
 
+    const [{ StreamableHTTPServerTransport }, { CancelledNotificationSchema, isJSONRPCRequest }] =
+      await Promise.all([
+        import('@modelcontextprotocol/sdk/server/streamableHttp.js'),
+        import('@modelcontextprotocol/sdk/types.js')
+      ])
+
     if (this.receipts) {
       server.server.registerCapabilities({ experimental: { [HARNESS_RECEIPTS]: {} } })
     }
-    // Long-running Notebook/Plan calls need SSE to deliver progress while execution/review waits.
+    // Long-running Notebook/Plan/Image calls need SSE to deliver progress while work is pending.
     // Transport sessions remain stateless and are torn down when the response closes.
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
-      enableJsonResponse: kind !== 'notebook' && kind !== 'plan'
+      enableJsonResponse: kind !== 'notebook' && kind !== 'plan' && kind !== 'image'
     })
     response.on('close', () => {
       void transport.close()
@@ -468,24 +648,37 @@ class AgentMcpHttpHost {
     })
 
     const reading = { routingId, kind, cancelledIds: new Set<string>(), cancellationBytes: 0 }
-    if ((kind === 'library' || kind === 'literature') && request.method === 'POST') {
+    if (
+      (kind === 'library' || kind === 'literature' || kind === 'image' || kind === 'web') &&
+      request.method === 'POST'
+    ) {
       this.readingToolRequests.set(response, reading)
       response.once('close', () => this.readingToolRequests.delete(response))
     }
+    let webReceiptCurrent: (() => boolean) | undefined
+    let cancelUndispatchedWebCall: ((respond: boolean) => Promise<void>) | undefined
     try {
       await server.connect(transport)
-      if (kind === 'library' || kind === 'literature') {
+      if (kind === 'library' || kind === 'literature' || kind === 'image' || kind === 'web') {
         const receive = transport.onmessage!
         transport.onmessage = (message, extra) => {
           this.readingToolRequests.delete(response)
           if (isJSONRPCRequest(message) && message.method === 'tools/call') {
-            if (reading.cancelledIds.has(JSON.stringify(message.id))) {
-              response.end()
+            if (
+              reading.cancelledIds.has(JSON.stringify(message.id)) ||
+              (webReceiptCurrent && !webReceiptCurrent())
+            ) {
+              if (cancelUndispatchedWebCall) {
+                void cancelUndispatchedWebCall(true).catch((error) => {
+                  log.error('MCP Web cancellation receipt failed', { error })
+                  response.destroy()
+                })
+              } else response.end()
               return
             }
             const key = JSON.stringify([kind, routingId, message.id])
             if (this.toolRequests.has(key)) {
-              writeJson(response, 409, { error: 'Duplicate active Literature request id.' })
+              writeJson(response, 409, { error: 'Duplicate active MCP tool request id.' })
               return
             }
             const active = { routingId, kind, receive, response }
@@ -539,8 +732,15 @@ class AgentMcpHttpHost {
           registered?.receiptScopes?.[kind] === scope
         if (body.method === HARNESS_RECEIPT_METHOD) {
           if (!scope) throw new Error('Tool receipt scope is unavailable')
-          const result = await this.receipts.read(scope, receiptQuerySchema.parse(body.params))
-          if (!current()) throw new Error('Tool receipt scope was revoked')
+          const query = receiptQuerySchema.parse(body.params)
+          const result = await this.recoverToolReceipt(
+            scope,
+            query,
+            () => {
+              if (!current()) throw new Error('Tool receipt scope was revoked')
+            },
+            kind === 'web' ? registered?.web?.handler : undefined
+          )
           writeJson(response, 200, { jsonrpc: '2.0', id: body.id, result })
           return
         }
@@ -553,11 +753,60 @@ class AgentMcpHttpHost {
             name: body.params?.name,
             arguments: body.params?.arguments ?? {}
           })
+          const webHandler = kind === 'web' ? registered?.web?.handler : undefined
+          if (kind === 'web') {
+            if (!current()) throw new Error('Tool receipt scope was revoked')
+            webReceiptCurrent = current
+          }
           await this.receipts.begin(scope, query)
-          if (!current()) throw new Error('Tool receipt scope was revoked')
           const send = transport.send.bind(transport)
+          if (webHandler?.cancelUndispatched) {
+            const cancel = webHandler.cancelUndispatched
+            cancelUndispatchedWebCall = async (respond) => {
+              // The route was current when this exact receipt was claimed. Even if the route
+              // has since gone away, its old owner can settle only a never-dispatched outcome.
+              const result = await cancel(query)
+              await this.receipts!.complete(scope, query, result)
+              if (!respond || response.destroyed) return
+              if (!current()) response.destroy()
+              else await send({ jsonrpc: '2.0', id: body.id, result })
+            }
+          }
+          if (kind === 'web' && (!current() || response.destroyed)) {
+            await cancelUndispatchedWebCall?.(false)
+            if (response.destroyed) return
+          }
+          if (!current()) throw new Error('Tool receipt scope was revoked')
           transport.send = async (message, options) => {
             if ('id' in message && message.id === body.id && 'result' in message) {
+              if (kind === 'web') {
+                const assertCurrent = (): void => {
+                  if (!current() || response.destroyed) throw new Error('Web invocation revoked')
+                }
+                assertCurrent()
+                const handler = webHandler
+                const signal = handler?.receiptSignal?.(query.invocationId)
+                try {
+                  await this.receipts!.complete(scope, query, message.result, signal)
+                } catch (error) {
+                  assertCurrent()
+                  // Cancellation may have won before the write, or a recovery reader may have
+                  // already committed its receipt. Only a journalled cancellation settles this call.
+                  if (!(await handler?.reconcileResult?.(query))) throw error
+                  const receipt = await this.recoverToolReceipt(
+                    scope,
+                    query,
+                    assertCurrent,
+                    handler
+                  )
+                  if (!receipt.result) throw error
+                  return send({ ...message, result: receipt.result }, options)
+                }
+                assertCurrent()
+                const result = (await handler?.receiptCommitted?.(message.result)) ?? message.result
+                assertCurrent()
+                return send({ ...message, result }, options)
+              }
               await this.receipts!.complete(scope, query, message.result)
             }
             await send(message, options)

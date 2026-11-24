@@ -1,14 +1,21 @@
 import { PdfExportProvider } from './pdf-annotations/PdfExportProvider'
 import { useVersionHistoryPages } from './use-version-history-pages'
 import { VersionHistoryLoadButton } from './VersionHistoryLoadButton'
+import { PptxDraftFrame } from './previews/PptxDraftFrame'
+import { PptxEditSurface } from './previews/PptxEditSurface'
+import { usePptxDraft } from './previews/use-pptx-draft'
+import { usePptxDraftPreview } from './previews/use-pptx-draft-preview'
+import { usePptxEditSession } from './previews/use-pptx-edit-session'
+import { PptxVersionCompare } from './previews/PptxVersionCompare'
+import { PptxVersionHistory } from './previews/PptxVersionHistory'
 import { unwrapProvenanceRead } from '../../../../shared/provenance-read-result'
 import {
-  AtSign,
   BookOpen,
   Check,
   ChevronLeft,
   ChevronRight,
   Eye,
+  ExternalLink,
   FileDiff,
   GitBranch,
   Link2,
@@ -33,7 +40,6 @@ import {
 import { useTranslation } from 'react-i18next'
 
 import { ActionMenuItems, ActionMenuProvider, ActionMenuTarget } from '@/components/action-menu'
-import { ActionToast } from '@/components/ActionToast'
 import { ErrorNotice } from '@/components/error-notice'
 import { Button } from '@/components/ui/button'
 import { ConfirmActionDialog } from '@/components/ui/confirm-action-dialog'
@@ -69,7 +75,7 @@ import {
   type SaveAsArtifactState
 } from './LocalFileHeaderActions'
 import { ManagedFileDownloadButton } from './ManagedFileDownloadButton'
-import { useProjectFileMentionAction } from './use-project-file-mention-action'
+import { ProjectFileMentionButton } from './ProjectFileMentionButton'
 import type { ProjectFileMentionTarget } from './project-file-mention'
 import {
   useManagedFileDownload,
@@ -88,8 +94,13 @@ import {
   resolveArtifactVersionDescriptor
 } from './preview-file-item'
 import { PreviewFileContent } from './previews/PreviewFileContent'
+import { getFileExtension } from './preview-support'
 import type { PreviewDownloadVersionContext } from './previews/preview-runtime-context'
-import type { ActivePdfTranslation, PreviewInteractionPort } from './previews/preview-types'
+import type {
+  ActivePdfTranslation,
+  PreviewImageEditAction,
+  PreviewInteractionPort
+} from './previews/preview-types'
 import { ArtifactProvenancePanel } from './ArtifactProvenancePanel'
 import { ManagedVersionDiffError } from './ManagedVersionDiffError'
 import { PreviewProvenanceSplit } from './PreviewProvenanceSplit'
@@ -205,56 +216,6 @@ const PreviewProvenanceButton = ({
   )
 }
 
-const ProjectFileMentionButton = ({
-  target,
-  tooltipClassName,
-  onMentioned
-}: {
-  target: ProjectFileMentionTarget
-  tooltipClassName?: string
-  onMentioned?: () => void
-}): React.JSX.Element => {
-  const { t } = useTranslation()
-  const mention = useProjectFileMentionAction(target)
-  const label = t('Mention {{name}}', { name: target.name })
-  return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className={previewHeaderActionClassName}
-            aria-label={label}
-            disabled={!mention.available || mention.pending}
-            aria-busy={mention.pending}
-            onClick={() => {
-              void mention.mention().then((mentioned) => {
-                if (mentioned) onMentioned?.()
-              })
-            }}
-          >
-            {mention.pending ? (
-              <Loader2 className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-            ) : (
-              <AtSign aria-hidden="true" />
-            )}
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent className={tooltipClassName}>{label}</TooltipContent>
-      </Tooltip>
-      {mention.error ? (
-        <ActionToast
-          title={t('Could not resolve file version.')}
-          dismissLabel={t('Dismiss')}
-          onDismiss={mention.dismissError}
-        />
-      ) : null}
-    </TooltipProvider>
-  )
-}
-
 const PreviewViewInContextButton = ({
   item,
   onViewInContext,
@@ -312,7 +273,9 @@ const PreviewFileHeader = ({
   downloadVersionContext,
   pdfContextAction,
   saveAsArtifactState,
-  managedDownload
+  managedDownload,
+  imageEditorVersionId,
+  imageEditAction
 }: Pick<
   PreviewFileSurfaceProps,
   | 'item'
@@ -332,6 +295,8 @@ const PreviewFileHeader = ({
   pdfContextAction?: PdfContextAction
   saveAsArtifactState: SaveAsArtifactState
   managedDownload: ManagedFileDownloadController
+  imageEditorVersionId?: string
+  imageEditAction?: PreviewImageEditAction
 }): React.JSX.Element => {
   const { t } = useTranslation()
   const previewActions = usePreviewActions()
@@ -343,6 +308,10 @@ const PreviewFileHeader = ({
   const viewInContextEntry = previewActions.entries.find(
     (entry) => entry.kind === 'action' && entry.action === 'view-in-context'
   )
+  const openInBrowserEntry = previewActions.entries.find(
+    (entry): entry is Extract<(typeof previewActions.entries)[number], { kind: 'action' }> =>
+      entry.kind === 'action' && entry.action === 'open-in-browser'
+  )
   const managedMenuEntries = [
     ...(provenanceActionEntry ? [provenanceActionEntry] : []),
     ...(provenanceActionEntry && viewInContextEntry ? [{ kind: 'separator' as const }] : []),
@@ -351,6 +320,7 @@ const PreviewFileHeader = ({
   // Managed artifact/upload previews can be mentioned in the chat straight from the open surface;
   // local and literature previews carry no managed identity and never offer the action. An omitted
   // source is the artifact default the preview projection uses for generated files.
+  const mentionVersionId = imageEditorVersionId ?? item.selectedVersionId
   const mentionTarget = useMemo<ProjectFileMentionTarget | undefined>(() => {
     const source = item.source ?? 'artifact'
     if (!item.projectId || !item.managedFileId || (source !== 'artifact' && source !== 'upload')) {
@@ -363,9 +333,18 @@ const PreviewFileHeader = ({
       projectId: item.projectId,
       name: item.name,
       path: item.path,
+      ...(mentionVersionId ? { versionId: mentionVersionId } : {}),
       ...(item.mimeType ? { mimeType: item.mimeType } : {})
     }
-  }, [item.managedFileId, item.mimeType, item.name, item.path, item.projectId, item.source])
+  }, [
+    item.managedFileId,
+    item.mimeType,
+    item.name,
+    item.path,
+    item.projectId,
+    item.source,
+    mentionVersionId
+  ])
 
   return (
     <header
@@ -510,6 +489,55 @@ const PreviewFileHeader = ({
                   tooltipClassName={tooltipClassName}
                 />
               ) : null}
+              {openInBrowserEntry ? (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        className={previewHeaderActionClassName}
+                        disabled={openInBrowserEntry.disabled}
+                        aria-label={t('Open in browser')}
+                        onFocus={(event) => {
+                          if (!event.currentTarget.matches(':focus-visible')) event.preventDefault()
+                        }}
+                        onClick={() => void previewActions.execute('open-in-browser')}
+                      >
+                        <ExternalLink aria-hidden="true" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent className={tooltipClassName}>
+                      {t('Open in browser')}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : null}
+              {imageEditAction ? (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        data-testid="preview-edit-image"
+                        className={`${previewHeaderActionClassName} motion-safe:animate-in motion-safe:fade-in-0 motion-safe:zoom-in-95 motion-safe:duration-200 motion-reduce:animate-none`}
+                        disabled={imageEditAction.disabled}
+                        aria-label={t('Edit image')}
+                        onFocus={(event) => {
+                          if (!event.currentTarget.matches(':focus-visible')) event.preventDefault()
+                        }}
+                        onClick={imageEditAction.execute}
+                      >
+                        <Pencil aria-hidden="true" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent className={tooltipClassName}>{t('Edit image')}</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : null}
               <ManagedFileDownloadButton
                 source={item.source ?? 'artifact'}
                 path={item.path}
@@ -524,6 +552,7 @@ const PreviewFileHeader = ({
                   : {})}
                 suggestedName={item.name}
                 download={managedDownload}
+                downloadSelectedVersion={Boolean(imageEditorVersionId)}
                 tone="strong"
                 className="bg-transparent shadow-none"
               />
@@ -758,6 +787,7 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
       leaveGuardScope,
       workbenchConnected = false,
       retryResolutionEnabled = true,
+      imageEditPresentation,
       onItemChange,
       activeAnnotations,
       onAddAnnotation,
@@ -873,13 +903,59 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
       reloadToken
     ])
     // Managed files accept annotations only after inspection confirms the logical DB head.
+    const pptxSession = usePptxEditSession({
+      identity: managedIdentity,
+      baseVersionId: managedInspect?.selectedVersionId,
+      headVersionId: managedInspect?.headVersionId
+    })
+    const [pptxEditing, setPptxEditing] = useState(false)
+    const canEditPptx =
+      previewItem.format === 'presentation' &&
+      managedIdentity !== undefined &&
+      managedInspect !== undefined &&
+      window.api.pptxEdit !== undefined
+    const pptxDraft = usePptxDraft(canEditPptx ? managedIdentity : undefined)
+    const [reviewedDraftId, setReviewedDraftId] = useState<string>()
+    const [pptxRebaseFailedFor, setPptxRebaseFailedFor] = useState<string>()
+    const [pptxCompareState, setPptxCompare] = useState<{
+      surfaceKey: string
+      base: ManagedFileVersionDescriptor
+      target: ManagedFileVersionDescriptor
+    }>()
+    const reviewingDraft = pptxDraft.draft !== null && pptxDraft.draft.draftId === reviewedDraftId
+    const pptxDraftPreview = usePptxDraftPreview(managedIdentity, pptxDraft.draft, reviewingDraft)
     const annotationVersionPending = managedIdentity !== undefined && managedInspect === undefined
     const annotationBlockedByHistoricalVersion =
       managedNavigationInspect !== undefined &&
       managedNavigationInspect.selectedVersionId !== managedNavigationInspect.headVersionId
     const surfaceKey = item.id
+    const pptxCompare =
+      canEditPptx && mode === 'view' && pptxCompareState?.surfaceKey === surfaceKey
+        ? pptxCompareState
+        : undefined
+    const [imageEditorSelection, setImageEditorSelection] = useState<{
+      key: string
+      item: PreviewFileItem
+    }>()
+    const reportImageEditorVersion = useCallback(
+      (version: PreviewFileItem | undefined) => {
+        setImageEditorSelection(version ? { key: previewContentKey, item: version } : undefined)
+      },
+      [previewContentKey]
+    )
+    const imageEditorItem =
+      imageEditorSelection?.key === previewContentKey ? imageEditorSelection.item : undefined
+    const [imageEditAction, setImageEditAction] = useState<PreviewImageEditAction>()
+    const reportImageEditAction = useCallback(
+      (action: PreviewImageEditAction | undefined): void => {
+        setImageEditAction(action)
+      },
+      []
+    )
     const canShowProvenance = Boolean(
-      previewItem.source !== 'upload' && previewItem.artifactId && projectId
+      (imageEditorItem ?? previewItem).source !== 'upload' &&
+      (imageEditorItem ?? previewItem).artifactId &&
+      projectId
     )
     const requestedProvenanceOpen =
       storedItem?.fileViewState?.provenanceOpen ??
@@ -977,14 +1053,17 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
     // Default managed previews follow the DB head without pinning the tab, while annotations still
     // need the exact immutable Version that is currently visible.
     const annotationVersionId = managedNavigationInspect?.selectedVersionId ?? selectedVersionId
-    const resolvedPreviewItem =
-      selectedVersion && projectId
-        ? createPreviewFileItemForArtifactVersion({
-            item: previewItem,
-            version: selectedVersion,
-            projectId
-          })
-        : previewItem
+    const resolvedPreviewItem = useMemo(
+      () =>
+        selectedVersion && projectId
+          ? createPreviewFileItemForArtifactVersion({
+              item: previewItem,
+              version: selectedVersion,
+              projectId
+            })
+          : previewItem,
+      [selectedVersion, projectId, previewItem]
+    )
     // Bind byte reads and shared renderer caches to the confirmed immutable selection without
     // pinning the workbench tab, which must keep following future head notifications.
     const contentVersion =
@@ -992,17 +1071,22 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
       managedNavigationInspect?.versions.find(
         (version) => version.id === managedNavigationInspect.selectedVersionId
       )
-    const contentItem =
-      managedNavigationInspect && contentVersion && !previewItem.selectedVersionId
-        ? createPreviewFileItemForManagedVersion({
-            item: resolvedPreviewItem,
-            version: contentVersion,
-            projectId: managedNavigationInspect.projectId,
-            sessionId: managedNavigationInspect.sessionId
-          })
-        : resolvedPreviewItem
+    const contentItem = useMemo(
+      () =>
+        managedNavigationInspect && contentVersion && !previewItem.selectedVersionId
+          ? createPreviewFileItemForManagedVersion({
+              item: resolvedPreviewItem,
+              version: contentVersion,
+              projectId: managedNavigationInspect.projectId,
+              sessionId: managedNavigationInspect.sessionId
+            })
+          : resolvedPreviewItem,
+      [managedNavigationInspect, contentVersion, previewItem.selectedVersionId, resolvedPreviewItem]
+    )
     // An editor owns a draft of its confirmed baseline, even when a newer head arrives.
-    const provenanceItem = mode === 'edit' && editBaseline ? editBaseline.item : contentItem
+    const actionItem = imageEditorItem ?? resolvedPreviewItem
+    const provenanceItem =
+      mode === 'edit' && editBaseline ? editBaseline.item : (imageEditorItem ?? contentItem)
     const { action: linkedPdfContextAction, readingContextBindingId } = usePdfContextAction(
       contentItem,
       onPdfContextError,
@@ -1019,21 +1103,21 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
       : allowReadingContext
         ? linkedPdfContextAction
         : undefined
-    const downloadVersionContext = managedWorkflow.downloadVersionContext
+    const downloadVersionContext = imageEditorItem
+      ? undefined
+      : managedWorkflow.downloadVersionContext
     const managedDownload = useManagedFileDownload({
-      source: resolvedPreviewItem.source ?? 'artifact',
-      path: resolvedPreviewItem.path,
-      ...(resolvedPreviewItem.projectId && resolvedPreviewItem.managedFileId
+      source: actionItem.source ?? 'artifact',
+      path: actionItem.path,
+      ...(actionItem.projectId && actionItem.managedFileId
         ? {
-            projectId: resolvedPreviewItem.projectId,
-            fileId: resolvedPreviewItem.managedFileId,
+            projectId: actionItem.projectId,
+            fileId: actionItem.managedFileId,
             ...(downloadVersionContext ??
-              (resolvedPreviewItem.selectedVersionId
-                ? { versionId: resolvedPreviewItem.selectedVersionId }
-                : {}))
+              (actionItem.selectedVersionId ? { versionId: actionItem.selectedVersionId } : {}))
           }
         : {}),
-      suggestedName: resolvedPreviewItem.name
+      suggestedName: actionItem.name
     })
     const pdfPageCountKey = JSON.stringify([
       contentItem.id,
@@ -1084,6 +1168,17 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
       [pdfPageCountKey, readingContextBindingId]
     )
     const stageLocalPath = window.api.uploads?.stageLocalPath
+    const normalizedMimeType = resolvedPreviewItem.mimeType?.split(';', 1)[0]?.trim().toLowerCase()
+    const isHtmlFile =
+      normalizedMimeType === 'text/html' ||
+      getFileExtension(resolvedPreviewItem.name) === 'html' ||
+      getFileExtension(resolvedPreviewItem.name) === 'htm'
+    const isLocalHtmlFile = resolvedPreviewItem.source === 'local' && isHtmlFile
+    const isManagedArtifactHtmlFile =
+      (resolvedPreviewItem.source ?? 'artifact') === 'artifact' && isHtmlFile
+    // Only register the shared header/menu action when the current surface provides it.
+    const canOpenManagedHtmlInBrowser =
+      isManagedArtifactHtmlFile && typeof window.api.artifacts?.openInBrowser === 'function'
 
     const copyPath = async (): Promise<void> => {
       setLocalActionFailure(undefined)
@@ -1127,6 +1222,47 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
       }
     }
 
+    const openHtmlInBrowser = async (): Promise<void> => {
+      setLocalActionFailure(undefined)
+      try {
+        if (resolvedPreviewItem.source === 'local') {
+          await window.api.localFs.openInBrowser(resolvedPreviewItem.path)
+        } else {
+          // Use the same immutable selection as the rendered bytes, including default head previews.
+          const artifactId = contentItem.artifactId ?? contentItem.managedFileId
+          if (!artifactId || !contentItem.projectId) {
+            throw new Error(t('Could not open this file.'))
+          }
+          await window.api.artifacts.openInBrowser({
+            projectId: contentItem.projectId,
+            artifactId,
+            ...(typeof contentItem.versionNumber === 'number'
+              ? { versionNumber: contentItem.versionNumber }
+              : {})
+          })
+        }
+      } catch (error) {
+        setLocalActionFailure({
+          title: t('Could not open this file.'),
+          detail: errorDetail(error),
+          retry: () => void openHtmlInBrowser()
+        })
+      }
+    }
+
+    const revealLocalHtmlInFolder = async (): Promise<void> => {
+      setLocalActionFailure(undefined)
+      try {
+        await window.api.localFs.reveal(resolvedPreviewItem.path)
+      } catch (error) {
+        setLocalActionFailure({
+          title: t('Could not open that folder.'),
+          detail: errorDetail(error),
+          retry: () => void revealLocalHtmlInFolder()
+        })
+      }
+    }
+
     const saveLocalFileAsArtifact = async (): Promise<void> => {
       if (!stageLocalPath || saveAsArtifactState === 'saving') return
 
@@ -1154,7 +1290,9 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
 
     // Copy feedback is transient and must not outlive a closed or replaced preview.
     useEffect(() => () => clearTimeout(copiedTimer.current), [])
-    const isDirty = mode === 'edit' && editBaseline !== undefined && draft !== editBaseline.text
+    const isDirty =
+      (mode === 'edit' && editBaseline !== undefined && draft !== editBaseline.text) ||
+      (pptxEditing && pptxSession.dirty)
     useEffect(() => {
       if (!isDirty) return
       const preventUnload = (event: BeforeUnloadEvent): void => {
@@ -1372,21 +1510,25 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
     const originSessionUnavailable =
       originSessionDeleted || currentOriginSessionState === 'deleting'
     const canViewInContext =
-      previewItem.source !== 'upload' &&
-      previewItem.artifactId !== undefined &&
+      actionItem.source !== 'upload' &&
+      actionItem.artifactId !== undefined &&
       projectId !== undefined &&
       !originSessionUnavailable
     const viewInContext = (): void => {
       if (!projectId) return
-      const sourceMessageId = lineage
-        ? resolveArtifactVersionDescriptor(lineage, annotationVersionId)?.messageId
-        : undefined
+      const sourceMessageId =
+        lineage && actionItem.artifactId === previewItem.artifactId
+          ? resolveArtifactVersionDescriptor(
+              lineage,
+              imageEditorItem?.selectedVersionId ?? annotationVersionId
+            )?.messageId
+          : undefined
       // Resolve the visible version's origin only after guarded navigation succeeds.
       const afterNavigate = sourceMessageId
         ? (): void => {
             useSearchMessageFocusStore.getState().request({
               projectId,
-              sessionId: previewItem.sessionId,
+              sessionId: actionItem.sessionId,
               messageId: sourceMessageId,
               navigationRevision: useNavigationStore.getState().userNavigationRevision
             })
@@ -1395,10 +1537,10 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
         : onViewInContextNavigate
       useNavigationStore
         .getState()
-        .openSession(projectId, previewItem.sessionId, 'user', afterNavigate)
+        .openSession(projectId, actionItem.sessionId, 'user', afterNavigate)
     }
     const openProvenance =
-      previewItem.source !== 'upload' && previewItem.artifactId && projectId
+      actionItem.source !== 'upload' && actionItem.artifactId && projectId
         ? (): void => updateFileView({ provenanceOpen: true })
         : undefined
     const closePreview = (): void => {
@@ -1411,6 +1553,7 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
     }
 
     const selectProvenanceVersion = (nextItem: PreviewFileItem): boolean => {
+      if (imageEditorItem) return true
       return applyVersionItem(nextItem, false, () => finishVersionSelection(false))
     }
 
@@ -1543,6 +1686,99 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
       managedWorkflow.refreshInspect()
     }
 
+    const beginPptxEdit = (): void => {
+      if (!canEditPptx) return
+      setConflictHead(undefined)
+      setPptxRebaseFailedFor(undefined)
+      setEditError(undefined)
+      void pptxSession.begin().then((started) => {
+        if (!started) return
+        setPptxEditing(true)
+        setMode('edit')
+      })
+    }
+    const discardPptxEdit = (): void => {
+      pptxSession.discard()
+      setPptxEditing(false)
+      setConflictHead(undefined)
+      setPptxRebaseFailedFor(undefined)
+      setEditError(undefined)
+      setMode('view')
+    }
+    const savePptxEdit = async (): Promise<void> => {
+      if (!pptxEditing || !projectId || !managedInspect) return
+      setEditError(undefined)
+      const outcome = await pptxSession.save()
+      if (outcome.kind === 'conflict') {
+        setConflictHead(outcome.result.actualHead)
+        setEditError(t('This file has a newer version.'))
+        return
+      }
+      if (outcome.kind === 'failed') {
+        setEditError(t('Changes could not be saved.'))
+        return
+      }
+      const sessionId = managedInspect.sessionId
+      pptxSession.discard()
+      setPptxEditing(false)
+      setMode('view')
+      if (outcome.result.kind === 'created') {
+        applyVersionItem(
+          {
+            ...createPreviewFileItemForManagedVersion({
+              item: previewItem,
+              version: outcome.result.version,
+              projectId,
+              sessionId
+            }),
+            selectedVersionId: undefined
+          },
+          true
+        )
+      }
+      managedWorkflow.refreshInspect()
+    }
+    // Replays unsaved slide edits onto a newer head; if they no longer apply, only discarding
+    // (through "View latest version") remains.
+    const rebasePptxEdit = async (head: ManagedFileVersionDescriptor): Promise<void> => {
+      setEditError(undefined)
+      if (await pptxSession.rebase(head.id)) {
+        setConflictHead(undefined)
+        return
+      }
+      setConflictHead(head)
+      setPptxRebaseFailedFor(head.id)
+      setEditError(t('Your edits could not be applied to the newer version.'))
+    }
+    const pptxNewerHead = !pptxEditing
+      ? undefined
+      : (conflictHead ?? (pptxSession.headMoved ? managedInspect?.headVersion : undefined))
+    const canRebasePptx =
+      pptxNewerHead !== undefined &&
+      pptxNewerHead.id !== pptxRebaseFailedFor &&
+      pptxSession.phase === 'ready'
+    const acceptPptxDraft = async (): Promise<void> => {
+      if (!projectId || !managedInspect) return
+      const result = await pptxDraft.accept()
+      if (!result) return
+      setReviewedDraftId(undefined)
+      if (result.kind === 'created') {
+        applyVersionItem(
+          {
+            ...createPreviewFileItemForManagedVersion({
+              item: previewItem,
+              version: result.version,
+              projectId,
+              sessionId: managedInspect.sessionId
+            }),
+            selectedVersionId: undefined
+          },
+          true
+        )
+      }
+      managedWorkflow.refreshInspect()
+    }
+
     const toggleDiff = (): void => {
       if (!managedIdentity) return
       if (mode === 'diff') {
@@ -1601,6 +1837,12 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
               execute: copyPath,
               ...(copied ? { labelKey: 'Copied', icon: Check } : {})
             },
+            ...(isLocalHtmlFile
+              ? {
+                  'open-in-browser': { execute: openHtmlInBrowser },
+                  'reveal-in-folder': { execute: revealLocalHtmlInFolder }
+                }
+              : {}),
             download: { execute: downloadLocalFile },
             'save-as-artifact': {
               execute: saveLocalFileAsArtifact,
@@ -1613,6 +1855,9 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
           }
         : {
             ...addPdfBinding,
+            ...(canOpenManagedHtmlInBrowser
+              ? { 'open-in-browser': { execute: openHtmlInBrowser } }
+              : {}),
             ...(visiblePdfContextAction
               ? {
                   'pdf-context': {
@@ -1648,11 +1893,11 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
             close: { execute: closePreview }
           }
     const previewActionIdentityKey = JSON.stringify([
-      resolvedPreviewItem.id,
-      resolvedPreviewItem.path,
-      resolvedPreviewItem.managedFileId ?? null,
-      resolvedPreviewItem.selectedVersionId ?? null,
-      resolvedPreviewItem.mtimeMs ?? null
+      actionItem.id,
+      actionItem.path,
+      actionItem.managedFileId ?? null,
+      actionItem.selectedVersionId ?? null,
+      actionItem.mtimeMs ?? null
     ])
     const previewActionRecipe =
       resolvedPreviewItem.source === 'local'
@@ -1699,19 +1944,23 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
               className="relative flex size-full min-h-0 flex-col overflow-hidden"
             >
               <PreviewFileHeader
-                item={resolvedPreviewItem}
+                item={actionItem}
                 onClose={closePreview}
                 onOpenFullScreen={onOpenFullScreen}
                 onReload={() => setReloadToken((token) => token + 1)}
                 pdfContextAction={visiblePdfContextAction}
                 saveAsArtifactState={saveAsArtifactState}
                 managedDownload={managedDownload}
+                imageEditorVersionId={imageEditorItem?.selectedVersionId}
+                imageEditAction={
+                  mode === 'view' && !provenanceFocused ? imageEditAction : undefined
+                }
                 provenanceEntry={provenanceEntry}
                 onOpenProvenance={openProvenance}
                 onViewInContext={canViewInContext ? viewInContext : undefined}
                 viewInContextDisabled={originSessionArchived}
                 tooltipClassName={tooltipClassName}
-                downloadVersionContext={managedWorkflow.downloadVersionContext}
+                downloadVersionContext={downloadVersionContext}
                 checkingVersion={!provenanceFocused && managedWorkflow.inspectLoading}
                 managedControlsOnly={mode === 'edit'}
                 managedControls={
@@ -1724,6 +1973,10 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                         className="text-text-000 hover:text-text-000"
                         onClick={() => {
                           requestLeave(() => {
+                            if (pptxEditing) {
+                              discardPptxEdit()
+                              return
+                            }
                             invalidateSave()
                             setMode('view')
                             setDraft('')
@@ -1738,11 +1991,20 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                         size="sm"
                         aria-label={t('Save changes')}
                         disabled={
-                          (!isDirty && !restoringHistory) || saving || !managedInspect?.canEdit
+                          pptxEditing
+                            ? (!pptxSession.dirty && !pptxSession.restoring) ||
+                              pptxSession.phase !== 'ready'
+                            : (!isDirty && !restoringHistory) || saving || !managedInspect?.canEdit
                         }
-                        onClick={() => void saveEdit()}
+                        onClick={() => void (pptxEditing ? savePptxEdit() : saveEdit())}
                       >
-                        {restoringHistory && !isDirty ? t('Restore as new version') : t('Save')}
+                        {pptxEditing
+                          ? pptxSession.restoring && !pptxSession.dirty
+                            ? t('Restore as new version')
+                            : t('Save')
+                          : restoringHistory && !isDirty
+                            ? t('Restore as new version')
+                            : t('Save')}
                       </Button>
                     </div>
                   ) : managedWorkflow.showTextTools && managedControlsInspect ? (
@@ -1803,6 +2065,27 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                         </Tooltip>
                       </TooltipProvider>
                     </>
+                  ) : canEditPptx && managedControlsInspect ? (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-xs"
+                            className={previewHeaderActionClassName}
+                            aria-label={t('Edit {{name}}', { name: resolvedPreviewItem.name })}
+                            disabled={pptxSession.phase === 'opening'}
+                            onClick={beginPptxEdit}
+                          >
+                            <Pencil aria-hidden="true" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent className={tooltipClassName}>
+                          {t('Edit presentation')}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   ) : undefined
                 }
               />
@@ -1844,6 +2127,29 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                   <ManagedVersionNavigation
                     inspect={managedNavigationInspect}
                     onSelect={selectManagedVersion}
+                  />
+                  <VersionHistoryLoadButton history={managedWorkflow.history} />
+                </>
+              ) : !provenanceFocused &&
+                mode === 'view' &&
+                canEditPptx &&
+                managedNavigationInspect ? (
+                <>
+                  <ManagedVersionNavigation
+                    inspect={managedNavigationInspect}
+                    onSelect={(versionId) => {
+                      setPptxCompare(undefined)
+                      selectManagedVersion(versionId)
+                    }}
+                  />
+                  <PptxVersionHistory
+                    inspect={managedNavigationInspect}
+                    comparing={pptxCompare !== undefined}
+                    onSelect={(versionId) => {
+                      setPptxCompare(undefined)
+                      selectManagedVersion(versionId)
+                    }}
+                    onCompare={(base, target) => setPptxCompare({ surfaceKey, base, target })}
                   />
                   <VersionHistoryLoadButton history={managedWorkflow.history} />
                 </>
@@ -1890,6 +2196,7 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                             : undefined
                         }
                         onVersionChange={selectProvenanceVersion}
+                        preserveVersionSelection={Boolean(imageEditorItem)}
                         tooltipClassName={tooltipClassName}
                         initialTab={
                           provenanceTarget?.surfaceKey === surfaceKey
@@ -1908,30 +2215,73 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                 >
                   {mode === 'edit' ? (
                     <div className="flex size-full min-h-0 flex-col">
-                      <textarea
-                        autoFocus
-                        aria-label={t('Edit {{name}} source', { name: resolvedPreviewItem.name })}
-                        className="min-h-0 flex-1 resize-none bg-bg-000 p-4 font-mono text-sm leading-6 text-text-000 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                        readOnly={saving}
-                        value={draft}
-                        onChange={(event) => setDraft(event.target.value)}
-                      />
+                      {pptxEditing ? (
+                        <div className="min-h-0 flex-1">
+                          <PptxEditSurface
+                            item={previewItem}
+                            source={previewItem.source ?? 'artifact'}
+                            session={pptxSession}
+                            saving={saving}
+                          />
+                        </div>
+                      ) : (
+                        <textarea
+                          autoFocus
+                          aria-label={t('Edit {{name}} source', {
+                            name: resolvedPreviewItem.name
+                          })}
+                          className="min-h-0 flex-1 resize-none bg-bg-000 p-4 font-mono text-sm leading-6 text-text-000 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                          readOnly={saving}
+                          value={draft}
+                          onChange={(event) => setDraft(event.target.value)}
+                        />
+                      )}
+                      {pptxNewerHead && canRebasePptx && !editError ? (
+                        <div
+                          role="status"
+                          className="flex flex-wrap items-center gap-2 border-t border-border-300 px-3 py-2 text-xs text-text-100"
+                        >
+                          <span className="min-w-0 flex-1">
+                            {t('A newer version was saved while you were editing.')}
+                          </span>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void rebasePptxEdit(pptxNewerHead)}
+                          >
+                            {t('Apply my edits to the newer version')}
+                          </Button>
+                        </div>
+                      ) : null}
                       {editError ? (
                         <div
                           role="alert"
                           className="flex flex-wrap items-center gap-2 border-t border-border-300 px-3 py-2 text-xs text-destructive"
                         >
                           <span className="min-w-0 flex-1">{editError}</span>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => void copyEditDraft()}
-                          >
-                            <span key={String(copied)} className="button-feedback">
-                              {copied ? t('Copied!') : t('Copy draft')}
-                            </span>
-                          </Button>
+                          {pptxEditing ? null : (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void copyEditDraft()}
+                            >
+                              <span key={String(copied)} className="button-feedback">
+                                {copied ? t('Copied!') : t('Copy draft')}
+                              </span>
+                            </Button>
+                          )}
+                          {pptxNewerHead && canRebasePptx ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void rebasePptxEdit(pptxNewerHead)}
+                            >
+                              {t('Apply my edits to the newer version')}
+                            </Button>
+                          ) : null}
                           {conflictHead ? (
                             <Button
                               type="button"
@@ -1945,9 +2295,10 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                                   projectId,
                                   sessionId: managedInspect.sessionId
                                 })
-                                applyVersionItem(nextItem, false, () =>
+                                applyVersionItem(nextItem, false, () => {
+                                  if (pptxEditing) discardPptxEdit()
                                   finishVersionSelection(false)
-                                )
+                                })
                               }}
                             >
                               {t('View latest version')}
@@ -1962,6 +2313,8 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                     managedWorkflow.isSelectedSourceText ? (
                       renderContent ? (
                         <PreviewFileContent
+                          imageEditPresentation={imageEditPresentation}
+                          onImageEditActionChange={reportImageEditAction}
                           key={previewContentKey}
                           item={contentItem}
                           downloadVersionContext={managedWorkflow.downloadVersionContext}
@@ -2004,32 +2357,56 @@ const PreviewFileSurfaceContent = forwardRef<PreviewFileSurfaceHandle, PreviewFi
                     ) : (
                       <div className="p-4 text-sm text-text-100">{t('Comparing versions...')}</div>
                     )
-                  ) : renderContent ? (
-                    <PreviewFileContent
-                      key={previewContentKey}
-                      item={contentItem}
-                      downloadVersionContext={managedWorkflow.downloadVersionContext}
-                      annotationVersionId={annotationVersionId}
-                      annotationBlockedByHistoricalVersion={annotationBlockedByHistoricalVersion}
-                      annotationVersionPending={annotationVersionPending}
-                      activeAnnotations={activeAnnotations}
-                      onAddAnnotation={onAddAnnotation}
-                      onUpdateAnnotationNote={onUpdateAnnotationNote}
-                      onRemoveAnnotation={onRemoveAnnotation}
-                      onUndoAnnotation={onUndoAnnotation}
-                      onRedoAnnotation={onRedoAnnotation}
-                      onAnnotationError={onAnnotationError}
-                      onRetry={retryManagedPreview}
-                      onPdfReadingPositionChange={reportPdfReadingPosition}
-                      pdfProseRegions={pdfProseRegions}
-                      pdfProseRegionIdentityKey={pdfProseRegionIdentityKey}
-                      onPdfProseRegionsChange={
-                        readingContextBindingId && !hidePdfReadingEntry
-                          ? reportPdfProseRegions
-                          : undefined
-                      }
-                      onPdfTranslationChange={reportPdfTranslation}
+                  ) : pptxCompare && managedIdentity && renderContent ? (
+                    <PptxVersionCompare
+                      item={previewItem}
+                      source={previewItem.source ?? 'artifact'}
+                      identity={managedIdentity}
+                      base={pptxCompare.base}
+                      target={pptxCompare.target}
+                      onClose={() => setPptxCompare(undefined)}
                     />
+                  ) : renderContent ? (
+                    <PptxDraftFrame
+                      item={previewItem}
+                      source={previewItem.source ?? 'artifact'}
+                      state={pptxDraft}
+                      preview={pptxDraftPreview}
+                      reviewing={reviewingDraft}
+                      onReview={() => setReviewedDraftId(pptxDraft.draft?.draftId)}
+                      onAccept={() => void acceptPptxDraft()}
+                      onReject={() => void pptxDraft.reject()}
+                    >
+                      <PreviewFileContent
+                        imageEditPresentation={imageEditPresentation}
+                        onImageEditActionChange={reportImageEditAction}
+                        key={previewContentKey}
+                        item={contentItem}
+                        onImageEditorVersionChange={reportImageEditorVersion}
+                        onPinImageSource={() => applyVersionItem(contentItem, true)}
+                        downloadVersionContext={managedWorkflow.downloadVersionContext}
+                        annotationVersionId={annotationVersionId}
+                        annotationBlockedByHistoricalVersion={annotationBlockedByHistoricalVersion}
+                        annotationVersionPending={annotationVersionPending}
+                        activeAnnotations={activeAnnotations}
+                        onAddAnnotation={onAddAnnotation}
+                        onUpdateAnnotationNote={onUpdateAnnotationNote}
+                        onRemoveAnnotation={onRemoveAnnotation}
+                        onUndoAnnotation={onUndoAnnotation}
+                        onRedoAnnotation={onRedoAnnotation}
+                        onAnnotationError={onAnnotationError}
+                        onRetry={retryManagedPreview}
+                        onPdfReadingPositionChange={reportPdfReadingPosition}
+                        pdfProseRegions={pdfProseRegions}
+                        pdfProseRegionIdentityKey={pdfProseRegionIdentityKey}
+                        onPdfProseRegionsChange={
+                          readingContextBindingId && !hidePdfReadingEntry
+                            ? reportPdfProseRegions
+                            : undefined
+                        }
+                        onPdfTranslationChange={reportPdfTranslation}
+                      />
+                    </PptxDraftFrame>
                   ) : null}
                 </div>
               </PreviewProvenanceSplit>

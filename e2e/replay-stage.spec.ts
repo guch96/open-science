@@ -11,8 +11,10 @@ import {
 import { createServer, type ViteDevServer } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import type { ReplayEvidenceReference } from '../src/shared/replay'
 
 type ReplayFixtureWindow = Window & {
+  discussionCapture: { stepId: string; evidence: ReplayEvidenceReference[] }
   replayFixture: {
     seek: (time: number) => void
     prepare: (mode: string, timeout: number) => void
@@ -108,6 +110,67 @@ const seek = async (page: Page, time: number): Promise<void> => {
 }
 const chart =
   '<svg xmlns="http://www.w3.org/2000/svg" width="560" height="300"><rect width="560" height="300" fill="white"/><path d="M30 260L280 40L530 200" fill="none" stroke="#167f85" stroke-width="12"/></svg>'
+
+// These presentation controls also run in the Web UI; no Electron fixture is needed.
+base(
+  'historical Ask icons appear on hover, keyboard focus and touch without moving records',
+  async ({ page }, info) => {
+    await page.goto(`${url}?panel=1`)
+    const panel = page.getByTestId('replay-panel')
+    await panel.getByRole('slider', { name: 'Replay progress' }).focus()
+    await page.keyboard.press('End')
+    const record = panel.locator('[data-replay-step="question"]')
+    const ask = record.getByRole('button', { name: 'Ask', exact: true })
+    await page.mouse.move(0, 0)
+    await expect(ask).toHaveCSS('opacity', '0')
+    await expect(ask).toHaveCSS('pointer-events', 'none')
+    await expect(ask).toHaveText('')
+    const before = await record.boundingBox()
+    await record.hover()
+    await expect(ask).toHaveCSS('opacity', '1')
+    expect(await record.boundingBox()).toEqual(before)
+    await ask.hover()
+    await expect(page.getByRole('tooltip', { name: 'Ask about this step' })).toBeVisible()
+    await ask.click()
+    expect(
+      await page.evaluate(() => (window as unknown as ReplayFixtureWindow).discussionCapture.stepId)
+    ).toBe('question')
+    await page.mouse.move(0, 0)
+    await expect(ask).toHaveCSS('opacity', '0')
+    await record.focus()
+    await page.keyboard.press('Tab')
+    await expect(record.locator('time')).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(ask).toBeFocused()
+    await expect(ask).toHaveCSS('opacity', '1')
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('textbox', { name: 'Discussion question' })).toBeFocused()
+
+    await panel.getByRole('button', { name: 'Notebook', exact: true }).click()
+    const notebook = panel.locator('[data-replay-run-item="run-1"]')
+    const askRun = notebook.getByRole('button', { name: 'Ask', exact: true })
+    await page.mouse.move(0, 0)
+    await expect(askRun).toHaveCSS('opacity', '0')
+    await notebook.hover()
+    await expect(askRun).toHaveCSS('opacity', '1')
+    await askRun.click()
+    expect(
+      await page.evaluate(
+        () => (window as unknown as ReplayFixtureWindow).discussionCapture.evidence
+      )
+    ).toEqual([expect.objectContaining({ kind: 'notebook-run', id: 'run-1' })])
+
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true })
+    await page.mouse.move(0, 0)
+    await expect(askRun).toHaveCSS('opacity', '1')
+    await expect(askRun).toHaveCSS('width', '44px')
+    await expect(askRun).toHaveCSS('height', '44px')
+    expect(await notebook.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+    await panel.screenshot({ path: info.outputPath('replay-touch-ask.png') })
+    await cdp.detach()
+  }
+)
 
 test('independent 1280×720 Stage paints the same frame by sequential advance and direct seek', async ({
   page,
@@ -376,6 +439,29 @@ test('large archived history and results keep rendered nodes and material pages 
     path: measurementsPath,
     contentType: 'application/json'
   })
+})
+
+test('keeps the first imported replay input readable when the host theme changes', async ({
+  page
+}) => {
+  await page.goto(`${url}?panel=1`)
+  const panel = page.getByTestId('replay-panel')
+  await panel.getByRole('button', { name: 'Next step', exact: true }).click()
+  const bubble = panel.locator('[data-slot="user-message-bubble"]')
+  await expect(bubble).toHaveText(
+    'Compare the recorded observations and show the analysis with its archived figure.'
+  )
+  await expect(bubble).toHaveCSS('color', 'rgb(31, 31, 31)')
+  const background = await bubble.evaluate((element) => getComputedStyle(element).backgroundColor)
+
+  for (const dark of [true, false]) {
+    await page.evaluate(
+      (enabled) => document.documentElement.classList.toggle('dark', enabled),
+      dark
+    )
+    await expect(bubble).toHaveCSS('background-color', background)
+    await expect(bubble).toHaveCSS('color', 'rgb(31, 31, 31)')
+  }
 })
 
 for (const locale of ['en', 'de']) {
@@ -1359,7 +1445,7 @@ test('Notebook and Files header toggles preserve the advancing replay clock', as
 
 test('interactive history reaches the first message and preserves conversation and Notebook anchors', async ({
   page
-}) => {
+}, info) => {
   await page.goto(`${url}?panel=1&history=1`)
   const panel = page.getByTestId('replay-panel')
   const slider = panel.getByRole('slider')
@@ -1370,6 +1456,35 @@ test('interactive history reaches the first message and preserves conversation a
   await conversation.hover()
   await page.mouse.wheel(0, -100000)
   await expect.poll(() => conversation.evaluate((element) => element.scrollTop)).toBe(0)
+  const loadEarlier = conversation.getByRole('button', { name: 'Load earlier messages' })
+  let lightControl: { color: string; background: string; border: string } | undefined
+  for (const dark of [false, true]) {
+    await page.evaluate(
+      (enabled) => document.documentElement.classList.toggle('dark', enabled),
+      dark
+    )
+    const control = await loadEarlier.evaluate(async (element) => {
+      await Promise.all(
+        document
+          .getAnimations()
+          .filter((animation) => {
+            const end = animation.effect?.getComputedTiming().endTime
+            return typeof end === 'number' && Number.isFinite(end) && end <= 2000
+          })
+          .map((animation) => animation.finished.catch(() => {}))
+      )
+      const style = getComputedStyle(element)
+      return { color: style.color, background: style.backgroundColor, border: style.borderColor }
+    })
+    expect(control.color).toBe('rgb(32, 35, 33)')
+    expect(control.background).toBe('rgb(236, 236, 234)')
+    if (lightControl) expect(control).toEqual(lightControl)
+    else lightControl = control
+    await panel.getByTestId('replay-stage').screenshot({
+      path: info.outputPath(`replay-history-controls-${dark ? 'dark' : 'light'}.png`)
+    })
+  }
+  await page.evaluate(() => document.documentElement.classList.remove('dark'))
   const historyButton = await conversation
     .getByRole('button', { name: 'Load earlier messages' })
     .boundingBox()
@@ -1608,10 +1723,24 @@ test('reveals recorded files immediately and keeps the gallery stable through de
 })
 
 test('restores Notebook and its code scrollbar after returning from a generated image', async ({
-  page
+  page,
+  stageApp
 }, info) => {
   await page.goto(`${url}?panel=1&artifacts=1&longName=1&previewRegressions=1`)
-  await page.setViewportSize({ width: 1500, height: 900 })
+  await stageApp.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].setContentSize(1500, 900)
+  })
+  await expect
+    .poll(() =>
+      stageApp.evaluate(({ BrowserWindow }) => {
+        const bounds = BrowserWindow.getAllWindows()[0].getContentBounds()
+        return { width: bounds.width, height: bounds.height }
+      })
+    )
+    .toEqual({ width: 1500, height: 900 })
+  await expect
+    .poll(() => page.evaluate(() => ({ width: innerWidth, height: innerHeight })))
+    .toEqual({ width: 1500, height: 900 })
   const panel = page.getByTestId('replay-panel')
   await panel.getByRole('button', { name: 'Enter full screen' }).click()
   const progress = panel.getByRole('slider')
@@ -1647,4 +1776,77 @@ test('restores Notebook and its code scrollbar after returning from a generated 
   await notebook.click()
   await codeViewport.hover()
   await panel.screenshot({ path: info.outputPath('replay-notebook-generated-preview.png') })
+})
+
+test('keeps highlighted replay code readable inside a dark host', async ({ page }) => {
+  await page.goto(`${url}?panel=1`)
+  const panel = page.getByTestId('replay-panel')
+  await panel.getByRole('slider', { name: 'Replay progress', exact: true }).focus()
+  await page.keyboard.press('End')
+  await panel.getByRole('button', { name: 'Notebook', exact: true }).click()
+  const tokens = panel.getByTestId('source-code-token')
+  await expect(tokens.first()).toBeVisible()
+  let lightColors: string[] | undefined
+  for (const dark of [false, true]) {
+    await page.evaluate(
+      (enabled) => document.documentElement.classList.toggle('dark', enabled),
+      dark
+    )
+    const measured = await tokens.evaluateAll(async (elements) => {
+      await document.fonts.ready
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      )
+      await Promise.all(
+        document
+          .getAnimations()
+          .filter((animation) => {
+            const end = animation.effect?.getComputedTiming().endTime
+            return typeof end === 'number' && Number.isFinite(end) && end <= 2000
+          })
+          .map((animation) => animation.finished.catch(() => {}))
+      )
+      const context = document.createElement('canvas').getContext('2d')!
+      const luminance = (): number => {
+        const pixels = context.getImageData(0, 0, 1, 1).data
+        return [0.2126, 0.7152, 0.0722].reduce((sum, weight, index) => {
+          const value = pixels[index]! / 255
+          return (
+            sum + weight * (value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+          )
+        }, 0)
+      }
+      return elements
+        .filter((element) => element.textContent?.trim())
+        .map((element) => {
+          const color = getComputedStyle(element).color
+          const ancestors: Element[] = []
+          for (let node: Element | null = element; node; node = node.parentElement)
+            ancestors.unshift(node)
+          context.clearRect(0, 0, 1, 1)
+          context.fillStyle = 'white'
+          context.fillRect(0, 0, 1, 1)
+          for (const ancestor of ancestors) {
+            context.fillStyle = getComputedStyle(ancestor).backgroundColor
+            context.fillRect(0, 0, 1, 1)
+          }
+          const background = luminance()
+          context.clearRect(0, 0, 1, 1)
+          context.fillStyle = color
+          context.fillRect(0, 0, 1, 1)
+          const foreground = luminance()
+          return {
+            color,
+            contrast:
+              (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05)
+          }
+        })
+    })
+    expect(measured.length).toBeGreaterThan(5)
+    for (const token of measured) expect(token.contrast).toBeGreaterThanOrEqual(4.5)
+    const colors = measured.map((token) => token.color)
+    expect(new Set(colors).size).toBeGreaterThan(2)
+    if (lightColors) expect(colors).toEqual(lightColors)
+    else lightColors = colors
+  }
 })

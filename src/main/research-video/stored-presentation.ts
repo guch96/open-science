@@ -1,74 +1,190 @@
+import { createLogger } from '@aipoch/diagnostics/node'
 import { RESEARCH_VIDEO_SOURCE_FILE_LIMIT_BYTES } from '@aipoch/research-film/contracts'
 import { createHash } from 'node:crypto'
-import { lstat, readdir, rm, rmdir } from 'node:fs/promises'
+import { open, lstat, readdir, rm, rmdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { readFileWithinLimit } from '@aipoch/durable-files'
+import { DurableJsonReadLimitError, readFileWithinLimit } from '@aipoch/durable-files'
 import { z } from 'zod'
+import { researchFilmModeSchema } from '../../shared/research-video-presentation'
 import type {
   ResearchVideoPresentation,
   ResearchVideoPresentationRequest
 } from '../../shared/research-video-presentation'
 
+const log = createLogger('research-video')
+
 export const researchFilmScopeKey = (request: ResearchVideoPresentationRequest): string =>
   createHash('sha256')
-    .update(JSON.stringify([request.projectId, request.sessionId, request.branchId ?? null]))
+    .update(
+      JSON.stringify([
+        request.projectId,
+        request.sessionId,
+        request.branchId ?? null,
+        ...(request.mode === 'operation-replay' ? [request.mode] : [])
+      ])
+    )
     .digest('hex')
 
 export const researchFilmReceiptSchema = z
   .object({
     id: z.string().uuid(),
     title: z.string().min(1).max(160),
-    duration: z.number().positive()
+    duration: z.number().positive(),
+    scriptScore: z.number().int().min(0).max(9).optional(),
+    sessionAppMode: z.enum(['live', 'drawn']).optional()
   })
   .strict()
 
+export class CorruptResearchFilmReceiptError extends Error {
+  constructor() {
+    super('The saved research film receipt is damaged.')
+  }
+}
+
+const missing = (error: NodeJS.ErrnoException): undefined => {
+  if (error.code !== 'ENOENT') throw error
+}
+
+export async function hasResearchFilmOutputs(directory: string): Promise<boolean> {
+  const output = join(directory, 'output')
+  for (const path of [directory, output]) {
+    const stat = await lstat(path).catch(missing)
+    if (!stat) return false
+    if (!stat.isDirectory()) throw new Error('Unsafe research presentation directory.')
+  }
+  let complete = true
+  for (const name of ['player.html', 'sources.zip']) {
+    const stat = await lstat(join(output, name)).catch(missing)
+    if (stat && !stat.isFile()) throw new Error('Research presentation is unavailable.')
+    if (!stat?.size) complete = false
+  }
+  return complete
+}
+
+export async function readResearchFilmReceipt(
+  base: string
+): Promise<z.infer<typeof researchFilmReceiptSchema> | undefined> {
+  const path = join(base, 'latest.json')
+  const stat = await lstat(path).catch(missing)
+  if (!stat) return undefined
+  if (!stat.isFile()) throw new Error('Unsafe research presentation receipt.')
+  try {
+    return researchFilmReceiptSchema.parse(JSON.parse(await readFileWithinLimit(path, 4096)))
+  } catch (error) {
+    if (
+      error instanceof SyntaxError ||
+      error instanceof z.ZodError ||
+      error instanceof DurableJsonReadLimitError
+    )
+      throw new CorruptResearchFilmReceiptError()
+    throw error
+  }
+}
+
+/** Read only the bounded marker emitted by the player builder, never load or execute the film. */
+export async function readResearchFilmCard(
+  playerPath: string
+): Promise<Pick<ResearchVideoPresentation, 'scriptScore' | 'sessionAppMode'>> {
+  const handle = await open(playerPath, 'r')
+  try {
+    const prefix = Buffer.alloc(96)
+    const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0)
+    const match = /^<!doctype html><!--open-science-film-card:([0-9]?):(live|drawn|)-->/.exec(
+      prefix.toString('utf8', 0, bytesRead)
+    )
+    const mode = match?.[2]
+    return {
+      ...(match?.[1] && { scriptScore: Number(match[1]) }),
+      ...((mode === 'live' || mode === 'drawn') && { sessionAppMode: mode })
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
 export async function readStoredResearchFilm(
   root: string,
-  request: ResearchVideoPresentationRequest
+  request: ResearchVideoPresentationRequest,
+  known?: ResearchVideoPresentation
 ): Promise<ResearchVideoPresentation | undefined> {
-  const base = join(root, 'research-video-presentations', researchFilmScopeKey(request))
-  for (const path of [join(root, 'research-video-presentations'), base]) {
-    const stat = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return undefined
+  const base = await researchFilmDirectory(root, request)
+  if (!base) return undefined
+  const receipt = await readResearchFilmReceipt(base).catch(async (error: unknown) => {
+    if (!(error instanceof CorruptResearchFilmReceiptError) || !known) throw error
+    const directory = join(base, known.id)
+    if (
+      known.playerPath !== join(directory, 'output', 'player.html') ||
+      !(await hasResearchFilmOutputs(directory))
+    )
       throw error
-    })
-    if (!stat) return undefined
-    if (!stat.isDirectory() || stat.isSymbolicLink())
-      throw new Error('Unsafe research presentation directory.')
-  }
-  const path = join(base, 'latest.json')
-  const stat = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return undefined
-    throw error
+    const { id, title, duration, scriptScore, sessionAppMode } = known
+    return { id, title, duration, scriptScore, sessionAppMode }
   })
-  if (!stat) return undefined
-  if (!stat.isFile() || stat.isSymbolicLink())
-    throw new Error('Unsafe research presentation receipt.')
-  const receipt = researchFilmReceiptSchema.parse(JSON.parse(await readFileWithinLimit(path, 4096)))
-  const directory = join(base, receipt.id),
-    output = join(directory, 'output')
-  for (const path of [directory, output]) {
-    const stat = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return undefined
-      throw error
-    })
-    if (!stat) return undefined
-    if (!stat.isDirectory() || stat.isSymbolicLink())
-      throw new Error('Unsafe research presentation directory.')
-  }
-  for (const name of ['player.html', 'sources.zip']) {
-    const stat = await lstat(join(output, name)).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return undefined
-      throw error
-    })
-    if (!stat) return undefined
-    if (!stat.isFile() || stat.isSymbolicLink())
-      throw new Error('Research presentation is unavailable.')
-  }
+  if (!receipt) return undefined
+  const directory = join(base, receipt.id)
+  if (!(await hasResearchFilmOutputs(directory))) return undefined
+  const playerPath = join(directory, 'output', 'player.html')
   return {
     ...receipt,
-    playerPath: join(output, 'player.html'),
-    sourcePath: join(output, 'sources.zip')
+    ...(await readResearchFilmCard(playerPath)),
+    playerPath,
+    sourcePath: join(directory, 'output', 'sources.zip')
+  }
+}
+
+/** Retention runs only after publication; unknown or unfinished directories are never candidates. */
+export async function pruneStoredResearchFilms(
+  root: string,
+  request: ResearchVideoPresentationRequest,
+  currentId: string,
+  previousId: string,
+  withUnusedFiles: (paths: string[], remove: () => Promise<void>) => Promise<boolean>
+): Promise<void> {
+  const base = await researchFilmDirectory(root, request)
+  if (!base || (await readResearchFilmReceipt(base))?.id !== currentId) return
+  const owner = z.object({
+    provenance: z.object({
+      projectId: z.string(),
+      sessionId: z.string(),
+      branchId: z.string().optional(),
+      mode: researchFilmModeSchema.optional()
+    })
+  })
+  for (const entry of await readdir(base, { withFileTypes: true })) {
+    if (
+      !entry.isDirectory() ||
+      entry.isSymbolicLink() ||
+      !z.string().uuid().safeParse(entry.name).success ||
+      entry.name === currentId ||
+      entry.name === previousId
+    )
+      continue
+    try {
+      const directory = join(base, entry.name)
+      if (!(await hasResearchFilmOutputs(directory))) continue
+      const sourcePath = join(directory, 'session.json')
+      const stat = await lstat(sourcePath).catch(missing)
+      if (!stat?.isFile() || stat.isSymbolicLink()) continue
+      const source = owner.safeParse(
+        JSON.parse(await readFileWithinLimit(sourcePath, RESEARCH_VIDEO_SOURCE_FILE_LIMIT_BYTES))
+      )
+      if (
+        !source.success ||
+        researchFilmScopeKey(source.data.provenance) !== researchFilmScopeKey(request)
+      )
+        continue
+      await withUnusedFiles(
+        ['player.html', 'sources.zip'].map((name) => join(directory, 'output', name)),
+        () => rm(directory, { recursive: true, force: true })
+      )
+    } catch (error) {
+      // Unproven or inaccessible output must not prevent retiring independent old films.
+      log.info('film retention candidate skipped', {
+        scope: researchFilmScopeKey(request),
+        filmId: entry.name,
+        reason: error instanceof SyntaxError ? 'invalid-json' : 'candidate-io-failed'
+      })
+    }
   }
 }
 
@@ -107,7 +223,7 @@ export async function deleteStoredResearchFilms(
       'artifacts',
       request.projectId,
       request.sessionId,
-      '.research-films',
+      request.mode === 'operation-replay' ? '.operation-replay-films' : '.research-films',
       importedId
     ]) {
       current = join(current, segment)
@@ -124,7 +240,10 @@ export async function deleteStoredResearchFilms(
     }
     if (exists) await rm(current, { recursive: true, force: true })
   }
-  const requests = request.branchId ? [request, { ...request, branchId: undefined }] : [request]
+  const requests =
+    request.branchId && request.mode !== 'operation-replay'
+      ? [request, { ...request, branchId: undefined }]
+      : [request]
   for (const scope of requests) {
     const base = await researchFilmDirectory(root, scope)
     if (!base) continue
@@ -147,7 +266,8 @@ export async function deleteStoredResearchFilms(
           provenance: z.object({
             projectId: identity,
             sessionId: identity,
-            branchId: z.string().optional()
+            branchId: z.string().optional(),
+            mode: researchFilmModeSchema.optional()
           })
         })
         .parse(

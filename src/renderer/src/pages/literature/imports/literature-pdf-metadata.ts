@@ -1,3 +1,4 @@
+import { lookupCachedLiteratureMetadata } from '../literature-metadata-lookup'
 import type { LiteratureRendererApi, LiteratureRendererHost } from '../renderer-host'
 import {
   createLiteratureIdentifierUrl,
@@ -23,12 +24,17 @@ const draftTitles = new WeakMap<LiteratureItemInput, string>()
 const PUBLICATION_DOI_PATTERN =
   /(?:^|\n)Accepted[^\n]*\b\d{4}\s*\nPublished[^\n]*\b\d{4}\s*\n(?:https?:\/\/(?:dx\.)?doi\.org\/|doi:\s*)?(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)\s*$/iu
 
+// Publisher templates can supply the same placeholder DOI to unrelated documents.
+const isPlaceholderDoi = (value: string): boolean => /\.xx\.xxxxxx$/iu.test(value)
+
 // These prose heuristics belong to extraction, never to explicit identifier normalization.
-const extractedDoi = (value: string): string =>
-  normalizeLiteratureIdentifierValue('doi', value)
+const extractedDoi = (value: string): string => {
+  const doi = normalizeLiteratureIdentifierValue('doi', value)
     .replace(/Copyright(?:\s.*)?$/iu, '')
     .replace(/[.,;:)}\]]+$/gu, '')
     .trim()
+  return isPlaceholderDoi(doi) ? '' : doi
+}
 
 const comparableTitle = (text: string): string =>
   text
@@ -56,47 +62,6 @@ const prominentPdfTitle = (items: readonly PdfTextItem[]): string => {
   return ''
 }
 
-const DOI_CACHE_SIZE = 32
-const DOI_CACHE_MS = 5 * 60_000
-const doiCaches = new WeakMap<
-  LiteratureRendererApi['literature']['lookupMetadata'],
-  Map<string, { expires: number; result: Promise<LiteratureItemInput> }>
->()
-
-const lookupPdfDoi = (
-  api: Pick<LiteratureRendererApi, 'literature'>,
-  doi: string
-): Promise<LiteratureItemInput> => {
-  const lookup = api.literature.lookupMetadata
-  let cache = doiCaches.get(lookup)
-  if (!cache) {
-    cache = new Map()
-    doiCaches.set(lookup, cache)
-  }
-  const cached = cache.get(doi)
-  if (cached && cached.expires > Date.now()) {
-    cache.delete(doi)
-    cache.set(doi, cached)
-    return cached.result
-  }
-  const result = lookup(doi)
-  // The TTL covers reusable results, not time spent waiting for the network.
-  const entry = { expires: Number.POSITIVE_INFINITY, result }
-  cache.delete(doi)
-  cache.set(doi, entry)
-  while (cache.size > DOI_CACHE_SIZE) cache.delete(cache.keys().next().value!)
-  const entries = cache
-  void result.then(
-    () => {
-      entry.expires = Date.now() + DOI_CACHE_MS
-    },
-    () => {
-      if (entries.get(doi) === entry) entries.delete(doi)
-    }
-  )
-  return result
-}
-
 const hasMetadataValue = (value: unknown): boolean =>
   typeof value === 'string'
     ? value.trim().length > 0
@@ -117,7 +82,7 @@ const completeLiteraturePdfDraft = async (
   const rejected = new Set<(typeof identifiers)[number]>()
   for (const identifier of identifiers) {
     try {
-      const resolved = await lookupPdfDoi(
+      const resolved = await lookupCachedLiteratureMetadata(
         api,
         identifier.scheme === 'pmid' ? `pmid:${identifier.value}` : identifier.value
       )
@@ -283,7 +248,7 @@ const parseLiteraturePdfMetadata = (
     .join('\n')}\n${text.split(/(?:^|\n)\s*(?:references|bibliography)\s*(?:\n|$)/iu)[0]}`
   const embeddedDoi = [info.DOI, custom.DOI]
     .map((value) => normalizeLiteratureIdentifierValue('doi', textValue(value)))
-    .find((value) => /^10\.\d{4,9}\/\S+$/u.test(value))
+    .find((value) => /^10\.\d{4,9}\/\S+$/u.test(value) && !isPlaceholderDoi(value))
   const doi = embeddedDoi ?? searchableText.match(DOI_PATTERN)?.map(extractedDoi).find(Boolean)
   const pmid = PMID_PATTERN.exec(searchableText)?.[1]
   const embeddedTitle = pdfInfoValue(info, 'Title')
@@ -405,18 +370,18 @@ const extractLiteraturePdfDraft = async (
           } finally {
             page.cleanup()
           }
-          const doi = PUBLICATION_DOI_PATTERN.exec(text)?.[1]
+          const rawDoi = PUBLICATION_DOI_PATTERN.exec(text)?.[1]
+          const doi = rawDoi ? extractedDoi(rawDoi) : ''
           if (doi && firstPageTitle.length >= 20) {
-            const normalized = extractedDoi(doi)
-            const resolved = await lookupPdfDoi(api, normalized)
+            const resolved = await lookupCachedLiteratureMetadata(api, doi)
             // A valid DOI may belong to a cited paper. Require the complete prominent title,
             // not the embedded Title, a substring in the abstract, or a fuzzy title match.
             if (comparableTitle(resolved.title) === comparableTitle(firstPageTitle)) {
               return {
                 ...draft,
-                url: createLiteratureIdentifierUrl('doi', normalized) ?? '',
+                url: createLiteratureIdentifierUrl('doi', doi) ?? '',
                 identifiers: [
-                  { scheme: 'doi', value: normalized, isPrimary: true },
+                  { scheme: 'doi', value: doi, isPrimary: true },
                   ...draft.identifiers.map((identifier) => ({ ...identifier, isPrimary: false }))
                 ]
               }

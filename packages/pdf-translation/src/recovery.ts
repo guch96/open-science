@@ -24,6 +24,7 @@ export function pdfTranslationHasCommentary(source: string, translation: string)
     /\]<\][A-Za-z][\w-]*\[>\[/gu,
     /<\s*\/?\s*(?:source|translation)\s*>/giu,
     /(?:^|\n)\s*(?:User|Assistant|System)\s*[:：]/gu,
+    /(?:^|\n)\s*\{\s*(?:"assistant"\s*[:：]|assistant\s+")/gu,
     /\b(?:requiredNumericLiterals|retryFeedback|nearbySourceUnits)\b/gu,
     /(?:^|\n)\s*(?:Wait[,!]?\s*)?I need to (?:recheck|correct|rethink|translate)\b[^\n]*/giu,
     /(?:^|\n)\s*Let me (?:correct|recheck|translate)\b[^\n]*/giu,
@@ -226,7 +227,21 @@ export function pdfTranslationAddsNumericLiterals(source: string, translation: s
     }
     if (occurrences(translation, true) > occurrences(source)) return true
   }
-  const sourceNumbers = source.normalize('NFKC').match(/\d+/gu) ?? []
+  const normalizedSource = source.normalize('NFKC')
+  const normalized = translation.normalize('NFKC')
+  const sourceNumbers = normalizedSource.match(/\d+/gu) ?? []
+  // A retained product identifier does not authorize an extra number after the sentence.
+  const detachedTail = /[。！？]\s*(\d+)\s*$/u.exec(normalized)?.[1]
+  if (
+    detachedTail &&
+    sourceNumbers.length === 1 &&
+    sourceNumbers[0] === detachedTail &&
+    /[A-Za-z][.!?]\s*$/u.test(normalizedSource)
+  ) {
+    const identifiers = /(?<![A-Za-z\d])[A-Za-z]{3,}\d+(?![A-Za-z\d])/gu
+    const identifier = normalizedSource.match(identifiers)?.[0]
+    if (identifier && normalized.match(identifiers)?.includes(identifier)) return true
+  }
   // A complete convolution-kernel label encodes two ordered dimensions, not
   // a stride identifier supplying a multiplier. Require both exact operands
   // and no additional target number before accepting its spelled-out form.
@@ -247,15 +262,14 @@ export function pdfTranslationAddsNumericLiterals(source: string, translation: s
     source.length <= 80 &&
     sourceNumbers.length > 0 &&
     !sameKernel &&
-    !/(?<![A-Za-z\d])\d/u.test(source.normalize('NFKC')) &&
+    !/(?<![A-Za-z\d])\d/u.test(normalizedSource) &&
     !/\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|single|both|pair|couple|once|twice|each|per)\b/iu.test(
       source
     ) &&
-    /^\s*\d+(?:[.,]\d+)?\s*×/u.test(translation.normalize('NFKC'))
+    /^\s*\d+(?:[.,]\d+)?\s*×/u.test(normalized)
   )
     return true
   if (sourceNumbers.length > 0) return false
-  const normalized = translation.normalize('NFKC')
   return /\p{Script=Han}/u.test(normalized) && /\d/u.test(normalized)
 }
 
@@ -373,11 +387,14 @@ function ordinaryAcademicHeading(source: string): string | undefined {
     .trim()
     .replace(/\s+/gu, ' ')
     .replace(/^(?:[A-Z]|\d+)(?:\.\d+)+\.?\s+/iu, '')
-  return /^(?:ethics statement|open science(?: statement)?|training details|additional results|implementation details|data availability|ethical considerations|ablation study)$/iu.test(
-    heading
-  )
-    ? heading
-    : undefined
+  const ordinary =
+    /^(?:ethics statement|open science(?: statement)?|training details|additional results|implementation details|data availability|funding information|ethical considerations|ablation study|related work|computation details|target simulations|brightness simulation|sky predictions|future plans|(?:\d{1,3}\.?\s+)?limitations? and (?:outlook|future work))$/iu.test(
+      heading
+    ) ||
+    /^(?:(?:assessing|evaluating|measuring) (?:computational )?modell?ing skills|(?:systematically )?(?:analy[sz]ing|examining|unfolding) common errors|closing remarks|observations and data reduction|results? and discussions?|boundary conditions?|conclusions? and scope)$/iu.test(
+      heading
+    )
+  return ordinary ? heading : undefined
 }
 
 // These ordinary scientific labels and clinical section headings are not names,
@@ -387,9 +404,17 @@ function ordinaryAcademicHeading(source: string): string | undefined {
 function isOrdinaryScientificLabel(source: string): boolean {
   source = source.trim().replace(/^#\s*(params?|parameters)\.?$/i, '$1')
   if (ordinaryAcademicHeading(source) || scientificApiRole.test(source)) return true
+  // Complete descriptive labels only; a containing organization or method
+  // name cannot borrow an exemption from an ordinary word.
+  if (
+    /^(?:commutative algebra|(?:date|chl) range|input sequence|atom attention encoder|physical validity constraints|polari[sz]ation controller|sampling positions?|scan (?:number|count))$/iu.test(
+      source
+    )
+  )
+    return true
   // Publication labels and clinical table summaries are not proper names.
   if (
-    /^(?:open[ -]access|original (?:article|research)|research article|review article|systematic review|case report|brief report|short communication|editorial|letter to the editor|edited by|reviewed by|additional information|supplemental material|(?:competing interests|contributorship) statement)$/iu.test(
+    /^(?:open[ -]access|original (?:article|research)|research article|review article|systematic review|case report|brief report|short communication|editorial|letter to the editor|edited by|reviewed by|additional information|supplemental material|supplementary information|competing interests(?: statement)?|contributorship statement)$/iu.test(
       source
     ) ||
     /^(?:all grades?|total cycles?|physical symptoms?|human immunodeficiency virus|non-hispanic (?:black|white)|sex-based analys(?:is|es)|(?:sleep|aim trainer) score|AE class|intraoperative HR|limited context|yes|no|unclear|(?:high|low|unclear) risk)$/iu.test(
@@ -423,6 +448,7 @@ function isOrdinaryScientificLabel(source: string): boolean {
     )
   )
     return true
+  if (/^(?:planet[- ]star )?mass ratio$/iu.test(source)) return true
   // A metric acronym does not make its summary statistic a proper name.
   if (
     /^(?:[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*,\s*)?(?:[Mm]ean|[Mm]edian)\s*\((?:SD|SE|IQR)\)(?:,\s*(?:mm|cm|mL|kg\/m2|y|°|◦))?$/u.test(
@@ -434,7 +460,7 @@ function isOrdinaryScientificLabel(source: string): boolean {
     return false
   const words = source.match(/[A-Za-z]+/g) ?? []
   const ordinary =
-    /^(?:attention|type|multi|single|head|heads|query|queries|caption|image|retrieval|local|global|beam|search|training|model|steps?|scores?|error|rate|average|mean|median|standard|deviation|stddev|inference|stage|exploding|vanishing|gradient|gradients|normalization|batch|index|noise|strengths?|limitations?|and|layer|loss|accuracy|test|validation|log|epoch|conv|convolution|depthwise|separable|pointwise|with|activation|param|params|parameters|covariate|shift|without|physical|therapy|assessment|group|comparison|other|studies|future|research|directions|author|contributions|ethics|approval|clinical|trial|registration|object|detection|finegrain|fine|grained|classification|landmark|recognition|filter|shape|input|size|fully|connected|mult|adds|shallow|train|concepts?|coordinates?|overall|rendered|defen[cs]e|settings?|the|code|gaussian|map)$/i
+    /^(?:attention|type|multi|single|head|heads|query|queries|caption|image|retrieval|local|global|beam|search|training|model|steps?|scores?|error|rate|average|mean|median|standard|deviation|stddev|inference|stage|exploding|vanishing|gradient|gradients|normalization|batch|index|noise|strengths?|limitations?|and|layer|loss|accuracy|test|validation|log|epoch|conv|convolution|depthwise|separable|pointwise|with|activation|param|params|parameters?|covariate|shift|without|physical|therapy|assessment|group|comparison|other|studies|future|research|directions|author|contributions|ethics|approval|clinical|trial|registration|object|detection|finegrain|fine|grained|classification|landmark|recognition|filter|shape|input|size|fully|connected|mult|adds|shallow|train|concepts?|coordinates?|overall|rendered|defen[cs]e|settings?|larger|backbones?|ablated|aspects?|modules?|locations?|load|balance|coefficients?|definitions?|analys(?:is|es)|topological|spaces?|equivalence|class|representative|nodes?|subjects?|structure|optimized|recovery|delay|oriented|bandlimited|interference|cancellation|table|the|code|gaussian|map)$/i
   return (
     words.length > 0 &&
     words.length <= 8 &&
@@ -552,6 +578,14 @@ export function pdfTranslationDropsStandaloneProperName(
   const recordLabel = /^([A-Z]{2,8}) (?:[Dd]omain|[Ii]nformation [Rr]ecords?)$/u.exec(value)
   if (recordLabel)
     return !new RegExp(`(?<![A-Za-z0-9_])${recordLabel[1]}(?![A-Za-z0-9_])`, 'u').test(translation)
+  // Match complete rubric criteria so a longer organization or method name
+  // cannot borrow the exemption from a descriptive phrase.
+  if (
+    /^(?:(?:useful|relevant) descriptions?|(?:physics|conceptual) approach|(?:specific|practical) application|(?:math|algebraic) procedures?|logical progression)$/iu.test(
+      value.replace(/\s+/gu, ' ')
+    )
+  )
+    return false
   // Small-caps PDF fonts can extract ordinary publication labels as mixed case.
   // A closed lowercase vocabulary proves they are prose before CamelCase is
   // interpreted as a model identifier; unknown names still fail that lookup.
@@ -836,6 +870,13 @@ export function normalizePdfTranslationText(source: string, translation: string)
   // the bundled output font. Strip them before checkpoint reconciliation so the
   // saved text matches the PDF writer's normalized output.
   result = result.replace(/\p{Cf}/gu, '')
+  // A detached ring in a resolution measurement is the legacy spelling of Å.
+  // Use the existing quantity only, so a changed value remains detectable.
+  const resolution = /\bresolution of (\d+\.\d+) ˚A\.$/u.exec(source)?.[1]
+  if (resolution)
+    result = result.replace(/(\d+\.\d+)([ \t]+)˚A(?!\p{L})/gu, (literal, value, spacing) =>
+      value === resolution ? value + spacing + 'Å' : literal
+    )
   // A model can wrap an unchanged formula in Markdown emphasis. Restore only
   // an exact source match; literal stars and changed expressions stay intact.
   const emphasis = result.trim().match(/^\*\*([\s\S]+)\*\*$/u)

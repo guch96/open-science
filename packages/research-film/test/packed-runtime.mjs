@@ -4,10 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { createRequire } from 'node:module'
+import { fork } from 'node:child_process'
+import { once } from 'node:events'
 import {
   createResearchVideoGenerator,
   createResearchFilmAuthor,
-  generateResearchFilm
+  generateResearchFilm,
+  prepareFilmSessionApp
 } from '@aipoch/research-film'
 import { researchFilmResources } from '@aipoch/research-film/resources'
 import { ResearchVideoPlaybackClock } from '@aipoch/research-film/contracts'
@@ -19,8 +22,26 @@ const root = await mkdtemp(join(tmpdir(), 'research-film-consumer-'))
 let worker
 try {
   const resources = researchFilmResources()
+  assert.match(await readFile(join(resources.replayDirectory, 'generic.js'), 'utf8'), /__seek/)
+  assert.match(await readFile(join(resources.replayDirectory, 'generic.css'), 'utf8'), /1920px/)
+  assert.match(
+    await readFile(join(resources.replayDirectory, 'player.js'), 'utf8'),
+    /__replayState/
+  )
+  assert.match(
+    await readFile(join(resources.replayDirectory, 'player.css'), 'utf8'),
+    /body\.preview/
+  )
   assert.match(await readFile(join(resources.authoringDirectory, 'KIT.md'), 'utf8'), /k\.ctx/)
+  assert.match(await readFile(join(resources.authoringDirectory, 'SCRIPT.md'), 'utf8'), /Rubric/)
   assert.match(await readFile(join(resources.stageDirectory, 'index.html'), 'utf8'), /html/)
+  // An empty ZIP still loads the installed module worker and its compiler dependencies.
+  const emptyZip = new Uint8Array(22)
+  emptyZip.set([0x50, 0x4b, 0x05, 0x06])
+  assert.equal(
+    await prepareFilmSessionApp(emptyZip, 'empty.zip', AbortSignal.timeout(10_000)),
+    undefined
+  )
   const source = {
     sessionTitle: 'Evidence',
     project: 'test',
@@ -44,14 +65,39 @@ try {
           { type: 'title', text: 'Evidence' },
           { type: 'animation', script: 'anims/hook.js', size: 'band' }
         ]
+      },
+      {
+        id: 'outro',
+        role: 'outro',
+        msg: 0,
+        lines: [
+          { caption: 'The evidence remains uncertain.' },
+          {
+            caption: 'AIPOCH Open-Science — the AI research workbench for reproducible science.',
+            say: 'AIPOCH Open-Science. The AI research workbench for reproducible science.'
+          }
+        ],
+        panels: [{ type: 'end_card', at: '1' }]
       }
     ]
   }
   await writeFile(join(root, 'session.json'), JSON.stringify(source))
   const stages = []
-  const author = createResearchFilmAuthor(async (_source, _prompt, payload) =>
-    payload.path ? 'k.ctx.fillRect(0, 0, 20, 20);' : JSON.stringify(spec)
-  )
+  const author = createResearchFilmAuthor(async (_source, _prompt, payload) => {
+    if (payload.narration)
+      return JSON.stringify({
+        spine: null,
+        catch: null,
+        thread: null,
+        audioOnly: null,
+        numbers: null,
+        plainWords: null,
+        lineCraft: null,
+        clean: null,
+        true: null
+      })
+    return payload.path ? 'k.ctx.fillRect(0, 0, 20, 20);' : JSON.stringify(spec)
+  })
   // Exercise the real packaged generation worker and resource loader with deterministic speech.
   // Native model/download behavior is separately checked by the host and native acceptance run.
   const result = await generateResearchFilm({
@@ -88,6 +134,7 @@ try {
     }
   })
   assert.equal(result.title, 'Evidence')
+  assert.equal(result.scriptScore, 9)
   assert.ok(result.duration > 0)
   assert.ok((await readFile(result.sourcePath)).length > 1000)
   assert.match(await readFile(result.playerPath, 'utf8'), /open-science-research-video/)
@@ -110,6 +157,49 @@ try {
     ),
     /ENOENT/
   )
+  await assert.rejects(
+    generate(
+      {
+        specPath: join(root, 'video.json'),
+        modelDirectory: join(root, 'missing-model'),
+        engineDirectory: resources.stageDirectory,
+        outputDirectory: join(root, 'failed-narration')
+      },
+      AbortSignal.timeout(10_000)
+    ),
+    { workerRole: 'speech', message: /Install or update Research narration/ }
+  )
+  // Prove the packaged supervisor exits on parent-channel loss without a signal from the parent.
+  const child = fork(resources.speechProcessPath, [], {
+    execArgv: [],
+    serialization: 'advanced',
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc']
+  })
+  const exited = once(child, 'exit')
+  const timeout = setTimeout(() => child.kill('SIGTERM'), 5000)
+  try {
+    const reply = once(child, 'message', { signal: AbortSignal.timeout(5000) })
+    child.send({
+      kind: 'synthesize',
+      lane: 0,
+      text: 'Evidence',
+      input: {
+        kind: 'speech',
+        modelDirectory: join(root, 'missing-model'),
+        runtimeDirectory: join(root, 'standalone-runtime'),
+        threads: 1
+      }
+    })
+    assert.match((await reply)[0].message, /Install or update Research narration/)
+    child.disconnect()
+    // On Windows the operating system can report the signal as an exit code.
+    const [code, signal] = await exited
+    assert.ok(signal === 'SIGKILL' || (process.platform === 'win32' && code !== 0 && !signal))
+  } finally {
+    clearTimeout(timeout)
+    child.kill('SIGKILL')
+    await exited.catch(() => {})
+  }
   assert.deepEqual(await readdir(temporaryRoot), [])
 } finally {
   await worker?.terminate()

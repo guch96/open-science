@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { NotebookRunRecord } from '../../../../shared/notebook'
+import type { NotebookRunRecord, NotebookRunEvidenceSnapshot } from '../../../../shared/notebook'
 import { NotebookCodeBlock } from './notebook-code'
 import { NotebookRunEvidence } from './NotebookRunEvidence'
 import { NotebookRunOutputs } from './NotebookRunOutputs'
@@ -23,7 +23,8 @@ export const NotebookRecordCell = ({
   code = run.script,
   showResult = true,
   allowFolderAccess = false,
-  children
+  children,
+  loadRun
 }: {
   run: NotebookRunRecord
   index: number
@@ -32,6 +33,7 @@ export const NotebookRecordCell = ({
   code?: string
   showResult?: boolean
   allowFolderAccess?: boolean
+  loadRun?: (runId: string) => Promise<NotebookRunEvidenceSnapshot | null | undefined>
   children?: ReactNode
 }): React.JSX.Element => {
   const { t } = useTranslation()
@@ -49,7 +51,7 @@ export const NotebookRecordCell = ({
           <span className="rounded bg-bg-300 px-1.5 py-0.5 text-text-200">{kind}</span>
           {isProblem ? (
             errorLine ? (
-              <span className="rounded bg-danger-000 px-1.5 py-0.5 font-medium text-white">
+              <span className="rounded bg-danger-000 px-1.5 py-0.5 font-medium text-danger-foreground">
                 {t('error (line {{line}})', { line: errorLine })}
               </span>
             ) : (
@@ -88,6 +90,7 @@ export const NotebookRecordCell = ({
             <NotebookRunOutputs run={run} allowFolderAccess={allowFolderAccess} />
             <NotebookRunEvidence
               run={run}
+              loadRun={loadRun}
               showEnvironmentCaptureWarning={showEnvironmentCaptureWarning}
             />
           </>

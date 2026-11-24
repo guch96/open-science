@@ -177,8 +177,15 @@ test('failed provider attachment exposes original details and exports real diagn
     .poll(async () =>
       (await application.evaluate(({ clipboard }) => clipboard.readText())).replace(/\r\n/g, '\n')
     )
-    .toBe(displayedDetails)
+    .toBe(
+      [
+        'An unexpected application error occurred',
+        'Report this error with its diagnostics to help us investigate.',
+        displayedDetails
+      ].join('\n')
+    )
   await page.screenshot({ path: info.outputPath('resume-original-details.png'), fullPage: true })
+  const desktopSize = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }))
   await page.setViewportSize({ width: 640, height: 850 })
   await page.screenshot({
     path: info.outputPath('resume-light-narrow-expanded.png'),
@@ -220,7 +227,7 @@ test('failed provider attachment exposes original details and exports real diagn
   await slot.locator('[data-select-notice*=":action:"]').click()
   await expect(error).toBeVisible()
   await expect(error.locator('details')).not.toHaveAttribute('open')
-  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.setViewportSize(desktopSize)
   await page.evaluate(() => document.documentElement.classList.remove('dark'))
   const archive = info.outputPath('resume-failure-diagnostics.tar.gz')
   await application.evaluate(({ dialog }, path) => {

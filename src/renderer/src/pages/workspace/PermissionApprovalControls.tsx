@@ -1,3 +1,11 @@
+import { scheduleToolPresentation } from './schedules/schedule-tool-presentation'
+import {
+  findImageToolSourceName,
+  imageToolOperation,
+  readImageToolSource,
+  type ImageSourceSession
+} from './image-tool-presentation'
+import { WorkspaceImageToolCard } from './WorkspaceImageToolCard'
 import { formatNetworkHostname } from '../../../../shared/notebook-network-settings'
 import {
   SplitButton,
@@ -9,7 +17,7 @@ import { ScopeDropdown, type PermissionScope } from './PermissionScopeButton'
 /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4 */
 
 import type { TFunction } from 'i18next'
-import { ChevronDown, ChevronRight, Info, TriangleAlert } from 'lucide-react'
+import { ChevronDown, ChevronRight, Info, Search, TriangleAlert } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -60,6 +68,8 @@ import { WorkspaceLiteratureToolCard } from './WorkspaceLiteratureToolCard'
 import { SkillDocumentSheet } from './WorkspaceSkillLoadRow'
 import { WorkspaceToolCodeBlock } from './WorkspaceToolCodeBlock'
 import { WorkspaceToolSummaryCard } from './WorkspaceToolSummaryCard'
+import { searchInputSchema } from '../../../../shared/web-tools'
+import { WebSearchPermissionCard } from './WebSearchPermissionCard'
 
 type PermissionApprovalControlsProps = {
   requests: AcpPermissionRequest[]
@@ -69,6 +79,7 @@ type PermissionApprovalControlsProps = {
   // Session locator for the notebook env badge; optional so the controls render standalone
   // (isolation tests, sessions without notebook context).
   notebookLookup?: NotebookSessionRequest
+  imageSourceSession?: ImageSourceSession
 }
 
 type PermissionApprovalCardProps = Omit<PermissionApprovalControlsProps, 'requests'> & {
@@ -484,7 +495,7 @@ const NotebookNetworkApprovalDetail = ({
         <dd className="break-all font-mono text-foreground">
           {formatNetworkHostname(approval.hostname)}
         </dd>
-        <dt>{t('Protocol')}</dt>
+        <dt>{t('Network protocol')}</dt>
         <dd className="font-mono text-foreground">{approval.protocol.toUpperCase()}</dd>
         <dt>{t('Port')}</dt>
         <dd className="font-mono text-foreground">
@@ -638,10 +649,12 @@ const useNotebookEnvironment = (
 
 const PermissionImpactTip = ({
   description,
-  detail
+  detail,
+  scopeDescription
 }: {
   description: string
   detail?: string
+  scopeDescription?: string
 }): React.JSX.Element => {
   const { t } = useTranslation()
 
@@ -662,6 +675,7 @@ const PermissionImpactTip = ({
           <div className="space-y-1">
             {detail ? <p>{detail}</p> : null}
             <p className={detail ? 'text-muted-foreground' : undefined}>{description}</p>
+            {scopeDescription ? <p>{scopeDescription}</p> : null}
           </div>
         </TooltipContent>
       </Tooltip>
@@ -720,6 +734,7 @@ const PermissionApprovalCard = ({
   onRespond,
   embedded = false,
   notebookLookup,
+  imageSourceSession,
   disabled = false,
   onSubmitted
 }: PermissionApprovalCardProps): React.JSX.Element => {
@@ -774,7 +789,73 @@ const PermissionApprovalCard = ({
     runtimeSelection && typeof runtimeSelection.previousRuntimeId === 'string'
       ? String(runtimeSelection.previousLabel || runtimeSelection.previousRuntimeId)
       : undefined
+  const imageOperation = imageToolOperation(
+    request.mcpIdentity,
+    request.providerToolName,
+    request.title
+  )
+  const source = imageOperation === 'edit' ? readImageToolSource(request.rawInput) : undefined
+  const sourceName = findImageToolSourceName(source, imageSourceSession)
+  const [resolvedImageSource, setResolvedImageSource] = useState<{ key: string; name: string }>()
+  const sourceFileId = source?.fileId
+  const sourceVersionId = source?.versionId
+  const sourceKind = source?.kind
+  const lookupProjectId = notebookLookup?.projectId
+  const lookupSessionId = notebookLookup?.sessionId
+  const sourceLookupKey = JSON.stringify([
+    sourceKind,
+    sourceFileId,
+    sourceVersionId,
+    lookupProjectId,
+    lookupSessionId
+  ])
+  useEffect(() => {
+    if (
+      sourceName ||
+      !sourceKind ||
+      !sourceFileId ||
+      !sourceVersionId ||
+      !lookupProjectId ||
+      !lookupSessionId
+    )
+      return
+    let active = true
+    void window.api?.previewResources
+      ?.acquire({
+        source: sourceKind === 'artifact-version' ? 'artifact' : 'upload',
+        projectId: lookupProjectId,
+        fileId: sourceFileId,
+        versionId: sourceVersionId,
+        imagePreview: 'thumbnail',
+        ...(sourceKind === 'artifact-version' ? { imageGenerationSessionId: lookupSessionId } : {})
+      })
+      .then((resource) => {
+        if (active && resource.filename)
+          setResolvedImageSource({ key: sourceLookupKey, name: resource.filename })
+        return window.api.previewResources.release({ resourceId: resource.id })
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [
+    sourceName,
+    sourceKind,
+    sourceFileId,
+    sourceVersionId,
+    lookupProjectId,
+    lookupSessionId,
+    sourceLookupKey
+  ])
   const permCode = codeReview || selectedLabel ? undefined : extractPermissionCode(request)
+  // Only the broker-resolved built-in identity gets this presentation. Unknown or invalid
+  // arguments keep the complete generic preview instead of silently losing approval context.
+  const webSearch =
+    isMcpPermissionRequest(request) &&
+    /^open[-_]science[-_]web\/web_search$/.test(request.mcpIdentity ?? '')
+      ? searchInputSchema.safeParse(notebookInput(request.rawInput))
+      : undefined
+  const webSearchInput = webSearch?.success ? webSearch.data : undefined
   // A skills/load_skill approval names the skill being loaded; the section resolves the SKILL.md
   // document (managed catalog first, then the connector-aware main resolver) and falls back to the
   // raw JSON input when no source provides the name.
@@ -785,6 +866,9 @@ const PermissionApprovalCard = ({
     : libraryAction
       ? buildLiteratureLibraryToolSummary(libraryAction, request.rawInput)
       : undefined
+  const schedule = isMcpPermissionRequest(request)
+    ? scheduleToolPresentation(request.mcpIdentity, request.rawInput, t)
+    : undefined
   const notebookSummary = isMcpPermissionRequest(request)
     ? buildNotebookToolSummary(request.mcpIdentity, request.rawInput, undefined, t, true)
     : undefined
@@ -825,10 +909,14 @@ const PermissionApprovalCard = ({
   const sourcePresentation = describePermissionRequest(request)
   const presentation: PermissionPresentation = {
     ...sourcePresentation,
-    actionTitle: t(sourcePresentation.actionTitleKey ?? sourcePresentation.actionTitle, {
-      ...sourcePresentation.actionTitleValues
-    }),
-    categoryLabel: t(sourcePresentation.categoryLabel),
+    actionTitle:
+      schedule?.summary.title ??
+      (webSearchInput
+        ? t('Allow web search?')
+        : t(sourcePresentation.actionTitleKey ?? sourcePresentation.actionTitle, {
+            ...sourcePresentation.actionTitleValues
+          })),
+    categoryLabel: schedule ? t('Schedule') : t(sourcePresentation.categoryLabel),
     description: t(sourcePresentation.description)
   }
   const allowOptionId = getAllowOptionId(request.options, effectiveScope)
@@ -966,6 +1054,7 @@ const PermissionApprovalCard = ({
       }
       className={cn(
         'flex w-full max-w-full flex-col gap-3 bg-card p-4 text-xs leading-5 text-card-foreground outline-none sm:p-5',
+        webSearchInput && 'gap-2.5 sm:p-4',
         !embedded &&
           'mb-2 rounded-xl border border-border shadow-dialog motion-safe:animate-in motion-safe:fade-in-0 motion-safe:slide-in-from-bottom-1 motion-safe:duration-200'
       )}
@@ -990,9 +1079,11 @@ const PermissionApprovalCard = ({
         data-testid="permission-header"
         className={cn(
           'flex min-w-0 items-center gap-2',
-          codeReview && 'flex-wrap',
+          codeReview && 'flex-col items-stretch gap-3',
           embedded &&
-            'sticky top-0 z-10 -mx-4 -mt-4 -mb-3 bg-card px-4 pb-3 pt-4 sm:-mx-5 sm:-mt-5 sm:px-5 sm:pt-5'
+            'sticky top-0 z-10 -mx-4 -mt-4 -mb-3 bg-card px-4 pb-3 pt-4 sm:-mx-5 sm:-mt-5 sm:px-5 sm:pt-5',
+          webSearchInput && 'flex-wrap',
+          webSearchInput && embedded && 'sm:-mx-4 sm:-mt-4 sm:px-4 sm:pt-4'
         )}
       >
         {codeReview ? (
@@ -1007,30 +1098,47 @@ const PermissionApprovalCard = ({
               </span>
             </div>
             {codeReview.environment ? (
-              <Badge
-                variant="secondary"
-                data-testid="permission-env-badge"
-                className="ml-auto min-w-0 max-w-full whitespace-normal break-all"
-                title={t('Environment')}
-              >
-                {codeReview.environment}
-              </Badge>
+              <div className="min-w-0 rounded-md bg-muted/60 px-3 py-2">
+                <span
+                  data-testid="permission-env-badge"
+                  className="line-clamp-2 select-text whitespace-normal break-all text-xs leading-5 text-muted-foreground"
+                  aria-label={t('Environment')}
+                  title={codeReview.environment}
+                >
+                  {codeReview.environment}
+                </span>
+              </div>
             ) : null}
           </>
         ) : (
           <>
             <div className="flex min-w-0 items-center gap-1.5">
-              <span className={cn(dialogTitleClassName, 'min-w-0 truncate')}>
+              {webSearchInput ? (
+                <Search className="size-4 shrink-0 text-primary" aria-hidden="true" />
+              ) : null}
+              <span
+                className={cn(
+                  dialogTitleClassName,
+                  'min-w-0 truncate',
+                  webSearchInput && 'text-sm'
+                )}
+              >
                 {presentation.actionTitle}
               </span>
-              <PermissionImpactTip description={presentation.description} detail={titleDetail} />
+              <PermissionImpactTip
+                description={presentation.description}
+                detail={titleDetail}
+                scopeDescription={schedule ? scopeDescription : undefined}
+              />
             </div>
-            <PermissionHeaderBadges
-              lookup={notebookLookup}
-              runtime={presentation.notebookRuntime}
-              categoryLabel={presentation.categoryLabel}
-              scopeDescription={scopeDescription}
-            />
+            {!schedule && (
+              <PermissionHeaderBadges
+                lookup={notebookLookup}
+                runtime={presentation.notebookRuntime}
+                categoryLabel={presentation.categoryLabel}
+                scopeDescription={scopeDescription}
+              />
+            )}
           </>
         )}
       </div>
@@ -1088,6 +1196,28 @@ const PermissionApprovalCard = ({
             </p>
           ) : null}
         </div>
+      ) : schedule ? (
+        <div className="space-y-2">
+          <WorkspaceToolSummaryCard summary={schedule.summary} schedule />
+          {schedule.script && (
+            <details>
+              <summary className="cursor-pointer">{t('Script')}</summary>
+              <WorkspaceToolCodeBlock {...schedule.script} />
+            </details>
+          )}
+        </div>
+      ) : webSearchInput ? (
+        <WebSearchPermissionCard key={requestId} input={webSearchInput} />
+      ) : imageOperation ? (
+        <WorkspaceImageToolCard
+          key={requestId}
+          operation={imageOperation}
+          input={request.rawInput}
+          inputFilename={
+            sourceName ??
+            (resolvedImageSource?.key === sourceLookupKey ? resolvedImageSource.name : undefined)
+          }
+        />
       ) : notebookSummary || fileSummary ? (
         <div key={requestId} className="space-y-2">
           <WorkspaceToolSummaryCard
@@ -1134,7 +1264,9 @@ const PermissionApprovalCard = ({
         className={cn(
           'flex flex-wrap items-center justify-end gap-2',
           embedded &&
-            'sticky bottom-0 z-10 -mx-4 -mb-4 bg-card px-4 pb-4 pt-3 sm:-mx-5 sm:-mb-5 sm:px-5 sm:pb-5'
+            'sticky bottom-0 z-10 -mx-4 -mb-4 bg-card px-4 pb-4 pt-3 sm:-mx-5 sm:-mb-5 sm:px-5 sm:pb-5',
+          webSearchInput && 'border-t border-border-200/70 pt-2.5',
+          webSearchInput && embedded && 'sm:-mx-4 sm:-mb-4 sm:px-4 sm:pb-4'
         )}
       >
         {/* Split Allow button: main action + scope chevron; the menu anchors to this group's right edge.
@@ -1158,8 +1290,8 @@ const PermissionApprovalCard = ({
               className={cn(
                 'inline-flex h-8 select-none items-center justify-center gap-1 whitespace-nowrap border-0 px-3 text-sm outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50',
                 isDeleteRequest
-                  ? 'bg-destructive text-destructive-foreground hover:bg-destructive/80'
-                  : 'bg-primary text-primary-foreground hover:bg-primary/80'
+                  ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+                  : 'bg-primary text-primary-foreground hover:bg-primary/90'
               )}
               disabled={disabled || !allowOptionId || isSubmitting}
               onClick={() => {
@@ -1187,8 +1319,8 @@ const PermissionApprovalCard = ({
                   className={cn(
                     'inline-flex h-8 select-none items-center justify-center border-0 px-2 outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50',
                     isDeleteRequest
-                      ? 'bg-destructive text-destructive-foreground hover:bg-destructive/80'
-                      : 'bg-primary text-primary-foreground hover:bg-primary/80'
+                      ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+                      : 'bg-primary text-primary-foreground hover:bg-primary/90'
                   )}
                   disabled={isSubmitting}
                 >
@@ -1254,6 +1386,7 @@ const PermissionApprovalControls = ({
   onRespond,
   embedded = false,
   notebookLookup,
+  imageSourceSession,
   disabled = false
 }: PermissionApprovalControlsProps): React.JSX.Element | null => {
   const { t } = useTranslation()
@@ -1289,6 +1422,7 @@ const PermissionApprovalControls = ({
           onRespond={onRespond}
           embedded={embedded}
           notebookLookup={notebookLookup}
+          imageSourceSession={imageSourceSession}
           disabled={disabled}
           onSubmitted={(requestId) => {
             focusReturnFromRef.current = requestId

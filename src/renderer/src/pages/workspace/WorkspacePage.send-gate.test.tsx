@@ -21,10 +21,21 @@ import { useProjectStore } from '@/stores/project-store'
 import { createInitialReviewState, useReviewStore } from '@/stores/review-store'
 import {
   createInitialSessionState,
+  hydrateSession,
+  toPersistedSession,
   useSessionStore,
   type ChatSession
 } from '@/stores/session-store'
-import type { PersistedChatSession } from '../../../../shared/session-persistence'
+import {
+  materializeSessionConversationGraph,
+  type PersistedChatSession
+} from '../../../../shared/session-persistence'
+import {
+  resolveActiveConversationActivities,
+  resolveActiveConversationMessages,
+  projectConversationMessage
+} from '../../../../shared/conversation-graph'
+import { canAdmitExistingWorkspacePrompt } from '@/lib/acp/workspace-runtime-prompt-preparation-owner'
 import type { SessionWriteIssue } from '@/lib/session-persistence/session-write-recovery'
 import {
   reportWorkspaceOperationError,
@@ -628,6 +639,77 @@ describe('WorkspacePage send gate while compacting', () => {
       useSessionStore.getState().finishRun('sess-a')
     })
     expect(conversationProps.conversation.availability.submit).toBe(true)
+  })
+
+  it('allows sending on a branch with only another branch’s pending question', async () => {
+    const active = createReviewableSession()
+    const original = materializeSessionConversationGraph({
+      ...toPersistedSession(active),
+      status: 'waiting-for-user',
+      activities: [
+        {
+          id: 'ask-other',
+          kind: 'tool',
+          status: 'in_progress',
+          title: 'Other question',
+          eventIds: [],
+          sortIndex: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          promptMessageId: active.messages[0].id,
+          elicitation: {
+            state: 'pending',
+            message: 'Other question',
+            fields: [],
+            durable: { kind: 'agent-user-choice', requestId: 'other' }
+          }
+        }
+      ]
+    })
+    const graph = original.conversationGraph!
+    const sibling = { ...graph.branches[0], id: 'sibling', headMessageId: 'sibling-prompt' }
+    const selectedGraph = {
+      ...graph,
+      frames: graph.frames.map((frame) => ({ ...frame, activeBranchId: sibling.id })),
+      branches: [...graph.branches, sibling],
+      messages: [
+        ...graph.messages,
+        { ...graph.messages[0], id: sibling.headMessageId, introducedOnBranchId: sibling.id }
+      ]
+    }
+    const session = hydrateSession({
+      ...original,
+      conversationGraph: selectedGraph,
+      messages: resolveActiveConversationMessages(selectedGraph).map(projectConversationMessage),
+      ...resolveActiveConversationActivities(selectedGraph)
+    })
+    expect(session.activities ?? []).toHaveLength(0)
+    useSessionStore.setState({ sessions: [session], selectedSessionId: active.id })
+    expect(
+      canAdmitExistingWorkspacePrompt(
+        { pendingPermissions: [], promptInFlightSessionIds: [] },
+        { sessionId: active.id }
+      )
+    ).toBe(true)
+    await renderPage()
+    await act(async () =>
+      conversationProps.composer.actions.changeDoc(textDoc('Active branch draft'))
+    )
+    expect(conversationProps.elicitation.requests).toEqual([])
+    expect(conversationProps.conversation.availability.submit).toBe(true)
+    // A newly announced live wait may belong to this branch before its request arrives.
+    await act(async () =>
+      useSessionStore.setState({
+        sessions: [{ ...session, liveInteractionState: { permission: false, elicitation: true } }]
+      })
+    )
+    expect(conversationProps.conversation.availability.submit).toBe(false)
+    expect(
+      canAdmitExistingWorkspacePrompt(
+        { pendingPermissions: [], promptInFlightSessionIds: [] },
+        { sessionId: active.id }
+      )
+    ).toBe(false)
   })
 
   it('blocks further sends after an active Session exceeds the storage limit', async () => {
@@ -1438,6 +1520,47 @@ describe('WorkspacePage send gate while compacting', () => {
     expect(conversationProps.conversation.availability.submit).toBe(true)
   })
 
+  it('reports an automatic Stop failure on the affected Session when Lab sign-in expires', async () => {
+    runtime.cancelRun.mockRejectedValueOnce(new Error('Cancellation unavailable'))
+    runtime.promptInFlightSessionIds = ['sess-a']
+    useSessionStore.setState({
+      sessions: [
+        createSession({
+          agentConfiguration: {
+            providerId: 'builtin-lab',
+            model: 'lab:research-default',
+            reasoningEffort: 'default'
+          }
+        })
+      ],
+      selectedSessionId: 'sess-a'
+    })
+    useSettingsStore.setState({
+      activeProviderId: 'builtin-lab',
+      activeModel: 'lab:research-default',
+      providers: [
+        {
+          id: 'builtin-lab',
+          type: 'lab',
+          name: 'Lab',
+          models: ['lab:research-default'],
+          supportsImageInput: false,
+          hasKey: false,
+          needsKey: false
+        }
+      ],
+      lab: {
+        state: 'expired',
+        serverUrl: 'https://lab.example.com',
+        error: { code: 'expired' }
+      }
+    })
+    await renderPage()
+
+    expect(runtime.cancelRun).toHaveBeenCalledWith('sess-a')
+    expect(useWorkspaceOperationErrors.getState().errors['sess-a']).toBe('Cancellation unavailable')
+  })
+
   it('locks draft submission and message editing while a send prepares runtime adoption', async () => {
     await renderPage()
 
@@ -1689,6 +1812,69 @@ describe('WorkspacePage send gate while compacting', () => {
 
     expect(runtime.setMemoryEnabled).toHaveBeenCalledWith('sess-a', false)
     expect(conversationProps.view.actionError).toBe('Memory update failed')
+  })
+
+  it('hydrates a displayed page before changing automatic review', async () => {
+    const complete = toPersistedSession(createReviewableSession())
+    let resolve!: (session: PersistedChatSession) => void
+    const loadOne = vi.fn(
+      () =>
+        new Promise<PersistedChatSession>((done) => {
+          resolve = done
+        })
+    )
+    window.api.sessions = { loadOne } as never
+    useSessionStore.setState({
+      sessions: [
+        {
+          ...createReviewableSession(),
+          contentLoaded: false,
+          historyPage: { revision: 0, hasMore: true, totalItems: 80 }
+        }
+      ],
+      selectedSessionId: 'sess-a'
+    })
+    await renderPage()
+    act(() => conversationProps.agentControls.toggleAutoReview?.(true))
+    expect(loadOne).toHaveBeenCalledOnce()
+    expect(useSessionStore.getState().sessions[0].autoReviewEnabled).not.toBe(true)
+    await act(async () => {
+      resolve(complete)
+    })
+    const saved = toPersistedSession(useSessionStore.getState().sessions[0])
+    expect(saved.autoReviewEnabled).toBe(true)
+    expect(saved.messages).toEqual(complete.messages)
+  })
+
+  it('hydrates complete history before assembling a manual review from a displayed page', async () => {
+    const complete = toPersistedSession(createReviewableSession())
+    let resolve!: (session: PersistedChatSession) => void
+    const loadOne = vi.fn(
+      () =>
+        new Promise<PersistedChatSession>((done) => {
+          resolve = done
+        })
+    )
+    window.api.sessions = { loadOne } as never
+    useSessionStore.setState({
+      sessions: [
+        {
+          ...createReviewableSession(),
+          contentLoaded: false,
+          historyPage: { revision: 0, hasMore: true, totalItems: 80 }
+        }
+      ],
+      selectedSessionId: 'sess-a'
+    })
+    await renderPage()
+    act(() => conversationProps.workflows.review.request())
+    expect(loadOne).toHaveBeenCalledOnce()
+    expect(window.api.reviewer.run).not.toHaveBeenCalled()
+    await act(async () => {
+      resolve(complete)
+    })
+    expect(window.api.reviewer.run).toHaveBeenCalledOnce()
+    expect(useSessionStore.getState().sessions[0].contentLoaded).not.toBe(false)
   })
 
   it('locks a manual review request before the running event arrives', async () => {

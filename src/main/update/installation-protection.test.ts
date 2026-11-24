@@ -1,4 +1,5 @@
 import { realpath } from 'node:fs/promises'
+import { windowsProcessIsAlive } from '../windows-process-query'
 import { installationFs } from './installation-filesystem'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -16,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import {
+  captureInstallationHelperExit,
   advanceInstallationUpdate,
   advanceInstallationUpdateAsync,
   captureInstallationManifestAsync,
@@ -34,7 +36,10 @@ import {
   installationStateDirectory,
   registerInstallationRuntime
 } from './installation-protection'
-import { protectInstallationStartup } from '../../../packages/open-science/installation-startup.cjs'
+import {
+  installationHelperFlags,
+  protectInstallationStartup
+} from '../../../packages/open-science/installation-startup.cjs'
 import {
   inspectInstallationProcesses,
   inspectInstallationProcessesAsync
@@ -46,6 +51,11 @@ vi.mock('./installation-filesystem', async (original) => {
     installationFs: { ...fs, promises: { ...fs.promises, realpath: vi.fn(fs.promises.realpath) } }
   }
 })
+
+vi.mock('../windows-process-query', async (original) => ({
+  ...(await original<typeof import('../windows-process-query')>()),
+  windowsProcessIsAlive: vi.fn(() => true)
+}))
 
 // Boot-query integration is covered separately; lifecycle fixtures need a stable boot.
 vi.mock('../system-boot-identity', async (original) => ({
@@ -92,12 +102,66 @@ const fixture = (): {
   return { directory, entry, location, runtime, options }
 }
 beforeEach(() => {
+  vi.mocked(windowsProcessIsAlive).mockReset().mockReturnValue(true)
   vi.stubEnv('OPEN_SCIENCE_INSTALLATION_OWNER', process.env.OPEN_SCIENCE_INSTALLATION_OWNER)
   vi.stubEnv(
     'OPEN_SCIENCE_INSTALLATION_STATE_ROOT',
     process.env.OPEN_SCIENCE_INSTALLATION_STATE_ROOT
   )
 })
+
+describe.each(['preflight', 'begin', 'handoff'] as const)(
+  '%s Windows occupant recheck',
+  (phase) => {
+    it.each(['exited', 'alive', 'unreadable'] as const)(
+      'only admits a confirmed exit (%s)',
+      async (state) => {
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+        const f = fixture()
+        const pid = process.pid + 100000
+        const record =
+          phase === 'handoff'
+            ? beginInstallationUpdate({
+                ...f.options,
+                targetManifest: { version: f.options.targetVersion, files: {} }
+              })
+            : undefined
+        if (record) {
+          advanceInstallationUpdate(f.location, record.operationId, 'stopping')
+          advanceInstallationUpdate(f.location, record.operationId, 'stopped', true)
+        }
+        vi.mocked(windowsProcessIsAlive).mockImplementation(() => {
+          if (state === 'unreadable') throw new Error('Access denied')
+          return state === 'alive'
+        })
+        const attempt = async (): Promise<unknown> => {
+          if (phase === 'begin')
+            return beginInstallationUpdate({ ...f.options, inspectProcesses: () => [pid] })
+          if (record)
+            return advanceInstallationUpdateAsync(
+              f.location,
+              record.operationId,
+              'handoff',
+              undefined,
+              {
+                inspectProcesses: async () => [pid]
+              }
+            )
+          return inspectInstallationAvailability({
+            ...f.location,
+            inspectProcesses: async () => [pid]
+          })
+        }
+        if (state === 'exited') await attempt()
+        else
+          await expect(attempt()).rejects.toMatchObject({
+            reason: 'installation-busy',
+            recovery: { detail: 'foreign-process', blockingProcesses: [{ pid }] }
+          })
+      }
+    )
+  }
+)
 afterEach(() => {
   vi.mocked(installationFs.promises.realpath).mockReset().mockImplementation(realpath)
   vi.restoreAllMocks()
@@ -158,14 +222,7 @@ it.each(['home', 'explicit', 'environment', 'e2e'] as const)(
         }
       )
     try {
-      for (const flag of [
-        '--open-science-artifact-mcp',
-        '--open-science-notebook-mcp',
-        '--open-science-reviewer-mcp-proxy',
-        '--open-science-skill-import-mcp',
-        '--open-science-skill-runtime-mcp',
-        '--open-science-plan-mcp'
-      ]) {
+      for (const flag of installationHelperFlags) {
         const result = launch(flag)
         expect(result.status, result.stderr).toBe(0)
         expect(JSON.parse(result.stdout).configRoot).toBe(f.runtime.configRoot)
@@ -268,7 +325,19 @@ describe('installation protection', () => {
       configRoot: 'other',
       generation: 'other'
     })
-    expect(() => beginInstallationUpdate(f.options)).toThrow('Another service')
+    let error: unknown
+    try {
+      beginInstallationUpdate(f.options)
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toMatchObject({
+      reason: 'installation-busy',
+      recovery: {
+        detail: 'other-runtime',
+        blockingProcesses: [expect.objectContaining({ pid: process.pid })]
+      }
+    })
     other.release()
     const record = beginInstallationUpdate(f.options)
     expect(() => registerInstallationRuntime({ ...f.location, ...f.runtime })).toThrow(
@@ -352,6 +421,9 @@ it.runIf(process.platform === 'linux')(
   'blocks an unregistered bundled Node with rewritten argv until the actual process exits',
   async () => {
     const f = fixture()
+    const replaceIfIdle = vi.fn()
+    const probe = (): Promise<void> =>
+      inspectInstallationAvailability({ ...f.location, replaceIfIdle })
     const executable = join(f.location.installationRoot, 'node')
     copyFileSync(process.execPath, executable)
     const child = spawn(
@@ -369,13 +441,14 @@ it.runIf(process.platform === 'linux')(
       expect(await inspectInstallationProcessesAsync(f.location.installationRoot)).toContain(
         child.pid
       )
-      await expect(inspectInstallationAvailability(f.location)).rejects.toMatchObject({
+      await expect(probe()).rejects.toMatchObject({
         reason: 'installation-busy',
         recovery: {
           detail: 'foreign-process',
           blockingProcesses: [{ pid: child.pid }]
         }
       })
+      expect(replaceIfIdle).not.toHaveBeenCalled()
       expect(child.exitCode).toBeNull()
       expect(inspectInstallationUpdate(f.location)).toBeUndefined()
     } finally {
@@ -385,7 +458,8 @@ it.runIf(process.platform === 'linux')(
         await exited
       }
     }
-    await expect(inspectInstallationAvailability(f.location)).resolves.toBeUndefined()
+    await expect(probe()).resolves.toBeUndefined()
+    expect(replaceIfIdle).toHaveBeenCalledOnce()
   },
   15000
 )
@@ -494,10 +568,12 @@ it('admits authenticated current-runtime helpers before the gate but blocks hand
       inspectProcesses: () => [child.pid!],
       targetManifest: captureInstallationManifest(f.location.installationRoot, '2')
     })
+    const waitForHelpers = captureInstallationHelperExit(f.location, f.runtime)
     advanceInstallationUpdate(f.location, record.operationId, 'stopping')
     advanceInstallationUpdate(f.location, record.operationId, 'stopped', true)
     runtime.release()
     expect(() => advanceInstallationUpdate(f.location, record.operationId, 'handoff')).toThrow()
+    await expect(waitForHelpers()).rejects.toMatchObject({ reason: 'installation-busy' })
   } finally {
     const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
     child.kill('SIGKILL')

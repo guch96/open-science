@@ -1,10 +1,12 @@
+import type {
+  AgentFrameworkId,
+  ProviderValidationTarget,
+  ReadinessPreflight
+} from '../../shared/settings'
 import {
   providerValidationFailed,
-  providerValidationSucceeded,
-  type AgentFrameworkId,
-  type ProviderValidationTarget,
-  type ReadinessPreflight
-} from '../../shared/settings'
+  providerValidationSucceeded
+} from '../../shared/settings-runtime'
 import type { StoredProvider, StoredSettings } from './types'
 
 // Pure computation of the startup gates from stored settings plus a couple of injected checks.
@@ -26,7 +28,7 @@ export type PreflightInput = {
   agentFrameworkId: AgentFrameworkId
   // Whether a provider's current credentials are usable (subscription auth is checked by its owner;
   // custom credentials must still decrypt).
-  isProviderKeyUsable: (provider: StoredProvider) => boolean
+  isProviderKeyUsable: (provider: StoredProvider) => boolean | undefined
   // Whether the active provider can actually drive the selected framework (endpoint + provider-type
   // compatibility). Resolved by the caller, which has the vendor registry to derive official apiTypes.
   activeProviderCompatible: boolean
@@ -99,7 +101,7 @@ const computePreflight = ({
       : validationFailureCategory === 'ok'
         ? undefined
         : validationFailureCategory
-  const activeProviderKeyUsable = Boolean(activeProvider && isProviderKeyUsable(activeProvider))
+  const activeProviderKeyUsable = activeProvider && isProviderKeyUsable(activeProvider)
   const activeProviderReady = Boolean(
     activeProvider &&
     (activeValidationTarget
@@ -110,16 +112,11 @@ const computePreflight = ({
     activeProviderModelAvailable &&
     activeProviderCompatible
   )
-  const providerReason =
-    activeProvider && (validationFailureReason === 'credential_invalid' || !activeProviderKeyUsable)
-      ? ('credential_invalid' as const)
-      : activeProvider && validationFailureReason
-        ? validationFailureReason
-        : activeProvider && !activeProviderModelAvailable
-          ? ('model-not-found' as const)
-          : activeProvider && !activeProviderCompatible
-            ? ('incompatible' as const)
-            : undefined
+  let providerReason = validationFailureReason
+  if (activeProviderKeyUsable === undefined) providerReason = 'unknown'
+  else if (!activeProviderKeyUsable) providerReason = 'credential_invalid'
+  else if (!providerReason && !activeProviderModelAvailable) providerReason = 'model-not-found'
+  else if (!providerReason && !activeProviderCompatible) providerReason = 'incompatible'
   const providerReadiness = activeProviderReady
     ? ({ status: 'ready' } as const)
     : !activeProvider

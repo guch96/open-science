@@ -268,6 +268,7 @@
         "src/main/compute/connection-adapters.ts",
         "src/main/compute/credential-vault.ts",
         "src/main/compute/compute-service.ts",
+        "src/main/compute/external-compute-provider.ts",
         "src/main/compute/application-commands.ts",
         "src/main/compute/authentication-runtime.ts",
         "src/main/compute/compute-host-deletion-owner.ts",
@@ -354,6 +355,8 @@
       "externalImports": [
         "@aipoch/compute",
         "@aipoch/compute/node",
+        "@aipoch/compute/ray",
+        "@aipoch/compute/ray-endpoint",
         "@aipoch/diagnostics",
         "@aipoch/diagnostics/node",
         "node:crypto",
@@ -1678,7 +1681,8 @@
         "src/main/database/migrations/0048-pdf-annotation-sharing.ts",
         "src/main/database/migrations/0049-pascalcase-table-names.ts",
         "test/fixtures/application-database.ts",
-        "src/main/database/migrations/0050-literature-translation.ts"
+        "src/main/database/migrations/0050-literature-translation.ts",
+        "src/main/database/migrations/0059-session-history.ts"
       ],
       "layer": "host-owner",
       "sourceLayers": {
@@ -1830,7 +1834,9 @@
         "src/main/literature/document-reader.ts",
         "src/main/literature/full-text-index.ts",
         "src/main/literature/library-mcp-server.ts",
+        "src/main/literature/library-mcp-contract.ts",
         "src/main/literature/mcp-server.ts",
+        "src/main/literature/mcp-contract.ts",
         "src/main/literature/pdf-context.ts",
         "src/main/literature/pdf-importer.ts",
         "src/main/literature/pdf-structure/agent-reader.ts",
@@ -3181,7 +3187,9 @@
         "src/main/notebook/shell-process-ownership.windows-posix.ts",
         "src/main/notebook/shell-process.ts",
         "src/main/notebook/trust-bundle.ts",
-        "src/main/notebook/working-file-observer.ts"
+        "src/main/notebook/working-file-observer.ts",
+        "src/main/notebook/memory-policy-wsl.ts",
+        "src/main/notebook/memory-policy-wsl-reader.ts"
       ],
       "layer": "host-owner",
       "sourceLayers": {
@@ -3338,7 +3346,12 @@
         "src/main/notebook/package-boundaries.architecture.test.ts",
         "src/main/notebook/powershell-search-parser.test.ts",
         "src/main/notebook/analysis-file-evidence.test.ts",
-        "src/main/notebook-payload.integration.test.ts"
+        "src/main/notebook-payload.integration.test.ts",
+        "src/main/notebook/memory-policy-wsl.test.ts",
+        "src/main/notebook/memory-policy-wsl-reader.test.ts",
+        "src/main/notebook/memory-policy-wsl-reader.integration.test.ts",
+        "src/main/notebook/execution-admission.test.ts",
+        "src/main/notebook/shell-wsl-admission.test.ts"
       ],
       "externalImports": [
         "@aipoch/diagnostics/node",
@@ -4103,6 +4116,7 @@
         "src/renderer/src/pages/literature/imports/useLiteraturePdfStaging.tsx",
         "src/renderer/src/pages/literature/list/useLiteratureTable.ts",
         "src/renderer/src/pages/literature/detail/LiteratureBibliographicDetails.tsx",
+        "src/renderer/src/pages/literature/detail/LiteratureIdentifiers.tsx",
         "src/renderer/src/pages/literature/list/LiteratureCandidateDialog.tsx",
         "src/renderer/src/pages/literature/imports/useLiteratureImport.ts",
         "src/renderer/src/pages/literature/list/LiteratureSelection.tsx",
@@ -4220,6 +4234,7 @@
         "src/renderer/src/pages/literature/imports/useLiteraturePdfStaging.tsx": "presentation-adapter",
         "src/renderer/src/pages/literature/list/useLiteratureTable.ts": "presentation-adapter",
         "src/renderer/src/pages/literature/detail/LiteratureBibliographicDetails.tsx": "presentation-adapter",
+        "src/renderer/src/pages/literature/detail/LiteratureIdentifiers.tsx": "presentation-adapter",
         "src/renderer/src/pages/literature/list/LiteratureCandidateDialog.tsx": "presentation-adapter",
         "src/renderer/src/pages/literature/imports/useLiteratureImport.ts": "presentation-adapter",
         "src/renderer/src/pages/literature/list/LiteratureSelection.tsx": "presentation-adapter",
@@ -4332,7 +4347,8 @@
         "src/renderer/src/pages/onboarding/environment-check-presentation.ts",
         "src/renderer/src/pages/onboarding/onboarding-error.ts",
         "src/renderer/src/pages/onboarding/onboarding-test-utils.ts",
-        "src/renderer/src/pages/onboarding/startup-gate.ts"
+        "src/renderer/src/pages/onboarding/startup-gate.ts",
+        "src/renderer/src/pages/onboarding/use-provider-step-operation.ts"
       ],
       "layer": "presentation-runtime",
       "sourceLayers": {
@@ -4346,7 +4362,8 @@
         "src/renderer/src/pages/onboarding/environment-check-presentation.ts": "presentation-adapter",
         "src/renderer/src/pages/onboarding/onboarding-error.ts": "presentation-adapter",
         "src/renderer/src/pages/onboarding/onboarding-test-utils.ts": "presentation-adapter",
-        "src/renderer/src/pages/onboarding/startup-gate.ts": "presentation-adapter"
+        "src/renderer/src/pages/onboarding/startup-gate.ts": "presentation-adapter",
+        "src/renderer/src/pages/onboarding/use-provider-step-operation.ts": "presentation-adapter"
       },
       "consumerModules": [],
       "requiredTests": [
@@ -4817,6 +4834,7 @@
         "src/renderer/src/assets/provider-icons/codebuddy.svg",
         "src/renderer/src/assets/provider-icons/deepseek.svg",
         "src/renderer/src/assets/provider-icons/grok.svg",
+        "src/renderer/src/assets/provider-icons/kilo.svg",
         "src/renderer/src/assets/provider-icons/kimi.svg",
         "src/renderer/src/assets/provider-icons/minimax.svg",
         "src/renderer/src/assets/provider-icons/openai.svg",
@@ -5619,7 +5637,10 @@
         "src/main/session-persistence/turn-outcome-authority.ts",
         "src/main/session-persistence/record-facts.ts",
         "src/main/session-persistence/flush-protocol.ts",
-        "src/main/session-persistence/conversation-pdf-electron.ts"
+        "src/main/session-persistence/conversation-pdf-electron.ts",
+        "src/main/session-persistence/history-projection.ts",
+        "src/main/session-persistence/runtime-session-file.ts",
+        "src/main/session-persistence/runtime-session-mutation.ts"
       ],
       "layer": "host-owner",
       "sourceLayers": {},
@@ -5851,6 +5872,7 @@
         "src/renderer/src/pages/settings/MemoryPanel.tsx",
         "src/renderer/src/pages/settings/NetworkPanel.tsx",
         "src/renderer/src/pages/settings/NetworkProxyForm.tsx",
+        "src/renderer/src/pages/settings/NotebookNetworkAccessSummary.tsx",
         "src/renderer/src/pages/settings/NotebookNetworkDomainsForm.tsx",
         "src/renderer/src/pages/settings/NotebookNetworkProtectionBanner.preview.tsx",
         "src/renderer/src/pages/settings/NotebookNetworkProtectionBanner.tsx",
@@ -5886,7 +5908,7 @@
         "src/renderer/src/pages/settings/useWslSetupStatus.ts",
         "src/renderer/src/pages/settings/validation-message.ts",
         "src/renderer/src/pages/settings/ProviderTestResultCard.tsx",
-        "src/renderer/src/pages/settings/TrustedPrivateServices.tsx"
+        "src/renderer/src/pages/settings/NotebookNetworkAccessEditor.tsx"
       ],
       "layer": "presentation-runtime",
       "sourceLayers": {
@@ -5911,6 +5933,7 @@
         "src/renderer/src/pages/settings/MemoryPanel.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/NetworkPanel.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/NetworkProxyForm.tsx": "presentation-adapter",
+        "src/renderer/src/pages/settings/NotebookNetworkAccessSummary.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/NotebookNetworkDomainsForm.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/NotebookNetworkProtectionBanner.preview.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/NotebookNetworkProtectionBanner.tsx": "presentation-adapter",
@@ -5946,7 +5969,7 @@
         "src/renderer/src/pages/settings/useWslSetupStatus.ts": "presentation-adapter",
         "src/renderer/src/pages/settings/validation-message.ts": "presentation-adapter",
         "src/renderer/src/pages/settings/ProviderTestResultCard.tsx": "presentation-adapter",
-        "src/renderer/src/pages/settings/TrustedPrivateServices.tsx": "presentation-adapter"
+        "src/renderer/src/pages/settings/NotebookNetworkAccessEditor.tsx": "presentation-adapter"
       },
       "consumerModules": [],
       "requiredTests": [
@@ -6350,6 +6373,7 @@
         "src/renderer/src/assets/provider-icons/codebuddy.svg",
         "src/renderer/src/assets/provider-icons/deepseek.svg",
         "src/renderer/src/assets/provider-icons/grok.svg",
+        "src/renderer/src/assets/provider-icons/kilo.svg",
         "src/renderer/src/assets/provider-icons/kimi.svg",
         "src/renderer/src/assets/provider-icons/minimax.svg",
         "src/renderer/src/assets/provider-icons/openai.svg",
@@ -6554,7 +6578,11 @@
       ]
     },
     "skill_runtime_transport": {
-      "sources": ["src/main/skills/runtime-mcp-server.ts"],
+      "sources": [
+        "src/main/skills/runtime-mcp-config.ts",
+        "src/main/skills/runtime-mcp-constants.ts",
+        "src/main/skills/runtime-mcp-server.ts"
+      ],
       "layer": "host-owner",
       "sourceLayers": {},
       "consumerModules": ["settings_service_facade"],
@@ -6567,9 +6595,11 @@
         "src/main/host-layer-dependencies.architecture.test.ts"
       ],
       "externalImports": [
+        "@agentclientprotocol/sdk",
         "@aipoch/skills/projection",
         "@modelcontextprotocol/sdk/server/mcp.js",
         "@modelcontextprotocol/sdk/server/stdio.js",
+        "node:crypto",
         "node:path",
         "zod"
       ]
@@ -6998,7 +7028,8 @@
         "src/renderer/src/pages/workspace/WorkspaceActivityGroup.tsx",
         "src/renderer/src/pages/workspace/WorkspaceSkillActivityRow.tsx",
         "src/renderer/src/pages/workspace/agent-authentication-error.ts",
-        "src/renderer/src/pages/workspace/use-agent-authentication-recovery.ts"
+        "src/renderer/src/pages/workspace/use-agent-authentication-recovery.ts",
+        "src/renderer/src/pages/workspace/SessionHistoryLoadButton.tsx"
       ],
       "layer": "presentation-runtime",
       "sourceLayers": {
@@ -7042,7 +7073,8 @@
         "src/renderer/src/pages/workspace/WorkspaceActivityGroup.tsx": "presentation-adapter",
         "src/renderer/src/pages/workspace/WorkspaceSkillActivityRow.tsx": "presentation-adapter",
         "src/renderer/src/pages/workspace/agent-authentication-error.ts": "presentation-adapter",
-        "src/renderer/src/pages/workspace/use-agent-authentication-recovery.ts": "presentation-adapter"
+        "src/renderer/src/pages/workspace/use-agent-authentication-recovery.ts": "presentation-adapter",
+        "src/renderer/src/pages/workspace/SessionHistoryLoadButton.tsx": "presentation-adapter"
       },
       "consumerModules": [],
       "requiredTests": [
@@ -7292,6 +7324,8 @@
         "src/renderer/src/pages/workspace/previews/library-reference-actions.ts",
         "src/renderer/src/pages/workspace/previews/LibraryInboxPreview.tsx",
         "src/renderer/src/pages/workspace/previews/renderers/PdfTranslatedPage.tsx",
+        "src/renderer/src/pages/workspace/previews/renderers/PdfSelectionTranslation.tsx",
+        "src/renderer/src/pages/workspace/previews/renderers/pdf-translation-model-options.ts",
         "src/renderer/src/pages/workspace/previews/renderers/PdfTranslationControls.tsx",
         "src/renderer/src/pages/workspace/previews/renderers/PdfTranslationGlossaryEditor.tsx",
         "src/renderer/src/pages/workspace/previews/renderers/PdfTranslationPreparation.tsx",
@@ -7381,6 +7415,8 @@
         "src/renderer/src/pages/workspace/previews/library-reference-actions.ts": "presentation-adapter",
         "src/renderer/src/pages/workspace/previews/LibraryInboxPreview.tsx": "presentation-adapter",
         "src/renderer/src/pages/workspace/previews/renderers/PdfTranslatedPage.tsx": "presentation-adapter",
+        "src/renderer/src/pages/workspace/previews/renderers/PdfSelectionTranslation.tsx": "presentation-adapter",
+        "src/renderer/src/pages/workspace/previews/renderers/pdf-translation-model-options.ts": "presentation-adapter",
         "src/renderer/src/pages/workspace/previews/renderers/PdfTranslationControls.tsx": "presentation-adapter",
         "src/renderer/src/pages/workspace/previews/renderers/PdfTranslationGlossaryEditor.tsx": "presentation-adapter",
         "src/renderer/src/pages/workspace/previews/renderers/PdfTranslationPreparation.tsx": "presentation-adapter",
@@ -8139,20 +8175,25 @@
     "notebook_repository": {
       "sources": [
         "src/main/notebook/conditional-restore-script.ts",
+        "src/main/notebook/inline-run-window.ts",
         "src/main/notebook/input-staging.ts",
+        "src/main/notebook/pending-run-files.ts",
         "src/main/notebook/repository.ts",
         "src/main/notebook/run-document-data-path-codec.ts",
-        "src/main/notebook/run-document-data-paths.ts"
+        "src/main/notebook/run-document-data-paths.ts",
+        "src/main/notebook/run-record-reference.ts"
       ],
       "layer": "repository",
       "sourceLayers": {
         "src/main/notebook/conditional-restore-script.ts": "policy",
         "src/main/notebook/input-staging.ts": "host-infrastructure",
         "src/main/notebook/run-document-data-path-codec.ts": "record-codec",
-        "src/main/notebook/run-document-data-paths.ts": "application-service"
+        "src/main/notebook/run-document-data-paths.ts": "application-service",
+        "src/main/notebook/run-record-reference.ts": "record-codec"
       },
-      "consumerModules": [],
+      "consumerModules": ["main_session_package", "session_diagnostics"],
       "requiredTests": [
+        "src/main/notebook/inline-run-window.test.ts",
         "src/main/notebook/input-staging.test.ts",
         "src/main/notebook/repository.test.ts",
         "src/main/notebook/run-document-data-paths.test.ts",
@@ -8166,6 +8207,8 @@
       "externalImports": [
         "@aipoch/diagnostics/node",
         "@aipoch/durable-files",
+        "node:crypto",
+        "node:fs",
         "node:fs/promises",
         "node:path",
         "node:url"
@@ -8602,13 +8645,16 @@
         "src/renderer/src/pages/settings/ModelFrameworkCompatibilityAlert.tsx",
         "src/renderer/src/pages/settings/ModelPanel.tsx",
         "src/renderer/src/pages/settings/ProviderForm.tsx",
+        "src/renderer/src/pages/settings/ProviderKindPicker.tsx",
         "src/renderer/src/pages/settings/ProviderList.tsx",
         "src/renderer/src/pages/settings/ProvidersPanel.tsx",
         "src/renderer/src/pages/settings/ReasoningEffortSelect.tsx",
         "src/renderer/src/pages/settings/ScenarioModelList.tsx",
         "src/renderer/src/pages/settings/SubagentModelSelect.tsx",
         "src/renderer/src/pages/settings/provider-key-security.ts",
-        "src/renderer/src/pages/settings/ClassificationPanel.tsx"
+        "src/renderer/src/pages/settings/provider-picker-catalog.ts",
+        "src/renderer/src/pages/settings/ClassificationPanel.tsx",
+        "src/renderer/src/pages/settings/CodeBuddySubscriptionRow.tsx"
       ],
       "layer": "presentation-runtime",
       "sourceLayers": {
@@ -8619,13 +8665,16 @@
         "src/renderer/src/pages/settings/ModelFrameworkCompatibilityAlert.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/ModelPanel.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/ProviderForm.tsx": "presentation-adapter",
+        "src/renderer/src/pages/settings/ProviderKindPicker.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/ProviderList.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/ProvidersPanel.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/ReasoningEffortSelect.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/ScenarioModelList.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/SubagentModelSelect.tsx": "presentation-adapter",
         "src/renderer/src/pages/settings/provider-key-security.ts": "presentation-model",
-        "src/renderer/src/pages/settings/ClassificationPanel.tsx": "presentation-adapter"
+        "src/renderer/src/pages/settings/provider-picker-catalog.ts": "presentation-adapter",
+        "src/renderer/src/pages/settings/ClassificationPanel.tsx": "presentation-adapter",
+        "src/renderer/src/pages/settings/CodeBuddySubscriptionRow.tsx": "presentation-adapter"
       },
       "consumerModules": [],
       "requiredTests": [
@@ -8634,6 +8683,7 @@
         "src/renderer/src/pages/settings/ModelFrameworkCompatibilityAlert.render.test.tsx",
         "src/renderer/src/pages/settings/ModelPanel.render.test.tsx",
         "src/renderer/src/pages/settings/ProviderForm.render.test.tsx",
+        "src/renderer/src/pages/settings/ProviderKindPicker.render.test.tsx",
         "src/renderer/src/pages/settings/ProviderList.render.test.tsx",
         "src/renderer/src/pages/settings/ProvidersPanel.race.test.tsx",
         "src/renderer/src/pages/settings/ReasoningEffortSelect.render.test.tsx",
@@ -8643,11 +8693,13 @@
         "src/renderer/src/pages/settings/agent-home-import-i18n.render.test.tsx",
         "src/renderer/src/pages/settings/agent-panel-i18n.render.test.tsx",
         "src/renderer/src/pages/settings/model-panel-i18n.render.test.tsx",
+        "src/renderer/src/pages/settings/provider-picker-catalog.test.ts",
         "src/renderer/src/pages/settings/ClassificationPanel.render.test.tsx",
         "src/main/host-layer-dependencies.architecture.test.ts"
       ],
       "externalImports": [
         "@aipoch/providers",
+        "i18next",
         "lucide-react",
         "motion/react",
         "radix-ui",
@@ -9194,7 +9246,8 @@
       "sources": [
         "src/renderer/src/lib/session-persistence/session-persistence.ts",
         "src/renderer/src/lib/session-persistence/session-write-recovery.ts",
-        "src/renderer/src/lib/acp/runtime-writer-client.ts"
+        "src/renderer/src/lib/acp/runtime-writer-client.ts",
+        "src/renderer/src/lib/session-persistence/session-history.ts"
       ],
       "layer": "presentation-runtime",
       "sourceLayers": {},
@@ -10379,6 +10432,7 @@
         "src/main/connectors/custom-mcp-config.ts",
         "src/main/connectors/mcp-host-dependencies.ts",
         "src/main/connectors/molecule-artifact-adapter.ts",
+        "src/main/connectors/molecule-preview-tool.ts",
         "src/main/connectors/catalog.ts",
         "src/main/connector-reload.ts"
       ],
@@ -10902,11 +10956,17 @@
       "sources": [
         "src/main/settings/codex-auth.ts",
         "src/main/settings/crypto.ts",
-        "src/main/settings/provider-env.ts"
+        "src/main/settings/provider-env.ts",
+        "src/main/settings/codebuddy-auth.ts",
+        "src/main/settings/codebuddy-profile.ts"
       ],
       "layer": "application-service",
       "sourceLayers": {},
-      "consumerModules": ["settings_backend_resolution", "settings_service_facade"],
+      "consumerModules": [
+        "settings_backend_resolution",
+        "settings_service_facade",
+        "settings_provider_accounts"
+      ],
       "requiredTests": [
         "src/main/settings/codex-auth.test.ts",
         "src/main/settings/crypto.test.ts",
@@ -10917,7 +10977,8 @@
         "src/renderer/web/api-installer.test.ts",
         "src/shared/provider-reasoning-effort.test.ts",
         "src/shared/renderer-contract-catalog.test.ts",
-        "src/main/host-layer-dependencies.architecture.test.ts"
+        "src/main/host-layer-dependencies.architecture.test.ts",
+        "src/main/settings/codebuddy-auth.test.ts"
       ],
       "externalImports": [
         "@agentclientprotocol/sdk",
@@ -10928,7 +10989,8 @@
         "node:net",
         "node:os",
         "node:path",
-        "node:stream"
+        "node:stream",
+        "node:readline"
       ]
     },
     "acp_session_policy": {
@@ -11595,6 +11657,35 @@
         "src/main/host-layer-dependencies.architecture.test.ts"
       ],
       "externalImports": ["node:crypto", "node:util"]
+    },
+    "session_journal": {
+      "sources": [
+        "src/main/session-persistence/journal.ts",
+        "src/main/session-persistence/journal-codec.ts",
+        "src/main/session-persistence/session-record-codec.ts"
+      ],
+      "layer": "repository",
+      "sourceLayers": {
+        "src/main/session-persistence/journal-codec.ts": "record-codec",
+        "src/main/session-persistence/session-record-codec.ts": "record-codec"
+      },
+      "consumerModules": [],
+      "requiredTests": [
+        "src/main/session-persistence/journal-codec.test.ts",
+        "src/main/session-persistence/journal-history.test.ts",
+        "src/main/session-persistence/journal-prepared-write.test.ts",
+        "src/main/session-persistence/journal-text-events.test.ts",
+        "src/main/session-persistence/journal.test.ts",
+        "src/main/session-persistence/session-record-codec.test.ts",
+        "src/main/session-persistence/session-record-text-events.test.ts"
+      ],
+      "externalImports": [
+        "@aipoch/durable-files",
+        "node:fs",
+        "node:fs/promises",
+        "node:path",
+        "node:util"
+      ]
     },
     "harness_acp": {
       "sources": [

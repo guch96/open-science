@@ -39,6 +39,7 @@ import {
   isNativeWebFetchCandidate,
   isNativeWebSearchCandidate,
   trustedMcpToolIdentity,
+  isSchedulePermissionTool,
   withTrustedAutoOperation,
   withTrustedMcpToolIdentity,
   withTrustedNativeToolIdentity
@@ -102,6 +103,7 @@ type AuthorizedPermissionActionOrigin = Readonly<{
 type AcpPermissionContextOptions = {
   emitPermissionRequest: (request: AcpPermissionRequest) => void
   routing: {
+    webToolOperationFor?: (sessionId: string, identity: string) => 'search' | 'fetch' | undefined
     resolveAppSessionId: (providerSessionId: string) => string
     sessionSnapshot: (sessionId: string) =>
       | {
@@ -616,6 +618,13 @@ class AcpPermissionContext {
       // The authenticated Notebook host reviews finalized code at dispatch. Do not ask for a
       // language-wide grant here, or create a second approval before the host's one-shot decision.
       const response = await this.requestPermission(routedParams, {
+        hostWebOperation:
+          frameworkId === 'open-science-agent'
+            ? routing.webToolOperationFor?.(
+                appSessionId,
+                trustedMcpToolIdentity(normalizedParams) ?? ''
+              )
+            : undefined,
         notebookHostAdmission: Boolean(executionMethod),
         notebookBindingHostAdmission,
         profile: profileState?.selectedProfile ?? DEFAULT_PERMISSION_PROFILE,
@@ -755,6 +764,24 @@ class AcpPermissionContext {
 
   getPendingRequests(): AcpPermissionRequest[] {
     return this.broker.getPendingRequests()
+  }
+
+  getTaskPermissions(
+    ...args: Parameters<AcpPermissionBroker['getTaskPermissions']>
+  ): AcpPermissionRequest[] {
+    return this.broker.getTaskPermissions(...args)
+  }
+
+  respondTaskPermission(
+    ...args: Parameters<AcpPermissionBroker['respondTaskPermission']>
+  ): Promise<boolean> {
+    return this.broker.respondTaskPermission(...args)
+  }
+
+  pendingNotebookReviews(
+    sessionId: string
+  ): ReturnType<AcpPermissionBroker['pendingNotebookReviews']> {
+    return this.broker.pendingNotebookReviews(sessionId)
   }
 
   hasPendingForSession(sessionId: string): boolean {
@@ -1185,19 +1212,31 @@ class AcpPermissionContext {
       return this.restoreClaudeCodeMcpToolInput(params, sessionId, mcpServerNames)
     }
     if (framework === 'codebuddy') {
-      // Repair identity correlation only for this Auto change. Restoring unrelated CodeBuddy
-      // metadata would also change existing automatic rules and remembered-grant matching.
+      // Restore only identities used by Auto operations and scoped Schedule tools. Unrelated
+      // metadata must not change automatic rules or remembered-grant matching.
       const inputs = this.claudeCodeMcpToolInputs.get(sessionId)
       const input = inputs?.get(params.toolCall.toolCallId)
+      const requestName = extractProviderToolName(params.toolCall)
+      const requestIdentity = requestName
+        ? resolveCanonicalMcpToolIdentity(requestName, mcpServerNames)
+        : undefined
       if (
         !input ||
-        input.title !== params.toolCall.title ||
+        (input.title !== params.toolCall.title &&
+          !(
+            isSchedulePermissionTool(input.mcpIdentity) && requestIdentity === input.mcpIdentity
+          )) ||
         !isMcpToolName(input.title, mcpServerNames) ||
-        !APP_AUTO_OPERATION_IDENTITIES.has(input.mcpIdentity)
+        (!APP_AUTO_OPERATION_IDENTITIES.has(input.mcpIdentity) &&
+          !isSchedulePermissionTool(input.mcpIdentity))
       )
         return params
       inputs?.delete(params.toolCall.toolCallId)
       if (inputs?.size === 0) this.claudeCodeMcpToolInputs.delete(sessionId)
+      if (isSchedulePermissionTool(input.mcpIdentity)) {
+        if (requestName && requestIdentity !== input.mcpIdentity) return params
+        return withTrustedMcpToolIdentity(params, input.mcpIdentity)
+      }
       return withTrustedAutoOperation(params, input.mcpIdentity, input.rawInput)
     }
     if (framework === 'opencode') {

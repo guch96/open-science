@@ -405,6 +405,41 @@ beforeEach(() => {
 })
 
 describe('A03 unavailable permission downgrade projection', () => {
+  it('hydrates complete history before changing a permission profile from a displayed page', async () => {
+    useSessionStore.setState(createInitialSessionState())
+    useSessionStore.getState().appendUserMessage({
+      sessionId: 'session-1',
+      content: 'Earlier question',
+      permissionProfile: 'full'
+    })
+    useSessionStore.getState().finishRun('session-1')
+    const original = useSessionStore.getState().sessions[0]
+    const complete = toPersistedSession(original)
+    useSessionStore.setState({
+      sessions: [{ ...original, messages: [], conversationGraph: undefined, contentLoaded: false }]
+    })
+    let resolve!: (session: PersistedChatSession) => void
+    const loadOne = vi.fn(
+      () =>
+        new Promise<PersistedChatSession>((done) => {
+          resolve = done
+        })
+    )
+    window.api.sessions.loadOne = loadOne
+    const changed = setWorkspacePermissionProfile(
+      { state: createSnapshot([]), setPermissionProfile: vi.fn() },
+      'session-1',
+      'ask'
+    )
+    expect(loadOne).toHaveBeenCalledOnce()
+    expect(useSessionStore.getState().sessions[0].permissionProfile).toBe('full')
+    resolve(complete)
+    await expect(changed).resolves.toBe(true)
+    const saved = toPersistedSession(useSessionStore.getState().sessions[0])
+    expect(saved.messages).toEqual(complete.messages)
+    expect(saved.permissionProfile).toBe('ask')
+  })
+
   it.each(['empty snapshot', 'rejection'] as const)(
     'preserves the stored profile without notifying the saver after %s',
     async (failure) => {
@@ -793,14 +828,17 @@ describe('workspace agent runtime event processing', () => {
         presentation: createTimerPresentation()
       })
 
-      const drain = processor.process(createTextEvents(24))
+      const singleGraphemes = ['x', '\r\n', '👩‍🔬', '字']
+      const events = createTextEvents(24).map((event, i) => ({
+        ...event,
+        text: singleGraphemes[i % singleGraphemes.length]
+      }))
+      const drain = processor.process(events)
       await vi.advanceTimersByTimeAsync(200)
       await drain
 
       expect(visibleBatches.map(({ ids }) => ids.length)).toEqual([8, 8, 8])
-      expect(visibleBatches.flatMap(({ ids }) => ids)).toEqual(
-        createTextEvents(24).map((event) => event.id)
-      )
+      expect(visibleBatches.flatMap(({ ids }) => ids)).toEqual(events.map((event) => event.id))
       expect(
         visibleBatches
           .slice(1)
@@ -811,6 +849,31 @@ describe('workspace agent runtime event processing', () => {
       vi.useRealTimers()
     }
   })
+
+  it.each([
+    { extra: '', batches: [1, 1] },
+    { extra: '字', batches: [2] }
+  ])(
+    'bypasses pacing only above the Unicode backlog limit ($batches)',
+    async ({ extra, batches }) => {
+      const observed: number[] = []
+      const record = async (size: number): Promise<boolean> => {
+        observed.push(size)
+        return true
+      }
+      const processor = createWorkspaceRuntimeEventProcessor(() => record(1), {
+        applyEventBatch: (events) => record(events.length),
+        presentation: createTimerPresentation()
+      })
+      const text = 'e\u0301'.repeat(16_384)
+      const events = createTextEvents(2).map((event, i) => ({
+        ...event,
+        text: i === 0 ? text : text + extra
+      }))
+      await processor.process(events)
+      expect(observed).toEqual(batches)
+    }
+  )
 
   it('catches up before an ordinary tool boundary within four presentation frames', async () => {
     vi.useFakeTimers()
@@ -13464,7 +13527,7 @@ describe('manual native context compaction', () => {
     })
     expect(
       useWorkspaceOperationErrors.getState().errors[useSessionStore.getState().sessions[0].id]
-    ).toEqual(expect.any(String))
+    ).toBeUndefined()
   })
 })
 

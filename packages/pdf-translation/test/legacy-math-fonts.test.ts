@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { resolve } from './paths.js'
-import { PDFDocument, PDFDict, PDFName, StandardFonts } from 'pdf-lib'
+import { PDFDocument, PDFDict, PDFName, PDFString, StandardFonts } from 'pdf-lib'
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import { PdfTranslationWriter } from '../src/writer.js'
 import { TestCallerRegistry } from './support/callers.js'
@@ -551,6 +551,302 @@ it.each([
         await task.destroy()
       }
     } finally {
+      caller.release()
+      registry.dispose()
+    }
+  }
+)
+
+it.each([
+  'dense',
+  'separate-paragraph',
+  'changed-symbol',
+  'dense-ordinal',
+  'separate-ordinal',
+  'linked-ordinal'
+])('keeps an inline native alphabet beside compacted prose: %s', async (kind) => {
+  const pdf = await PDFDocument.create(),
+    prose = await pdf.embedFont(StandardFonts.TimesRoman),
+    alphabet = await pdf.embedFont(StandardFonts.TimesRomanItalic),
+    page = pdf.addPage([380, 220]),
+    ordinal = kind.endsWith('-ordinal'),
+    gap = kind === 'separate-paragraph' || kind === 'separate-ordinal' ? 24 : 12,
+    nativeX = ordinal ? 340 : 320,
+    source =
+      (ordinal ? '(6) ' : '') +
+      'Every measured network has the same interval representation for all k in N with the same independent labelling.',
+    translation = `${ordinal ? '(6) ' : ''}所有测量网络对于每个 k in ${kind === 'changed-symbol' ? 'R' : 'N'} 都具有相同的区间表示和独立标号。`,
+    registry = new TestCallerRegistry(),
+    caller = registry.acquire({ leaseId: 'inline-native-alphabet', surface: 'electron' })
+  if (ordinal) page.drawText('(6) ', { font: prose, size: 10, x: 40, y: 150 })
+  page.drawText('Every measured network has the same interval representation for all k in ', {
+    font: prose,
+    size: 10,
+    x: ordinal ? 56 : 40,
+    y: 150
+  })
+  page.drawText('N', { font: alphabet, size: 10, x: nativeX, y: 150 })
+  page.drawText('with the same independent labelling.', {
+    font: prose,
+    size: 10,
+    x: 40,
+    y: 150 - gap
+  })
+  page.drawText('Neighbor 17', { font: prose, size: 10, x: 40, y: 90 })
+  if (kind === 'linked-ordinal')
+    page.node.set(
+      PDFName.of('Annots'),
+      pdf.context.obj([
+        pdf.context.register(
+          pdf.context.obj({
+            Type: 'Annot',
+            Subtype: 'Link',
+            Rect: [39, 147, 55, 158],
+            Border: [0, 0, 0],
+            A: { S: 'URI', URI: PDFString.of('https://example.invalid/item') }
+          })
+        )
+      ])
+    )
+  await pdf.flush()
+  pdf.context.lookup(alphabet.ref, PDFDict).set(PDFName.of('BaseFont'), PDFName.of('MSBM10'))
+  let task: ReturnType<typeof getDocument> | undefined
+  try {
+    const output = new PdfTranslationWriter(() => resolve('resources/worker.mjs')).generate(
+      {
+        id: 'inline-native-alphabet',
+        data: await pdf.save(),
+        pages: [{ width: 380, height: 220 }],
+        units: [
+          {
+            source,
+            translation,
+            fragments: [
+              {
+                pageNumber: 1,
+                rect: {
+                  x: 39 / 380,
+                  y: 60 / 220,
+                  width: (ordinal ? 320 : 300) / 380,
+                  height: (gap + 18) / 220
+                }
+              }
+            ]
+          }
+        ]
+      },
+      caller.lease
+    )
+    if (kind === 'changed-symbol') {
+      await expect(output).rejects.toMatchObject({ failure: { code: 'annotations' } })
+      return
+    }
+    task = getDocument({ data: (await output)!, useSystemFonts: true })
+    const document = await task.promise,
+      items = (await (await document.getPage(1)).getTextContent()).items.filter(
+        (item) => 'str' in item
+      ),
+      letter = items.find((item) => item.str === 'N')!
+    expect(
+      items
+        .map((item) => item.str)
+        .join('')
+        .replace(/\s/gu, '')
+    ).toBe((translation + 'Neighbor 17').replace(/\s/gu, ''))
+    expect(letter.height).toBe(10)
+    if (kind === 'dense' || kind === 'dense-ordinal') expect(letter.transform[4]).toBeLessThan(250)
+    else expect(letter.transform.slice(4)).toEqual([nativeX, 150])
+    if (kind === 'linked-ordinal')
+      expect((await (await document.getPage(1)).getAnnotations())[0].rect).toEqual([
+        39, 147, 55, 158
+      ])
+    expect(items.find((item) => item.str === 'Neighbor 17')?.transform.slice(4)).toEqual([40, 90])
+  } finally {
+    await task?.destroy()
+    caller.release()
+    registry.dispose()
+  }
+})
+
+it.each([
+  ['same native codes', 'ABCDEF+SymbolMT', '\uf064与\uf077', undefined],
+  ['ordinary font', 'Helvetica', '\uf064与\uf077', 'font'],
+  ['different code order', 'ABCDEF+SymbolMT', '\uf077与\uf064', 'annotations'],
+  ['duplicate code', 'ABCDEF+SymbolMT', '\uf064与\uf077、\uf077', 'annotations']
+] as const)(
+  'retains native Windows Symbol objects within translated prose (%s)',
+  async (_, name, sequence, failure) => {
+    const pdf = await PDFDocument.create(),
+      prose = await pdf.embedFont(StandardFonts.TimesRoman),
+      symbols = await pdf.embedFont(StandardFonts.Helvetica),
+      page = pdf.addPage([300, 200]),
+      source = 'Reference \uf064 then \uf077 stays stable.',
+      translation = `参考值${sequence}保持稳定。`
+    let x = 40
+    for (const [index, text] of ['Reference ', '<', ' then ', '>', ' stays stable.'].entries()) {
+      const font = index % 2 ? symbols : prose
+      page.drawText(text, { font, size: 10, x, y: 150 })
+      x += font.widthOfTextAtSize(text, 10)
+    }
+    await pdf.flush()
+    const dictionary = pdf.context.lookup(symbols.ref, PDFDict)
+    dictionary.set(PDFName.of('BaseFont'), PDFName.of(name))
+    dictionary.set(
+      PDFName.of('ToUnicode'),
+      pdf.context.register(
+        pdf.context.stream(
+          '/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n' +
+            '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n' +
+            '/CMapName /PrivateSymbols def /CMapType 2 def\n' +
+            '1 begincodespacerange <00> <FF> endcodespacerange\n' +
+            '2 beginbfchar <3C> <F064> <3E> <F077> endbfchar\n' +
+            'endcmap CMapName currentdict /CMap defineresource pop end end'
+        )
+      )
+    )
+    const registry = new TestCallerRegistry(),
+      caller = registry.acquire({ leaseId: 'private-symbol', surface: 'electron' }),
+      writer = new PdfTranslationWriter(() => resolve('resources/worker.mjs')),
+      data = await pdf.save(),
+      original = getDocument({ data: data.slice(), useSystemFonts: true })
+    let target: ReturnType<typeof getDocument> | undefined
+    try {
+      const output = await writer.generateDetailed(
+        {
+          id: 'private-symbol',
+          data,
+          pages: [{ width: 300, height: 200 }],
+          preserveUnsupported: true,
+          units: [
+            {
+              source,
+              translation,
+              fragments: [
+                {
+                  pageNumber: 1,
+                  rect: { x: 39 / 300, y: 38 / 200, width: 210 / 300, height: 16 / 200 }
+                }
+              ]
+            }
+          ]
+        },
+        caller.lease
+      )
+      expect(output?.layoutFailures.map(({ code }) => code)).toEqual(failure ? [failure] : [])
+      target = getDocument({ data: output!.data.slice(), useSystemFonts: true })
+      const read = async (
+        loading: typeof original
+      ): Promise<import('pdfjs-dist/types/src/display/api').TextItem[]> =>
+        (await (await (await loading.promise).getPage(1)).getTextContent()).items.filter(
+          (item) => 'str' in item
+        )
+      const before = await read(original),
+        after = await read(target)
+      expect(
+        after
+          .map(({ str }) => str)
+          .join('')
+          .replace(/\s/gu, '')
+      ).toBe((failure ? source : translation).replace(/\s/gu, ''))
+      for (const symbol of ['\uf064', '\uf077']) {
+        const previous = before.find((item) => item.str === symbol),
+          current = after.find((item) => item.str === symbol)
+        expect(previous).toBeDefined()
+        expect(current).toBeDefined()
+        expect(current!.width).toBeCloseTo(previous!.width, 4)
+        expect(current!.height).toBeCloseTo(previous!.height, 4)
+        current!.transform
+          .slice(0, 4)
+          .forEach((value, axis) => expect(value).toBeCloseTo(previous!.transform[axis], 4))
+      }
+    } finally {
+      await original.destroy()
+      await target?.destroy()
+      caller.release()
+      registry.dispose()
+    }
+  }
+)
+
+it.each([
+  ['CMMI10', '\u033a (V)', true],
+  ['CMMI10', '\u033a (W)', false],
+  ['CMMI10', '\u033a (V) 和 \u033a (V)', false],
+  ['CMMI10', 'V', false],
+  ['Helvetica', '\u033a (V)', false]
+] as const)(
+  'keeps a legacy rho glyph only with its original function argument (%s / %s)',
+  async (fontName, target, placed) => {
+    const pdf = await PDFDocument.create(),
+      prose = await pdf.embedFont(StandardFonts.TimesRoman),
+      math = await pdf.embedFont(StandardFonts.TimesRomanItalic),
+      page = pdf.addPage([320, 200]),
+      registry = new TestCallerRegistry(),
+      caller = registry.acquire({ leaseId: 'native-rho' }),
+      writer = new PdfTranslationWriter(() => resolve('resources/worker.mjs'))
+    page.drawText('The sample uses ', { font: prose, x: 40, y: 150, size: 10 })
+    page.drawText('%', { font: math, x: 110, y: 150, size: 10 })
+    page.drawText(' (V) for calibration.', { font: prose, x: 120, y: 150, size: 10 })
+    page.drawText('Unrelated neighbor.', { font: prose, x: 40, y: 110, size: 10 })
+    await pdf.flush()
+    const font = pdf.context.lookup(math.ref, PDFDict)
+    font.set(PDFName.of('BaseFont'), PDFName.of(fontName))
+    font.set(
+      PDFName.of('ToUnicode'),
+      pdf.context.register(
+        pdf.context.stream(
+          '/CIDInit /ProcSet findresource begin 12 dict begin begincmap ' +
+            '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def ' +
+            '/CMapName /NativeRho def /CMapType 2 def ' +
+            '1 begincodespacerange <00> <FF> endcodespacerange ' +
+            '1 beginbfchar <25> <033A> endbfchar ' +
+            'endcmap CMapName currentdict /CMap defineresource pop end end'
+        )
+      )
+    )
+    let result: ReturnType<typeof getDocument> | undefined
+    try {
+      const data = await pdf.save(),
+        source = 'The sample uses \u033a (V) for calibration.',
+        translation = `以 ${target} 校准样品。`,
+        output = await writer.generateDetailed(
+          {
+            id: 'native-rho',
+            data,
+            pages: [{ width: 320, height: 200 }],
+            preserveUnsupported: true,
+            preserveUnmatched: true,
+            units: [
+              {
+                source,
+                translation,
+                fragments: [
+                  {
+                    pageNumber: 1,
+                    rect: { x: 39 / 320, y: 37 / 200, width: 250 / 320, height: 22 / 200 }
+                  }
+                ]
+              }
+            ]
+          },
+          caller.lease
+        )
+      expect(output!.layoutFailures).toHaveLength(placed ? 0 : 1)
+      result = getDocument({ data: output!.data.slice(), useSystemFonts: true })
+      const text = (await (await (await result.promise).getPage(1)).getTextContent()).items.filter(
+        (item) => 'str' in item
+      )
+      expect(
+        text
+          .map((item) => item.str)
+          .join('')
+          .replace(/\s/gu, '')
+      ).toBe(((placed ? translation : source) + 'Unrelated neighbor.').replace(/\s/gu, ''))
+      expect(text.find((item) => item.str === 'Unrelated neighbor.')?.transform.slice(4)).toEqual([
+        40, 110
+      ])
+    } finally {
+      await result?.destroy()
       caller.release()
       registry.dispose()
     }

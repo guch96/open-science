@@ -11,7 +11,13 @@ import type {
 } from '../../shared/artifacts'
 import { runPendingFileTransaction } from './pending-file-transaction'
 import { parseArtifactRunFinalizationMarker } from './run-marker-codec'
-import { METADATA_DIR, PENDING_DIR, RUNS_DIR, SAFE_SEGMENT_PATTERN } from './storage-layout'
+import {
+  METADATA_DIR,
+  PENDING_DIR,
+  RUNS_DIR,
+  SAFE_SEGMENT_PATTERN,
+  normalizeArtifactFilename
+} from './storage-layout'
 import type {
   ArtifactPublicationStorage,
   ArtifactRunFinalizationMarker,
@@ -25,6 +31,7 @@ import type {
   PrepareArtifactRunFinalizationRequest
 } from './publication-types'
 import type { FileDigest } from '../bounded-file-io'
+import type { PendingFileTransactionRequest } from './pending-file-contract'
 import type { PendingFileBudgetReservation } from './pending-file-transaction'
 import { assertDiskReserve, copyFileWithinBudget, digestFileWithinBudget } from '../bounded-file-io'
 import { LOCAL_RESOURCE_BUDGETS } from '../resource-budget'
@@ -87,8 +94,9 @@ class ArtifactPublicationOwner {
     input: PendingArtifactVersionRoutingRequest
   ): Promise<void> {
     const request = this.normalizeRoutingRequest(input)
-    const { projectId, sessionId, runId, filename, routing } = request
+    const { projectId, sessionId, runId, routing } = request
     const directory = this.storage.getPendingRunDir(projectId, sessionId, runId)
+    const filename = await this.storage.resolveArtifactFilename(directory, request.filename)
     const filePath = join(directory, filename)
     await mkdir(directory, { recursive: true })
     const existing = await this.storage.readArtifactMetadata(directory, filename)
@@ -115,7 +123,7 @@ class ArtifactPublicationOwner {
       ).checksum
     } catch (error) {
       if (!this.storage.isMissingFileError(error)) throw error
-      const temporaryPath = `${filePath}.${randomUUID()}.tmp`
+      const temporaryPath = join(directory, `.${randomUUID()}.tmp`)
       try {
         const source = await stat(request.sourcePath)
         assertDiskReserve(
@@ -144,7 +152,7 @@ class ArtifactPublicationOwner {
       if (existingRouting || !request.replaceUnroutedBytes) {
         throw new Error('Artifact pending bytes conflict with Version routing.')
       }
-      const replacementPath = `${filePath}.${randomUUID()}.tmp`
+      const replacementPath = join(directory, `.${randomUUID()}.tmp`)
       try {
         const source = await stat(request.sourcePath)
         assertDiskReserve(
@@ -265,7 +273,7 @@ class ArtifactPublicationOwner {
   }
 
   async withPendingFileTransaction<Result>(
-    request: WritePendingArtifactFileRequest,
+    request: PendingFileTransactionRequest,
     options: PendingFileTransactionOptions,
     operation: (
       artifact: ArtifactFile,
@@ -282,21 +290,27 @@ class ArtifactPublicationOwner {
       runId: this.storage.assertSafePathSegment(request.runId),
       filename: this.storage.assertSafeFilename(request.filename)
     }
-    return this.withPendingFileWriteLock(this.writeKey(normalized), () =>
-      runPendingFileTransaction<Result, PendingArtifactVersionRouting>({
-        request: normalized,
+    return this.withPendingFileWriteLock(this.writeKey(normalized), async () => {
+      // Resolve after acquiring the alias lock: an earlier writer may have created the entry.
+      const filename = await this.storage.resolveArtifactFilename(
+        this.storage.getPendingRunDir(normalized.projectId, normalized.sessionId, normalized.runId),
+        normalized.filename
+      )
+      const storedRequest = { ...normalized, filename }
+      return runPendingFileTransaction<Result, PendingArtifactVersionRouting>({
+        request: storedRequest,
         writeOptions: options,
         storage: this.storage,
         publishRouting: (routing, sourcePath) =>
           this.publishPendingVersionRoutingLocked({
-            ...normalized,
+            ...storedRequest,
             sourcePath,
             routing,
             signal: options.signal
           }),
         operation
       })
-    )
+    })
   }
 
   private writeKey(request: {
@@ -305,7 +319,11 @@ class ArtifactPublicationOwner {
     runId: string
     filename: string
   }): string {
-    return `${request.projectId}\0${request.sessionId}\0${request.runId}\0${request.filename}`
+    // Windows native aliases can differ beyond case folding. Serialize the run so an alias
+    // cannot look absent while another transaction has moved its body into a backup.
+    // Storage keys continue to use their physical spelling on every platform.
+    const filename = process.platform === 'win32' ? '' : normalizeArtifactFilename(request.filename)
+    return `${request.projectId}\0${request.sessionId}\0${request.runId}\0${filename}`
   }
 
   private async withPendingFileWriteLock<Result>(

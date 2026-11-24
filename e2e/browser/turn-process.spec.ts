@@ -5,7 +5,9 @@ test('completed turn can expand and collapse with keyboard while retaining the f
 }) => {
   await page.goto('/turn-process.html')
   const toggle = page.getByRole('button', { name: '2 previous messages', exact: true })
+  const tools = page.locator('[data-message-id^="activity-group-tool-"]')
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(tools).toHaveCount(0)
   await expect(
     page.getByText('I’ll check the data structure and missing values first.')
   ).toHaveCount(0)
@@ -13,11 +15,16 @@ test('completed turn can expand and collapse with keyboard while retaining the f
   await toggle.focus()
   await page.keyboard.press('Enter')
   await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(tools).toHaveCount(2)
+  await expect(tools.nth(0)).toBeVisible()
+  await expect(tools.nth(1)).toBeVisible()
   await expect(
     page.getByText('I’ll check the data structure and missing values first.')
   ).toBeVisible()
   await page.keyboard.press('Space')
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(tools).toHaveCount(0)
+  await expect(page.getByText('Data checks are complete.', { exact: true })).toBeVisible()
 })
 
 test('failed turn retains the error and last partial output outside its disclosure', async ({
@@ -75,6 +82,13 @@ test('sending from history preserves the reading position until the end button i
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   const dots = end.locator('[aria-hidden="true"] > span')
   await expect(dots).toHaveCount(3)
+  await expect(dots.first()).toBeVisible()
+  await end.hover()
+  await expect(dots.first()).toBeHidden()
+  await expect(end.locator('svg')).toBeVisible()
+  await viewport.hover({ position: { x: 10, y: 10 } })
+  await expect(dots.first()).toBeVisible()
+  await expect(end.locator('svg')).toBeHidden()
   await expect(viewport.locator('[data-message-id="new-prompt"]')).toBeAttached()
   expect(await scrollTop()).toBe(0)
   await page.getByRole('button', { name: 'Finish' }).click()

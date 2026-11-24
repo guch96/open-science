@@ -1,3 +1,8 @@
+import {
+  registerScheduleCommands,
+  scheduleCommandGroup,
+  type ScheduleCommands
+} from './schedules/application-commands'
 import { allowedDuringServiceStop } from './service-command-admission'
 import { ApplicationCommandError } from '../shared/application-command-contract'
 import {
@@ -160,6 +165,7 @@ type ApplicationCommandCompositionDependencies = Readonly<{
   memory: MemoryCommandOwner
   specialist: SpecialistApplicationOwner
   literature: LiteratureCommandOwner
+  schedules: ScheduleCommands
   bookmarks: BookmarkCommandOwner
   sessionReplay: SessionReplayCommandOwner
   pdfAnnotations: PdfAnnotationCommandOwner
@@ -168,9 +174,11 @@ type ApplicationCommandCompositionDependencies = Readonly<{
 }>
 
 const ELECTRON_NATIVE_COMMAND_NAMES = Object.freeze([
+  'acp:continue-notebook-execution',
   'resource-recording:get-state',
   'resource-recording:start',
   'resource-recording:stop',
+  'research-video:active-sessions',
   'research-video:start',
   'research-video:status',
   'research-video:remove',
@@ -180,6 +188,13 @@ const ELECTRON_NATIVE_COMMAND_NAMES = Object.freeze([
   'office-preview:attach-frame',
   'office-preview:close',
   'office-preview:report-state',
+  'pptx-edit:open',
+  'pptx-edit:apply',
+  'pptx-edit:save',
+  'pptx-edit:close',
+  'pptx-draft:get',
+  'pptx-draft:accept',
+  'pptx-draft:reject',
   'preview-resources:export-research-video',
   'preview-resources:cancel-research-video-export',
   'preview-resources:research-video-progress',
@@ -231,12 +246,14 @@ const ELECTRON_NATIVE_COMMAND_NAMES = Object.freeze([
   'artifacts:list-reproducibility-receipts',
   'artifacts:start-reproducibility-check',
   'artifacts:cancel-reproducibility-check',
+  'artifacts:open-in-browser',
 
   'locale:initialize',
   'locale:set-preference',
   'network:get-info',
   'network:check-connectivity',
   'managed-file-versions:save-text-edit',
+  'managed-file-versions:save-binary-edit',
   'managed-file-versions:diff-text',
   'managed-file-versions:cancel-diff',
   'background-result-delivery:session-activity',
@@ -250,7 +267,6 @@ const ELECTRON_NATIVE_COMMAND_NAMES = Object.freeze([
   'remote-access:set-pinggy-token',
   'remote-access:set-pinggy-region',
   'sessions:export-conversation',
-  'sessions:fork',
   'sessions:inspect-diagnostics',
   'sessions:export-diagnostics',
   'sessions:cancel-diagnostics',
@@ -275,6 +291,10 @@ const TASK_COMMAND_NAMES = Object.freeze([
   'settings:bootstrap',
   'cli:install',
   'settings:get-preflight',
+  'notebook-env:status',
+  'notebook-env:provision',
+  'settings:get-notebook-network-status',
+  'notebook:memory-policy-state',
   'settings:list-skills',
   'settings:list-connectors',
   'settings:get-connector-detail',
@@ -295,6 +315,7 @@ const TASK_COMMAND_NAMES = Object.freeze([
   'settings:get-settings',
   'settings:set-agent-routing',
   'sessions:load-all',
+  'sessions:load-one',
   'sessions:save-session',
   'sessions:bind-task-session',
   'sessions:admit-task-turn',
@@ -310,6 +331,7 @@ const TASK_COMMAND_NAMES = Object.freeze([
   'reviewer:run',
   'artifacts:finalize-run',
   'artifacts:resolve-version-descriptors',
+  'managed-file-versions:inspect',
   'preview-resources:acquire',
   'preview-resources:release'
 ])
@@ -394,6 +416,9 @@ const createApplicationCommandModules = (
     ),
     defineApplicationCommandModule([literatureApplicationCommandGroup], (registrar) =>
       registerLiteratureApplicationCommands(registrar, dependencies.literature)
+    ),
+    defineApplicationCommandModule([scheduleCommandGroup], (registrar) =>
+      registerScheduleCommands(registrar, dependencies.schedules)
     ),
     defineApplicationCommandModule([bookmarkApplicationCommandGroup], (registrar) =>
       registerBookmarkApplicationCommands(registrar, dependencies.bookmarks)
@@ -545,13 +570,27 @@ const createApplicationCommandComposition = (
   onDiagnostic?: (diagnostic: ApplicationCommandDiagnostic) => void
 ): ApplicationCommandComposition => {
   const remoteAccess = createRemoteAccessSlot()
-  const modules = createApplicationCommandModules(dependencies, remoteAccess.owner)
+  let stopping = false
+  let updateHolds = 0
+  const modules = createApplicationCommandModules(
+    {
+      ...dependencies,
+      notebook: {
+        ...dependencies.notebook,
+        resourceReleaseBlockedReason: () =>
+          stopping
+            ? 'application-stopping'
+            : updateHolds > 0
+              ? 'application-updating'
+              : dependencies.notebook.resourceReleaseBlockedReason?.()
+      }
+    },
+    remoteAccess.owner
+  )
   const certified = certifyInventory(modules.flatMap(({ groups }) => groups))
   const router = createApplicationCommandRouter(onDiagnostic)
   const installations: CommandModuleInstallation[] = []
   let disposal: Promise<void> | undefined
-  let stopping = false
-  let updateHolds = 0
 
   try {
     for (const module of modules) installations.push(module.install(router.registrar))

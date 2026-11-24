@@ -1,4 +1,12 @@
 import type {
+  ImageTask,
+  ImageTaskStart,
+  ImageTaskList,
+  ImageTaskIdentity,
+  ImageTaskStartResult
+} from '../image-task'
+import type {
+  ResearchVideoActiveSession,
   ResearchVideoPresentationRequest,
   ResearchVideoStartRequest,
   ResearchVideoStatusRequest,
@@ -6,7 +14,8 @@ import type {
 } from '../research-video-presentation'
 import type {
   ResearchVideoProgress,
-  ResearchVideoExportResult
+  ResearchVideoExportResult,
+  ResearchVideoResolution
 } from '@aipoch/research-film/contracts'
 import type { PdfReconcileRequest, PdfSharingPreview } from '../pdf-annotations'
 // Ordered fragments keep the public registration order when capabilities interleave.
@@ -32,6 +41,21 @@ import type {
   SavePreviewStateRequest
 } from '../preview-state'
 
+import type { SaveTextEditResult } from '../managed-file-versions'
+import type {
+  PptxEditSessionApplyRequest,
+  PptxEditSessionOpenRequest,
+  PptxEditSessionResult,
+  PptxEditSessionSaveRequest,
+  PptxEditSessionView
+} from '../pptx-edit-session'
+import type {
+  PptxDraftAcceptOutcome,
+  PptxDraftChangedEvent,
+  PptxDraftReviewRequest,
+  PptxDraftSummary
+} from '../pptx-draft'
+import type { ManagedFileIdentity } from '../managed-file-versions'
 import type {
   OfficePreviewAttachResult,
   OfficePreviewOpenRequest,
@@ -103,7 +127,56 @@ export const officePreviewAttachFrameContracts = {
   >()('office-preview', ['office-preview:report-state', SEND])
 } as const
 
+export const pptxEditContracts = {
+  'pptxEdit.apply': callable<
+    (request: PptxEditSessionApplyRequest) => Promise<PptxEditSessionResult<PptxEditSessionView>>
+  >()('pptx-edit', ['pptx-edit:apply', ELECTRON]),
+  'pptxEdit.close': callable<(sessionId: string) => Promise<void>>()('pptx-edit', [
+    'pptx-edit:close',
+    ELECTRON
+  ]),
+  'pptxEdit.open': callable<
+    (request: PptxEditSessionOpenRequest) => Promise<PptxEditSessionResult<PptxEditSessionView>>
+  >()('pptx-edit', ['pptx-edit:open', ELECTRON]),
+  'pptxEdit.save': callable<
+    (request: PptxEditSessionSaveRequest) => Promise<PptxEditSessionResult<SaveTextEditResult>>
+  >()('pptx-edit', ['pptx-edit:save', ELECTRON])
+} as const
+
+export const pptxDraftContracts = {
+  'pptxDraft.accept': callable<
+    (request: PptxDraftReviewRequest) => Promise<PptxDraftAcceptOutcome>
+  >()('pptx-draft', ['pptx-draft:accept', ELECTRON]),
+  'pptxDraft.get': callable<(identity: ManagedFileIdentity) => Promise<PptxDraftSummary | null>>()(
+    'pptx-draft',
+    ['pptx-draft:get', ELECTRON]
+  ),
+  'pptxDraft.onChanged': callable<
+    (listener: AcpListener<PptxDraftChangedEvent>) => RemoveListener
+  >()('pptx-draft', ['pptx-draft:changed', EVENT]),
+  'pptxDraft.reject': callable<(request: PptxDraftReviewRequest) => Promise<boolean>>()(
+    'pptx-draft',
+    ['pptx-draft:reject', ELECTRON]
+  )
+} as const
+
 export const previewDeleteContracts = {
+  'imageTasks.start': callable<(request: ImageTaskStart) => Promise<ImageTaskStartResult>>()(
+    'preview-resources',
+    ['image-tasks:start']
+  ),
+  'imageTasks.get': callable<(request: ImageTaskIdentity) => Promise<ImageTask | undefined>>()(
+    'preview-resources',
+    ['image-tasks:get']
+  ),
+  'imageTasks.list': callable<(request: ImageTaskList) => Promise<ImageTask[]>>()(
+    'preview-resources',
+    ['image-tasks:list']
+  ),
+  'imageTasks.cancel': callable<(request: ImageTaskIdentity) => Promise<void>>()(
+    'preview-resources',
+    ['image-tasks:cancel']
+  ),
   'preview.delete': callable<(request: DeletePreviewStateRequest) => Promise<void>>()('preview', [
     'preview:delete'
   ]),
@@ -124,8 +197,15 @@ export const previewDeleteContracts = {
     (request: ReadManagedPreviewRangeRequest) => Promise<ManagedPreviewRangeResult>
   >()('preview-resources', ['preview-resources:read-range']),
   'previewResources.exportResearchVideo': callable<
-    (request: { resourceId: string }) => Promise<ResearchVideoExportResult>
+    (request: {
+      resourceId: string
+      resolution?: ResearchVideoResolution
+    }) => Promise<ResearchVideoExportResult>
   >()('preview-resources', ['preview-resources:export-research-video', ELECTRON]),
+  'researchVideo.activeSessions': callable<() => Promise<readonly ResearchVideoActiveSession[]>>()(
+    'preview-resources',
+    ['research-video:active-sessions', ELECTRON]
+  ),
   'researchVideo.start': callable<
     (request: ResearchVideoStartRequest) => Promise<ResearchVideoPresentationStatus>
   >()('preview-resources', ['research-video:start', ELECTRON]),
@@ -139,6 +219,9 @@ export const previewDeleteContracts = {
     'preview-resources',
     ['research-video:cancel', ELECTRON]
   ),
+  'researchVideo.onActivityChanged': callable<
+    (listener: (sessions: readonly ResearchVideoActiveSession[]) => void) => RemoveListener
+  >()('preview-resources', ['research-video:activity-changed', ELECTRON_EVENT]),
   'previewResources.researchVideoExportProgress': callable<
     (request: { resourceId: string }) => Promise<ResearchVideoProgress | null>
   >()('preview-resources', ['preview-resources:research-video-progress', ELECTRON]),

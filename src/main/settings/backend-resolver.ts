@@ -19,7 +19,7 @@ import {
   DEFAULT_REASONING_EFFORT,
   isCodexSubscriptionProvider,
   usesAppProviderTransport
-} from '../../shared/settings'
+} from '../../shared/settings-runtime'
 import {
   getAgentFramework,
   releaseResolvedAgentBackendLeases,
@@ -32,7 +32,7 @@ import { codeBuddyStorageDir } from '../agent-framework/codebuddy'
 import { codexStorageDir, codexSubscriptionStorageDir } from '../agent-framework/codex'
 import { opencodeConfigDir } from '../agent-framework/opencode'
 import { renderConnectorInstructions } from '../connectors/skill-document-renderer'
-import { OPEN_SCIENCE_SKILL_RUNTIME_SESSION_OPTION } from '../skills/runtime-mcp-server'
+import { OPEN_SCIENCE_SKILL_RUNTIME_SESSION_OPTION } from '../skills/runtime-mcp-constants'
 import type { AgentRuntimeManager } from './agent-runtime-manager'
 import { BackendRoutePlanner } from './backend-route-planner'
 import {
@@ -50,8 +50,7 @@ import {
   type ProviderRuntimeTarget,
   type RuntimeProviderModelSelection
 } from './provider-accounts'
-import type { ResolvedProvider } from './provider-env'
-import { buildProviderEnv } from './provider-env'
+import { buildProviderEnv, resolveProviderOutputLimit, type ResolvedProvider } from './provider-env'
 import {
   ProviderTransportOwner,
   type ProviderTransportOwnerOptions
@@ -74,6 +73,8 @@ export type AgentBackendResolutionContext = {
   includeSkillAndConnectorContext?: boolean
   forceCodexNativeResponsesCompatibility?: boolean
   isolateConfiguration?: boolean
+  // A disposable single-target runtime can set a process-wide output budget safely.
+  useResolvedModelOutputLimit?: boolean
 }
 
 const userSkillDirectorySystemPromptAppend = (storageRoot: string): string =>
@@ -441,6 +442,7 @@ export class AgentBackendResolver {
         return {
           framework,
           providerId: target.providerId,
+          providerName: target.providerName,
           backendId: `open-science-agent:${target.providerId}`,
           modelRoute: 'open-science-agent',
           executablePath,
@@ -538,6 +540,8 @@ export class AgentBackendResolver {
     ) {
       throw new Error(CLAUDE_SHARED_DISCONNECTED_MESSAGE)
     }
+    if (target.providerType === 'codebuddy-subscription' && target.disconnectedAt !== undefined)
+      throw new Error('Connect your CodeBuddy CLI account in Settings.')
     const plan = this.planner.planBackend({
       settings,
       frameworkId,
@@ -567,14 +571,25 @@ export class AgentBackendResolver {
         context.skillWhitelist,
         context.isolateConfiguration
       )
+      const outputLimit =
+        context.useResolvedModelOutputLimit && usesAppProviderTransport(target.provider.type)
+          ? resolveProviderOutputLimit({ ...target.provider, model: target.effectiveModel })
+          : undefined
       const transport = await this.transports.acquire({ activeTarget: target, plan })
       return {
         framework,
         providerId: target.providerId,
+        providerName: target.providerName,
         backendId: `${framework.id}:${target.providerId}`,
         modelRoute,
         executablePath: claudeExecutablePath,
-        env: { ...envOverrides, ...(transport.environment ?? {}) },
+        env: {
+          ...envOverrides,
+          ...(transport.environment ?? {}),
+          ...(outputLimit === undefined
+            ? {}
+            : { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(outputLimit) })
+        },
         sessionOptions,
         sessionEffort,
         contextWindow,
@@ -619,7 +634,11 @@ export class AgentBackendResolver {
             skillsRoot,
             forcedSkillIds,
             context.skillWhitelist,
-            ...(framework.id === 'codebuddy' ? [{ directoryLayout: 'agent-facing' as const }] : [])
+            ...(framework.id === 'codebuddy'
+              ? [{ directoryLayout: 'agent-facing' as const }]
+              : framework.id === 'opencode' && opencodeMajorVersion === 2
+                ? [{ directoryLayout: 'agent-facing-shared' as const }]
+                : [])
           )
         : skillDiscovery
       connectorInstructions = includeSkillAndConnectorContext ? renderConnectorInstructions() : ''
@@ -679,6 +698,10 @@ export class AgentBackendResolver {
       return {
         framework,
         providerId: target.providerId,
+        providerName: target.providerName,
+        ...(provider.codeBuddyAuthMode === 'shared' && provider.codeBuddySite
+          ? { codeBuddySharedSite: provider.codeBuddySite }
+          : {}),
         ...(codexSubscriptionTransport ? { codexSubscriptionTransport } : {}),
         backendId: `${framework.id}:${backendProviderId}`,
         modelRoute,
@@ -716,6 +739,9 @@ export class AgentBackendResolver {
           : {}),
         sessionModel,
         ...((framework.id === 'pi' ||
+          (modelRoute === 'codebuddy-subscription' &&
+            (modelSelection.kind === 'required' ||
+              (modelSelection.kind === 'configured' && modelSelection.requestedModel))) ||
           (framework.id === 'codex' && isCodexSubscriptionProvider(provider.type))) &&
         sessionModel
           ? { sessionModelRequired: true }

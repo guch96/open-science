@@ -1,6 +1,11 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { CredentialRequestBroker } from '../connectors/credential-request-broker'
+import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
+import { NotebookRuntimeService } from '../notebook/runtime-service'
 import type { SessionDeletionHandlers } from '../session-persistence/coordinator'
 
 const mocks = vi.hoisted(() => ({
@@ -57,7 +62,7 @@ vi.mock('../desktop-surface-declarations', () => ({}))
 
 import { composeProjectLifecycle } from './project-lifecycle'
 
-const fixture = (() => {
+const fixture = ((notebookRuntime?: NotebookRuntimeService) => {
   let handlers: SessionDeletionHandlers | undefined
   const runtime = {
     getSnapshot: vi.fn(() => ({ promptInFlightSessionIds: [] as string[] })),
@@ -71,6 +76,8 @@ const fixture = (() => {
     beginProjectDeletion: vi.fn(),
     deleteProjectFileEvidence: vi.fn(),
     deleteProjectInputs: vi.fn(),
+    forgetDeletedExecutionIntents: vi.fn(),
+    finishPendingRunDeletion: vi.fn(),
     releaseProjectDeletion: vi.fn()
   }
   const broker = new CredentialRequestBroker({
@@ -82,7 +89,14 @@ const fixture = (() => {
       deleteSessions: vi.fn(),
       planSessionReconciliation: vi.fn(async () => [])
     },
-    applicationEvents: {},
+    imageTasks: { isBusy: vi.fn(() => false), cancelSessions: vi.fn(), cancelProject: vi.fn() },
+    applicationEvents: { publish: vi.fn() },
+    scheduleRepository: {
+      pauseTarget: vi.fn(),
+      deleteTarget: vi.fn(),
+      deleteSessions: vi.fn(async () => [] as { projectId: string; sessionId: string | null }[]),
+      sessionTargets: vi.fn(async () => [] as { projectId: string; sessionId: string }[])
+    },
     notificationInbox: {
       setSessionAvailability: vi.fn(),
       invalidateSessions: vi.fn(),
@@ -141,7 +155,7 @@ const fixture = (() => {
       }
     },
     clearSessionCredentials: (sessionId: string) => broker.clearSession(sessionId),
-    getNotebookService: () => notebook
+    getNotebookService: () => notebookRuntime ?? notebook
   }
   const result = composeProjectLifecycle(
     dependencies as unknown as Parameters<typeof composeProjectLifecycle>[0]
@@ -164,6 +178,52 @@ beforeEach(() => {
 })
 
 describe('Project lifecycle composition', () => {
+  it('forgets Notebook intents after permanent deletion and preserves surviving refusals', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'notebook-intent-deletion-'))
+    const notebook = new NotebookRuntimeService({
+      configRoot: root,
+      dataRoot: root,
+      projectId: 'project-1',
+      memoryPolicy: healthyNotebookMemoryPolicy()
+    })
+    const session = { projectId: 'project-1', sessionId: 'session-1' }
+    const provisional = { projectId: 'project-1', sessionId: 'provisional-session' }
+    const survivor = { projectId: 'project-2', sessionId: 'session-2' }
+    try {
+      const { handlers } = fixture(notebook)
+      const hooks = mocks.deletion.mock.calls[0][5]
+      const [archivedIntent, provisionalIntent, survivingIntent] = [
+        session,
+        provisional,
+        survivor
+      ].map((scope) => {
+        const intent = notebook.createExecutionIntent(scope)
+        notebook.rememberExecutionIntent(scope, 'prompt', intent)
+        intent.block('manual-release')
+        return intent
+      })
+
+      await handlers.reconcile([session.sessionId, survivor.sessionId], [session.sessionId])
+      expect(notebook.currentExecutionIntent(session)).toBe(archivedIntent)
+      await hooks.abortProjectDeletion(session.projectId)
+      expect(notebook.currentExecutionIntent(provisional)).toBe(provisionalIntent)
+
+      await handlers.commit([session.sessionId])
+      expect(notebook.currentExecutionIntent(session)).toBeUndefined()
+      expect(notebook.resolveExecutionIntent(session, 'prompt')).toBeUndefined()
+      expect(notebook.currentExecutionIntent(provisional)).toBe(provisionalIntent)
+
+      hooks.completeProjectDeletion(session.projectId)
+      expect(notebook.currentExecutionIntent(provisional)).toBeUndefined()
+      expect(notebook.resolveExecutionIntent(provisional, 'prompt')).toBeUndefined()
+      expect(notebook.currentExecutionIntent(survivor)).toBe(survivingIntent)
+      expect(notebook.resolveExecutionIntent(survivor, 'prompt')).toBe(survivingIntent)
+    } finally {
+      await notebook.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('clears credential state on the shared durable commit even if another projection fails', async () => {
     const { dependencies, broker, handlers, result } = fixture()
     const info = {
@@ -212,6 +272,7 @@ describe('Project lifecycle composition', () => {
     ])
     expect(dependencies.bookmarkRepository.deleteSessions).toHaveBeenCalledWith(['session-1'])
     expect(dependencies.researchFilmLifecycle.deleteSessions).toHaveBeenCalledWith(['session-1'])
+    expect(dependencies.imageTasks.cancelSessions).toHaveBeenCalledWith(['session-1'])
     expect(dependencies.notificationInbox.invalidateSessions).toHaveBeenCalledWith(['session-1'])
     await handlers.commit(['session-1'])
     await expect(next).resolves.toBe(false)
@@ -248,7 +309,9 @@ describe('Project lifecycle composition', () => {
     const activity = mocks.archive.mock.calls[0][2]
     expect(result.detectSessionExportBlockingSessions()).toEqual([])
     await expect(activity.isSessionBusy('project-1', 'session-1')).resolves.toBe(true)
-    await expect(activity.isSessionExportBusy('project-1', 'session-1')).resolves.toBe(false)
+    await expect(
+      activity.getSessionExportBlocker('project-1', 'session-1')
+    ).resolves.toBeUndefined()
     await expect(activity.isProjectBusy('project-1')).resolves.toBe(true)
     d.getActiveSideChatSessions.mockReturnValue([])
     d.computeJobActivityRef.current.findNonTerminal.mockResolvedValue([{ project_id: 'project-1' }])
@@ -290,6 +353,73 @@ describe('Project lifecycle composition', () => {
       await expect(activity.isSessionBusy('project-1', 'unrelated')).resolves.toBe(false)
     }
   )
+
+  it('keeps Compute-owned jobs in archive and export checks but out of local activity', async () => {
+    const { dependencies: d } = fixture()
+    d.getActiveSideChatSessions.mockReturnValue([])
+    d.computeJobActivityRef.current.countNonTerminalBySession.mockResolvedValue(1)
+    const activity = mocks.archive.mock.calls[0][2]
+    expect(activity.isSessionLocallyBusy('project-1', 'session-1')).toBe(false)
+    await expect(activity.isSessionBusy('project-1', 'session-1')).resolves.toBe(true)
+    await expect(activity.getSessionExportBlocker('project-1', 'session-1')).resolves.toBe(
+      'compute'
+    )
+    // A database outage cannot turn local activity into a persistent execution fence.
+    d.computeJobActivityRef.current.countNonTerminalBySession.mockRejectedValue(
+      new Error('offline')
+    )
+    await expect(activity.isSessionBusy('project-1', 'session-1')).rejects.toThrow('offline')
+    expect(activity.isSessionLocallyBusy('project-1', 'session-1')).toBe(false)
+    d.computeJobActivityRef.current.countNonTerminalBySession.mockResolvedValue(0)
+    await expect(activity.isSessionBusy('project-1', 'session-1')).resolves.toBe(false)
+  })
+
+  it.each([
+    'prompt',
+    'permission',
+    'elicitation',
+    'side-chat-owner',
+    'side-chat-prompt',
+    'delegated',
+    'notebook'
+  ])('protects local %s activity and releases the protection when it settles', async (kind) => {
+    const { dependencies: d, runtime } = fixture()
+    d.getActiveSideChatSessions.mockReturnValue([])
+    const active = [{ projectId: 'project-1', sessionId: 'session-1' }]
+    const activity = mocks.archive.mock.calls[0][2]
+    const source = {
+      prompt: runtime.getActivePromptSessions,
+      'side-chat-prompt': d.getActiveSideChatSessions,
+      delegated: d.getActiveDelegatedSessions,
+      notebook: d.notebookActivityRef.current.getActiveNotebookSessions
+    }[kind]
+    if (source) source.mockReturnValue(active as never)
+    else if (kind === 'side-chat-owner')
+      d.sideChatOwnerRef.current.hasForParent.mockReturnValue(true)
+    else
+      runtime.getSnapshot.mockReturnValue({
+        promptInFlightSessionIds: [],
+        [kind === 'permission' ? 'pendingPermissions' : 'pendingElicitations']: [
+          { sessionId: 'session-1' }
+        ]
+      })
+    expect(activity.isSessionLocallyBusy('project-1', 'session-1')).toBe(true)
+    if (kind === 'permission' || kind === 'elicitation')
+      runtime.getActivePromptSessions.mockReturnValue(active as never)
+    const expected = {
+      prompt: 'agent',
+      permission: 'permission',
+      elicitation: 'question',
+      delegated: 'delegated',
+      notebook: 'notebook'
+    }[kind]
+    await expect(activity.getSessionExportBlocker('project-1', 'session-1')).resolves.toBe(expected)
+    runtime.getActivePromptSessions.mockReturnValue([])
+    if (source) source.mockReturnValue([])
+    d.sideChatOwnerRef.current.hasForParent.mockReturnValue(false)
+    runtime.getSnapshot.mockReturnValue({ promptInFlightSessionIds: [] })
+    expect(activity.isSessionLocallyBusy('project-1', 'session-1')).toBe(false)
+  })
 
   it('routes relays and file commands to the active owners with their original identities', async () => {
     const { dependencies: d, runtime } = fixture()
@@ -350,4 +480,34 @@ describe('Project lifecycle composition', () => {
     projects.onAgentContextChanged('project-1')
     expect(runtime.requestProjectAgentContextReload).toHaveBeenCalledWith('project-1')
   })
+})
+
+it('projects schedule archive and deletion through durable Session lifecycle recovery', async () => {
+  const { dependencies: d, handlers } = fixture()
+  const target = { projectId: 'project-1', sessionId: 'session-1' }
+  const callbacks = mocks.archive.mock.calls[0][3]
+  await callbacks.cancelSession(target.projectId, target.sessionId)
+  expect(d.scheduleRepository.pauseTarget).toHaveBeenCalledWith(target.projectId, target.sessionId)
+  expect(d.applicationEvents.publish).toHaveBeenCalledWith('schedules:changed', target)
+
+  d.scheduleRepository.sessionTargets.mockResolvedValue([target])
+  d.scheduleRepository.pauseTarget.mockClear()
+  await handlers.reconcile(['session-1'], ['session-1'])
+  expect(d.scheduleRepository.pauseTarget).toHaveBeenCalledOnce()
+  d.scheduleRepository.pauseTarget.mockClear()
+  await handlers.reconcile(['session-1'], [])
+  expect(d.scheduleRepository.pauseTarget).not.toHaveBeenCalled()
+
+  d.scheduleRepository.deleteSessions.mockRejectedValueOnce(new Error('database unavailable'))
+  await expect(handlers.commit(['session-1'])).rejects.toThrow('database unavailable')
+  const recovery = await handlers.planReconciliation!([])
+  expect(recovery).toHaveLength(1)
+  expect(d.scheduleRepository.deleteTarget).not.toHaveBeenCalled()
+  await recovery[0].apply()
+  expect(d.scheduleRepository.deleteTarget).toHaveBeenCalledWith(target.projectId, target.sessionId)
+  expect(await handlers.planReconciliation!(['session-1'])).toEqual([])
+
+  d.scheduleRepository.deleteSessions.mockResolvedValue([target])
+  await handlers.commit(['session-1'])
+  expect(d.applicationEvents.publish).toHaveBeenLastCalledWith('schedules:changed', target)
 })

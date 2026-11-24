@@ -13,6 +13,8 @@ type WorkspaceToolActivityRowButtonProps = {
   phase?: ToolExecutionPhase
   label: string
   subtitle?: ReactNode
+  subtitleRef?: Ref<HTMLSpanElement>
+  subtitleSeparator?: string
   metaLabel?: string
   isExpanded: boolean
   canExpand?: boolean
@@ -33,6 +35,8 @@ const WorkspaceToolActivityRowButton = ({
   phase,
   label,
   subtitle,
+  subtitleRef,
+  subtitleSeparator = '·',
   metaLabel,
   isExpanded,
   canExpand = true,
@@ -65,8 +69,13 @@ const WorkspaceToolActivityRowButton = ({
           <span className="block min-w-0 truncate text-text-000">{label}</span>
           {subtitle ? (
             <>
-              <span className="hidden shrink-0 text-text-300 md:inline">·</span>
-              <span className="mt-0.5 block min-w-0 truncate font-normal text-text-100 md:mt-0">
+              {subtitleSeparator ? (
+                <span className="hidden shrink-0 text-text-300 md:inline">{subtitleSeparator}</span>
+              ) : null}
+              <span
+                ref={subtitleRef}
+                className="mt-0.5 block min-w-0 truncate font-normal text-text-100 md:mt-0"
+              >
                 {subtitle}
               </span>
             </>

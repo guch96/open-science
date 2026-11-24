@@ -1,16 +1,24 @@
 import {
+  codeBuddyAccounts,
+  readCodeBuddyAccountRequest,
+  type CodeBuddyAccountRequest
+} from '../../../shared/codebuddy-subscription'
+import type {
+  ProviderDeletionScenarioModelHandling,
+  SettingsSnapshot,
+  RefreshProviderModelsRequest,
+  SetActiveProviderRequest,
+  SetAgentFrameworkRequest,
+  SetAgentRoutingRequest,
+  SetReasoningEffortRequest,
+  UpsertProviderRequest
+} from '../../../shared/settings'
+import {
   CLAUDE_ISOLATED_PROVIDER_ID,
   CLAUDE_SHARED_PROVIDER_ID,
   CODEX_SUBSCRIPTION_PROVIDER_ID,
-  XAI_SUBSCRIPTION_PROVIDER_ID,
-  type ProviderDeletionScenarioModelHandling,
-  type RefreshProviderModelsRequest,
-  type SetActiveProviderRequest,
-  type SetAgentFrameworkRequest,
-  type SetAgentRoutingRequest,
-  type SetReasoningEffortRequest,
-  type UpsertProviderRequest
-} from '../../../shared/settings'
+  XAI_SUBSCRIPTION_PROVIDER_ID
+} from '../../../shared/settings-runtime'
 import type { AgentFrameworkId } from '../../agent-framework'
 import type { SettingsService } from '../service'
 import { createLogger, diagnosticErrorFields } from '@aipoch/diagnostics/node'
@@ -38,6 +46,7 @@ type RuntimeSettingsWorkflowStore = Pick<
   | 'loginIsolatedClaude'
   | 'loginIsolatedClaudeBrowser'
   | 'logoutIsolatedClaude'
+  | 'codeBuddyAccount'
   | 'loginIsolatedCodex'
   | 'logoutIsolatedCodex'
   | 'beginXaiOAuthLogin'
@@ -58,6 +67,23 @@ const affectedProviderIds = (providerId: string): readonly string[] =>
   providerId === CLAUDE_SHARED_PROVIDER_ID || providerId === CLAUDE_ISOLATED_PROVIDER_ID
     ? [CLAUDE_SHARED_PROVIDER_ID, CLAUDE_ISOLATED_PROVIDER_ID]
     : [providerId]
+
+// Official accounts derive their model list and capabilities from discovery. Those may
+// change while the configured runtime connection stays the same.
+function needsProviderReconnect(
+  request: UpsertProviderRequest,
+  before: SettingsSnapshot,
+  after?: SettingsSnapshot
+): boolean {
+  if (request.type !== 'official' || request.key) return true
+  const previous = before.providers.find(({ id }) => id === request.id)
+  const current = after?.providers.find(({ id }) => id === request.id)
+  if (previous?.type !== 'official') return true
+  return (
+    (current?.vendorId ?? request.vendorId ?? previous.vendorId) !== previous.vendorId ||
+    (current?.region ?? request.region ?? previous.region) !== previous.region
+  )
+}
 
 // Owns post-persistence runtime and authentication effects. Its required effect port makes an
 // incomplete production composition fail at construction instead of silently skipping a reconnect.
@@ -92,7 +118,7 @@ class RuntimeSettingsWorkflows {
     const before = await this.settings.getSettingsView()
     const snapshot = await this.settings.upsertProvider(request)
 
-    if (request.id) {
+    if (request.id && needsProviderReconnect(request, before, snapshot)) {
       this.effects.requestProviderReconnect(
         affectedProviderIds(request.id),
         request.id === before.activeProviderId || request.id === snapshot.activeProviderId
@@ -107,7 +133,11 @@ class RuntimeSettingsWorkflows {
   ): Promise<Awaited<ReturnType<RuntimeSettingsWorkflowStore['saveValidatedProvider']>>> {
     const before = await this.settings.getSettingsView()
     const result = await this.settings.saveValidatedProvider(request)
-    if (result.providerId && request.id) {
+    if (
+      result.providerId &&
+      request.id &&
+      needsProviderReconnect(request, before, result.snapshot)
+    ) {
       try {
         this.effects.requestProviderReconnect(
           affectedProviderIds(result.providerId),
@@ -128,22 +158,8 @@ class RuntimeSettingsWorkflows {
   async refreshProviderModels(
     request: RefreshProviderModelsRequest
   ): Promise<Awaited<ReturnType<RuntimeSettingsWorkflowStore['refreshProviderModels']>>> {
-    const before = await this.settings.getSettingsView()
-    const result = await this.settings.refreshProviderModels(request)
-    if (!result.ok) return result
-    const after = await this.settings.getSettingsView()
-    const previous = before.providers.find((provider) => provider.id === request.providerId)
-    const current = after.providers.find((provider) => provider.id === request.providerId)
-    // Catalog order can own an omitted model's default. Reconnect existing provider generations
-    // through the same deferred transition used for provider edits; do not interrupt active turns.
-    if (previous && current && JSON.stringify(previous.models) !== JSON.stringify(current.models)) {
-      this.effects.requestProviderReconnect(
-        affectedProviderIds(request.providerId),
-        request.providerId === before.activeProviderId ||
-          request.providerId === after.activeProviderId
-      )
-    }
-    return result
+    // Running sessions own their negotiated routes. New connections read the refreshed inventory.
+    return this.settings.refreshProviderModels(request)
   }
 
   async deleteProvider(
@@ -240,6 +256,22 @@ class RuntimeSettingsWorkflows {
         [CLAUDE_ISOLATED_PROVIDER_ID],
         snapshot.activeProviderId === CLAUDE_ISOLATED_PROVIDER_ID
       )
+    }
+    return result
+  }
+
+  async codeBuddyAccount(
+    input: CodeBuddyAccountRequest
+  ): ReturnType<RuntimeSettingsWorkflowStore['codeBuddyAccount']> {
+    const request = readCodeBuddyAccountRequest(input)
+    const result = await this.settings.codeBuddyAccount(request)
+    if (
+      (result.ok && (request.action === 'login' || request.action === 'logout')) ||
+      (request.action === 'refresh' && result.category === 'auth')
+    ) {
+      const id = codeBuddyAccounts[request.site].id
+      const snapshot = await this.settings.getSettingsView()
+      this.effects.requestProviderReconnect([id], snapshot.activeProviderId === id)
     }
     return result
   }

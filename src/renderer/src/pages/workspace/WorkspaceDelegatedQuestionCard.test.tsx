@@ -34,6 +34,61 @@ afterEach(() => {
 })
 
 describe('WorkspaceDelegatedQuestionCard', () => {
+  it.each(['single-select', 'multi-select'] as const)(
+    'describes %s trade-offs and keeps explanation clicks on the option',
+    async (kind) => {
+      const onRespond = vi.fn().mockResolvedValue(undefined)
+      render(
+        <WorkspaceDelegatedQuestionCard
+          projectId="project-1"
+          sessionId="session-1"
+          request={{
+            ...request,
+            questions: [
+              {
+                question: 'Which approach?',
+                kind,
+                options: [
+                  { label: 'Both', description: 'Context', pros: '<b>Benefit</b>', cons: 'Cost' },
+                  { label: 'Pros only', pros: 'Benefit alone' },
+                  { label: 'Cons only', cons: 'Cost alone' },
+                  { label: 'Neither' }
+                ]
+              }
+            ]
+          }}
+          onRespond={onRespond}
+        />
+      )
+      for (const [label, description] of [
+        ['Both', 'ContextPros: <b>Benefit</b>Cons: Cost'],
+        ['Pros only', 'Pros: Benefit alone'],
+        ['Cons only', 'Cons: Cost alone']
+      ]) {
+        const button = screen.getByRole('button', { name: label })
+        const details = document.getElementById(button.getAttribute('aria-describedby')!)!
+        expect(details.textContent).toBe(description)
+        expect(details.querySelector('b')).toBeNull()
+      }
+      const neither = screen.getByRole('button', { name: 'Neither' })
+      expect(neither.getAttribute('aria-describedby')).toBeNull()
+      expect(neither.textContent).not.toMatch(/Pros:|Cons:/)
+      fireEvent.click(screen.getByRole('button', { name: 'Both' }).querySelector('span.mt-1')!)
+      expect(screen.getByRole('button', { name: 'Both' }).getAttribute('aria-pressed')).toBe('true')
+      fireEvent.click(screen.getByRole('button', { name: 'Finish' }))
+      await waitFor(() =>
+        expect(onRespond).toHaveBeenCalledWith(
+          expect.objectContaining({
+            delegatedQuestion: expect.objectContaining({
+              action: 'confirm',
+              answers: [{ questionIndex: 0, value: kind === 'multi-select' ? ['Both'] : 'Both' }]
+            })
+          })
+        )
+      )
+    }
+  )
+
   it('defaults legacy questions to single select and updates the chip when advancing to multi select', async () => {
     render(
       <WorkspaceDelegatedQuestionCard
@@ -226,6 +281,31 @@ describe('WorkspaceDelegatedQuestionCard', () => {
         })
       })
     )
+  })
+
+  it('keeps the confirmation result when an earlier draft fails later', async () => {
+    const draft = Promise.withResolvers<void>()
+    const onRespond = vi.fn((response: ElicitationResponse) =>
+      response.delegatedQuestion?.action === 'draft'
+        ? draft.promise
+        : Promise.reject(new Error('Receipt unavailable'))
+    )
+    render(
+      <WorkspaceDelegatedQuestionCard
+        projectId="project-1"
+        sessionId="session-1"
+        request={{ ...request, questions: request.questions.slice(0, 1) }}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Strict' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Finish' }))
+    await screen.findByRole('alert')
+    await act(async () => draft.reject(new Error('Earlier draft failed')))
+    expect(screen.getByRole('alert').textContent).toBe(
+      'Could not confirm that your response was submitted.'
+    )
+    expect(screen.queryByText('Earlier draft failed')).toBeNull()
   })
 
   it('finishes with the latest answer without waiting for an in-flight draft', async () => {

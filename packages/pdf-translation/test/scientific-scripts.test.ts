@@ -15,6 +15,340 @@ import {
   type ScientificScriptMarker
 } from '../resources/scientific-scripts.mjs'
 
+it('keeps a shared comparison glyph and its native lowered index together', () => {
+  const source = 'The interval is 1 < 𝑥max ≤ 8.',
+    translation = '区间为 1 < 𝑥max ≤ 8。',
+    label = '< 𝑥max',
+    sourceOffset = source.indexOf(label),
+    markers: ScientificScriptMarker[] = [
+      {
+        sourceOffset,
+        label: '< 𝑥',
+        scale: 1,
+        rise: 0,
+        baseline: 50,
+        sourceIndices: [4],
+        bounds: [20, 50, 33, 56]
+      },
+      {
+        sourceOffset: sourceOffset + '< 𝑥'.length,
+        label: 'max',
+        scale: 0.73,
+        rise: -1.4,
+        baseline: 48.6,
+        sourceIndices: [5],
+        bounds: [33.2, 48.5, 41, 52.5]
+      }
+    ]
+  expect(resolveNestedScriptGroups(source, translation, markers)).toEqual([
+    {
+      sourceOffset,
+      targetOffset: translation.indexOf(label),
+      label,
+      sourceIndices: [4, 5],
+      baselineIndex: 4,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, translation.replace('max', 'min'), markers)).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, translation, [
+      markers[0],
+      { ...markers[1], sourceIndices: [6] }
+    ])
+  ).toEqual([])
+})
+
+it('preserves separately painted blackboard capitals and their lowered letters', () => {
+  const source = 'The model uses Kq beside Kq.',
+    translation = '模型在 Kq 旁使用 Kq。',
+    starts = [...source.matchAll(/Kq/g)].map(({ index }) => index),
+    targets = [...translation.matchAll(/Kq/g)].map(({ index }) => index),
+    markers: ScientificScriptMarker[] = starts.flatMap((sourceOffset, index) => [
+      {
+        sourceOffset,
+        label: 'K',
+        scale: 1,
+        rise: 0,
+        baseline: 680,
+        fontName: index ? 'MSBM10' : 'SAMPLE+MSBM10',
+        sourceIndices: [index * 3],
+        bounds: [100, 680, 107, 688]
+      },
+      {
+        sourceOffset: sourceOffset + 1,
+        label: 'q',
+        scale: 0.7,
+        rise: -1.5,
+        baseline: 678.5,
+        fontName: 'CMMI8',
+        sourceIndices: [index * 3 + 1],
+        bounds: [107.2, 677, 111, 682]
+      }
+    ])
+  expect(resolveNestedScriptGroups(source, translation, markers)).toEqual(
+    starts.map((sourceOffset, index) => ({
+      sourceOffset,
+      targetOffset: targets[index],
+      label: 'Kq',
+      sourceIndices: [index * 3, index * 3 + 1],
+      baselineIndex: index * 3,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }))
+  )
+  for (const changed of ['模型使用 Kq。', '模型在 Kq 旁使用 Kq2。', translation + ' Kq'])
+    expect(resolveNestedScriptGroups(source, changed, markers)).toEqual([])
+  expect(resolveNestedScriptGroups(source, translation, markers.slice(0, 2))).toEqual([])
+  expect(
+    resolveNestedScriptGroups(
+      source,
+      translation,
+      markers.map((marker) =>
+        marker.label === 'q' ? { ...marker, rise: 0, baseline: 680 } : marker
+      )
+    )
+  ).toEqual([])
+})
+
+it('keeps exact blackboard dimensions beside their original set relation', () => {
+  const source = 'Consider Zk and a sample ∈ Zk.',
+    translation = '考虑 Zk 及样本 ∈ Zk。',
+    [first, second] = [...source.matchAll(/Zk/gu)].map(({ index }) => index),
+    pair = (offset: number, index: number): ScientificScriptMarker[] => [
+      {
+        sourceOffset: offset,
+        label: 'Z',
+        scale: 1,
+        rise: 0,
+        baseline: 680,
+        fontName: 'MSBM10',
+        sourceIndices: [index],
+        bounds: [100, 680, 107, 688]
+      },
+      {
+        sourceOffset: offset + 1,
+        label: 'k',
+        scale: 0.67,
+        rise: 4.2,
+        baseline: 684.2,
+        fontName: 'CMMI8',
+        sourceIndices: [index + 1],
+        bounds: [107.5, 684.2, 112, 688.1]
+      }
+    ],
+    markers: ScientificScriptMarker[] = [
+      ...pair(first, 1),
+      {
+        sourceOffset: second - 2,
+        label: '∈',
+        scale: 1,
+        rise: 0,
+        baseline: 680,
+        fontName: 'CMSY10',
+        sourceIndices: [3],
+        bounds: [91, 679, 98, 686]
+      },
+      ...pair(second, 4)
+    ]
+
+  const groups = resolveNestedScriptGroups(source, translation, markers)
+  expect(groups.map(({ label, sourceIndices }) => [label, sourceIndices])).toEqual([
+    ['Zk', [1, 2]],
+    ['Zk', [4, 5]]
+  ])
+  expect(groups.every((group) => group.nativeScriptGroup && group.needsInlineReflow)).toBe(true)
+  expect(resolveNestedScriptGroups(source, translation.replace('∈', '⊂'), markers)).toEqual([])
+})
+
+it('keeps the raised order and lowered index attached to their blackboard letter', () => {
+  const source = 'We use P(t)4r.',
+    translation = '此处使用 P(t)4r。',
+    start = source.indexOf('P'),
+    runs = [
+      ['P', 'MSBM10', 0, [100, 680, 107, 687]],
+      ['(', 'CMR7', 5.2, [107.9, 684.1, 109.8, 691]],
+      ['t', 'CMMI7', 5.2, [110.5, 685.1, 113.8, 689]],
+      [')', 'CMR7', 5.2, [114.4, 684.1, 116.2, 691]],
+      ['4', 'CMR7', -2.7, [107.5, 677.2, 110.6, 682]],
+      ['r', 'CMMI7', -2.7, [111.1, 677.2, 114, 681.9]]
+    ] as const,
+    markers = runs.map(([label, fontName, rise, bounds], index): ScientificScriptMarker => ({
+      label,
+      fontName,
+      sourceOffset: start + index,
+      rise,
+      baseline: 680 + rise,
+      scale: index ? 0.7 : 1,
+      bounds: [...bounds],
+      sourceIndices: [index]
+    }))
+  expect(resolveNestedScriptGroups(source, translation, markers)).toEqual([
+    {
+      sourceOffset: start,
+      targetOffset: translation.indexOf('P'),
+      label: 'P(t)4r',
+      sourceIndices: [0, 1, 2, 3, 4, 5],
+      baselineIndex: 0,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, translation.replace('4r', '5r'), markers)).toEqual([])
+  expect(resolveNestedScriptGroups(source, translation, markers.slice(0, -1))).toEqual([])
+  const displaced = markers.map((marker) =>
+    marker.label === '4' ? { ...marker, baseline: 680, rise: 0 } : marker
+  )
+  expect(resolveNestedScriptGroups(source, translation, displaced)).toEqual([])
+})
+
+it.each(['separate base', 'shared base'] as const)(
+  'keeps both native exponent levels by the decimal base (%s)',
+  (variant) => {
+    const source = 'A bound 17x3 gives a count.',
+      translation = '上界为 17x3。',
+      base = variant === 'shared base' ? 'bound 17' : '17',
+      firstOffset = source.indexOf('x'),
+      runs = [
+        [base, 'CMR10', firstOffset - base.length, 680, [100, 680, 108, 687]],
+        ['x', 'CMMI7', firstOffset, 684, [109, 683.9, 113, 687.2]],
+        ['3', 'CMR5', firstOffset + 1, 687, [114.25, 686.9, 116.9, 690.3]]
+      ] as const,
+      markers = runs.map(
+        ([label, fontName, sourceOffset, baseline, bounds], index): ScientificScriptMarker => ({
+          label,
+          fontName,
+          sourceOffset,
+          rise: baseline - 680,
+          baseline,
+          scale: [1, 0.7, 0.5][index],
+          bounds: [...bounds],
+          sourceIndices: [index]
+        })
+      ),
+      label = variant === 'shared base' ? 'x3' : '17x3'
+
+    expect(resolveNestedScriptGroups(source, translation, markers)).toEqual([
+      {
+        sourceOffset: source.indexOf(label),
+        targetOffset: translation.indexOf(label),
+        label,
+        sourceIndices: variant === 'shared base' ? [1, 2] : [0, 1, 2],
+        baselineIndex: 0,
+        nativeScriptGroup: true,
+        needsInlineReflow: true
+      }
+    ])
+    expect(resolveNestedScriptGroups(source, translation.replace('17', '19'), markers)).toEqual([])
+    expect(
+      resolveNestedScriptGroups(
+        source,
+        translation,
+        markers.map((marker) => (marker.label === '3' ? { ...marker, baseline: 684 } : marker))
+      )
+    ).toEqual([])
+  }
+)
+
+it.each(['native', 'flat', 'missing base', 'different target'] as const)(
+  'keeps a lowered index on a native difference symbol (%s)',
+  (variant) => {
+    const source = 'Estimate ∆z.',
+      target = variant === 'different target' ? '估计∆k。' : '估计∆z。',
+      offset = source.indexOf('∆'),
+      index: ScientificScriptMarker = {
+        label: 'z',
+        sourceOffset: offset + 1,
+        scale: 0.7,
+        rise: variant === 'flat' ? 0 : -1.5,
+        sourceIndices: [4],
+        bounds: [108, 699, 112, 704]
+      },
+      markers: ScientificScriptMarker[] = [index]
+    if (variant !== 'missing base') {
+      markers.push({
+        label: '∆',
+        sourceOffset: offset,
+        scale: 1,
+        rise: 0,
+        sourceIndices: [3],
+        bounds: [100, 700, 108, 708]
+      })
+    }
+    expect(resolveScientificScriptSpans(source, target, markers)).toEqual(
+      variant === 'native'
+        ? [
+            {
+              start: 3,
+              end: 4,
+              scale: 0.7,
+              rise: -1.5,
+              sourceIndices: [4],
+              sourceOffsets: [offset + 1]
+            }
+          ]
+        : []
+    )
+  }
+)
+
+it.each([
+  'valid',
+  'missing-body',
+  'foreign-body',
+  'nonadjacent',
+  'raised',
+  'changed-call',
+  'distant',
+  'missing-bounds'
+] as const)('keeps native lowered callee scripts before repeated arguments: %s', (fault) => {
+  const source = 'Use Qr(t) and Qr(t).',
+    target = '使用Qr(t)与Qr(t)。',
+    markers: ScientificScriptMarker[] = [...source.matchAll(/Qr\(t\)/gu)].flatMap((m, n) => [
+      {
+        label: 'Q',
+        sourceOffset: m.index,
+        scale: 1,
+        rise: 0,
+        sourceIndices: [10 + n * 5],
+        bounds: [100 + n * 40, 700, 108 + n * 40, 708]
+      },
+      {
+        label: 'r',
+        sourceOffset: m.index + 1,
+        scale: 2 / 3,
+        rise: -1.8,
+        sourceIndices: [11 + n * 5],
+        bounds: [108 + n * 40, 698.5, 112 + n * 40, 704]
+      }
+    ])
+  for (const marker of markers) {
+    if (fault === 'foreign-body' && marker.label === 'Q') marker.label = 'R'
+    if (fault === 'nonadjacent' && marker.label === 'r') marker.sourceIndices[0]++
+    if (fault === 'raised' && marker.label === 'r') marker.rise = 1.8
+    if (fault === 'distant' && marker.label === 'r') marker.bounds = [130, 698.5, 134, 704]
+    if (fault === 'missing-bounds') delete marker.bounds
+  }
+  const spans = resolveScientificScriptSpans(
+    source,
+    fault === 'changed-call' ? target.replaceAll('(t)', '(u)') : target,
+    fault === 'missing-body' ? markers.filter((m) => m.label !== 'Q') : markers
+  )
+  expect(spans).toEqual(
+    fault === 'valid'
+      ? [...target.matchAll(/Qr\(t\)/gu)].map((m, n) => ({
+          start: m.index + 1,
+          end: m.index + 2,
+          scale: 2 / 3,
+          rise: -1.8,
+          sourceIndices: [11 + n * 5],
+          sourceOffsets: [[...source.matchAll(/Qr\(t\)/gu)][n].index + 1]
+        }))
+      : []
+  )
+})
+
 it.each([
   'valid',
   'flat',
@@ -876,6 +1210,11 @@ it.each([
   ['σ', 17, 100, 10, false],
   [', σ', 17, 100, 10, false],
   ['; x', 17, 100, 10, false],
+  [', . . . , q', 17, 100, 10, false],
+  [', . . . , σ', 17, 100, 10, false],
+  [', . . , q', 17, 100, 10, true],
+  ['text q', 17, 100, 10, true],
+  [', . . . , q', 5, 100, 10, true],
   [', word', 17, 100, 10, true],
   [', σ', 5, 100, 10, true],
   [', σ', 17, 110, 10, true],
@@ -893,6 +1232,46 @@ it.each([
     if (fraction) expect(fractions[0].indices).toEqual([2, 3])
   }
 )
+
+it('keeps native paired scripts after an ellipsis-prefixed variable out of division', async () => {
+  const pdf = await PDFDocument.create(),
+    font = await pdf.embedFont(StandardFonts.TimesRoman),
+    page = pdf.addPage([160, 140]),
+    base = ', . . . , q',
+    right = 20 + font.widthOfTextAtSize(base, 10)
+  page.drawText(base, { x: 20, y: 100, size: 10, font })
+  page.drawText('U', { x: right, y: 103.6, size: 7, font })
+  page.drawText('k', { x: right, y: 97.5, size: 7, font })
+  const task = getDocument({ data: await pdf.save(), useSystemFonts: true })
+  try {
+    const content = await (await (await task.promise).getPage(1)).getTextContent(),
+      items: FractionItem[] = content.items.flatMap((item, i) =>
+        'str' in item && item.str.trim()
+          ? [
+              {
+                i,
+                text: item.str,
+                fontSize: item.height,
+                baseline: item.transform[5],
+                bounds: [
+                  item.transform[4],
+                  item.transform[5],
+                  item.transform[4] + item.width,
+                  item.transform[5] + item.height
+                ] as [number, number, number, number]
+              }
+            ]
+          : []
+      )
+    expect(items.map((item) => item.text)).toEqual([base, 'U', 'k'])
+    expect(resolveInlineFractions(items, 100, 10)).toEqual([])
+    expect(resolveInlineFractions(items.slice(1), 100, 10).map((value) => value.label)).toEqual([
+      'U/k'
+    ])
+  } finally {
+    await task.destroy()
+  }
+})
 
 it.each(
   readPdfTranslationCases<{
@@ -2346,6 +2725,28 @@ it.each([
   }
 })
 
+it.each([true, false])(
+  'requires distinct centered tiers inside a ceiling fraction: %s',
+  (aligned) => {
+    const items: FractionItem[] = [
+      { i: 0, text: '⌈', fontSize: 10, baseline: 100, bounds: [4, 98, 8, 108] },
+      { i: 1, text: '𝑟', fontSize: 7.2, baseline: 104, bounds: [9, 104, 13.5, 110] },
+      { i: 2, text: '3', fontSize: 5.5, baseline: 106.5, bounds: [14, 106, 17, 112] },
+      {
+        i: 3,
+        text: '5',
+        fontSize: 7.2,
+        baseline: 96.5,
+        bounds: [11.2, 96, aligned ? 15.2 : 18.5, 102]
+      },
+      { i: 4, text: '⌉', fontSize: 10, baseline: 100, bounds: [18.5, 98, 22.5, 108] }
+    ]
+    const result = resolveInlineFractions(items, 100, 10)
+    expect(result.map(({ label }) => label)).toEqual(aligned ? ['⌈ 𝑟³/5 ⌉'] : [])
+    if (aligned) expect(result[0].indices).toEqual([0, 1, 2, 3, 4])
+  }
+)
+
 it.each(['4', '16', '128', '1024'])(
   'centered small letter-over-integer tiers preserve their complete fraction: %s',
   (denominator) => {
@@ -2873,4 +3274,877 @@ it.each([
         ]
       : []
   )
+})
+
+it.each([
+  'complete',
+  'flat order',
+  'foreign glyph',
+  'wrong index position',
+  'changed order'
+] as const)('retains a complete native raised order and lowered index (%s)', (shape) => {
+  const source = 'The coefficient is σ(4)234 = 2.4.',
+    target = shape === 'changed order' ? '系数为 σ(5)234 = 2.4。' : '系数为 σ(4)234 = 2.4。',
+    label = 'σ(4)234',
+    start = source.indexOf(label)
+  const markers: ScientificScriptMarker[] = [
+    {
+      label: 'σ',
+      sourceOffset: start,
+      sourceIndices: [10],
+      scale: 1,
+      rise: 0,
+      bounds: [20, 40, 26, 47]
+    },
+    {
+      label: '(',
+      sourceOffset: start + 1,
+      sourceIndices: [11],
+      scale: 0.8,
+      rise: 5,
+      bounds: [27, 46, 29, 52]
+    },
+    {
+      label: '4',
+      sourceOffset: start + 2,
+      sourceIndices: [12],
+      scale: 0.75,
+      rise: shape === 'flat order' ? 0 : 5,
+      bounds: [29.5, 46, 32.5, 52]
+    },
+    {
+      label: ')',
+      sourceOffset: start + 3,
+      sourceIndices: [shape === 'foreign glyph' ? 24 : 13],
+      scale: 0.8,
+      rise: 5,
+      bounds: [33, 46, 35, 52]
+    },
+    {
+      label: '234',
+      sourceOffset: start + 4,
+      sourceIndices: [14],
+      scale: 0.75,
+      rise: -3,
+      bounds: shape === 'wrong index position' ? [30, 36, 40, 41] : [27, 36, 37, 41]
+    }
+  ]
+  expect(resolveNestedScriptGroups(source, target, markers)).toEqual(
+    shape === 'complete'
+      ? [
+          {
+            sourceOffset: start,
+            targetOffset: target.indexOf(label),
+            label,
+            sourceIndices: [10, 11, 12, 13, 14],
+            baselineIndex: 10,
+            nativeScriptGroup: true
+          }
+        ]
+      : []
+  )
+})
+
+it.each([10, 11, 13])(
+  'fits the native terminal operator advance at the column edge (%i)',
+  async (length) => {
+    const pdf = await PDFDocument.create(),
+      text = await pdf.embedFont(StandardFonts.TimesRoman),
+      symbols = await pdf.embedFont(StandardFonts.Symbol),
+      page = pdf.addPage([612, 792]),
+      left = 315,
+      baseline = 435
+    let x = left
+    const draw = (value: string, size: number, rise: number, font = text, gap = 0): void => {
+      page.drawText(value, { x, y: baseline + rise, size, font })
+      x += font.widthOfTextAtSize(value, size) + gap
+    }
+    draw('For both configurations, the measured response is ', 9, 0, text, 0.12)
+    draw('χ', 9, 0, symbols, 0.12)
+    const scriptLeft = x
+    draw('(', 7.2, 4.9, text, 0.12)
+    draw('3', 7, 4.9, text, 0.12)
+    draw(')', 7.2, 4.9, text, 0.12)
+    page.drawText('1111', { x: scriptLeft, y: baseline - 3.2, font: text, size: 7 })
+    x = Math.max(x, scriptLeft + text.widthOfTextAtSize('1111', 7)) + 3
+    for (const value of ['= (', '2', ' ± ', '1', ') ', '×']) draw(value, 9.34, 0)
+
+    const right = x,
+      source = 'For both configurations, the measured response is χ(3)1111 = (2 ± 1) ×',
+      translation = '配置不同条件下测得的响应值为' + '量'.repeat(length) + 'χ(3)1111=(2±1)×',
+      registry = new TestCallerRegistry(),
+      caller = registry.acquire({ leaseId: 'terminal-advance', surface: 'electron' })
+    let target: ReturnType<typeof getDocument> | undefined
+    try {
+      const result = await new PdfTranslationWriter(() =>
+        resolve('resources/worker.mjs')
+      ).generateDetailed(
+        {
+          id: 'terminal-advance',
+          data: await pdf.save(),
+          pages: [{ width: 612, height: 792 }],
+          preserveUnsupported: true,
+          units: [
+            {
+              source,
+              translation,
+              fragments: [
+                {
+                  pageNumber: 1,
+                  rect: {
+                    x: left / 612,
+                    y: 345 / 792,
+                    width: (right - left) / 612,
+                    height: 16 / 792
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        caller.lease
+      )
+      expect(result).toBeDefined()
+      const overflow = length === 13
+      expect(result!.layoutFailures.map(({ code }) => code)).toEqual(overflow ? ['overflow'] : [])
+      target = getDocument({ data: result!.data, useSystemFonts: true })
+      const content = await (await (await target.promise).getPage(1)).getTextContent(),
+        items = content.items.filter((item) => 'str' in item)
+      expect(
+        items
+          .map((item) => item.str)
+          .join('')
+          .replace(/\s/gu, '')
+      ).toBe((overflow ? source : translation).replace(/\s/gu, ''))
+      const operator = items.find((item) => item.str.trim() === '×')!
+      expect(operator.transform[4] + operator.width).toBeLessThanOrEqual(right + 0.001)
+    } finally {
+      await target?.destroy()
+      caller.release()
+      registry.dispose()
+    }
+  }
+)
+
+it.each(['complete', 'flat script', 'detached script', 'changed target'] as const)(
+  'moves a terminal native logarithmic mass ratio with its generated operator: %s',
+  (variant) => {
+    const source = 'The display uses log10M⋆/M⊙.',
+      target = variant === 'changed target' ? '图中采用 log10M⋆/M●。' : '图中采用 log10M⋆/M⊙。',
+      parts = [
+        ['The display uses log', 'CMR9', 1, 0, 61, 146],
+        ['10', 'CMR6', 2 / 3, -2.2, 147.2, 153.6],
+        ['M', 'CMMI9', 1, 0, 154.7, 163.8],
+        ['⋆', 'CMMI6', 2 / 3, -1, 163.6, 166.7],
+        ['/M', 'CMMI9', 1, 0, 167.5, 180.6],
+        ['⊙', 'CMSY6', 2 / 3, -1, 180.4, 185.3]
+      ] as const,
+      markers: ScientificScriptMarker[] = parts.map(
+        ([label, fontName, scale, drop, left, right], index) => {
+          const rise = label === '⋆' && variant === 'flat script' ? 0 : drop,
+            offset = label === '⊙' && variant === 'detached script' ? 6 : 0,
+            baseline = 700 + rise
+          return {
+            label,
+            fontName,
+            scale,
+            rise,
+            baseline,
+            sourceOffset: parts.slice(0, index).reduce((size, [text]) => size + text.length, 0),
+            bounds: [left + offset, baseline, right + offset, baseline + 8 * scale],
+            sourceIndices: [index]
+          }
+        }
+      )
+
+    expect(resolveNestedScriptGroups(source, target, markers)).toEqual(
+      variant === 'complete'
+        ? [
+            {
+              sourceOffset: source.indexOf('10'),
+              targetOffset: target.indexOf('10'),
+              label: '10M⋆/M⊙',
+              sourceIndices: [1, 2, 3, 4, 5],
+              baselineIndex: 2,
+              nativeScriptGroup: true,
+              needsInlineReflow: true
+            }
+          ]
+        : []
+    )
+    if (variant === 'changed target')
+      expect(resolveNestedScriptGroups(source, source, markers)).toHaveLength(1)
+  }
+)
+
+it.each(['raised', 'flat', 'changed exponent'] as const)(
+  'matches an explicit mass power to its complete native script group: %s',
+  (variant) => {
+    const expression = 'M⋆ = 6 × 10¹²M⊙'
+    const source = 'The sample mass is ' + expression + '.'
+    const expected = variant === 'changed exponent' ? '13' : '12'
+    const target = '测得 M⋆ = 6 × 10^' + expected + 'M⊙。'
+    const objects = [
+      ['M', 'M', 'CMMI10', 1, 0, 100, 110],
+      ['⋆', '⋆', 'CMMI7', 0.7, -1.5, 109.7, 113.2],
+      ['= 6', '= 6', 'CMR10', 1, 0, 118.2, 133.5],
+      ['×', '×', 'CMSY10', 1, 0, 137.9, 142.7],
+      ['10', '10', 'CMR10', 1, 0, 147.4, 156.1],
+      ['¹²', '12', 'CMR7', 0.7, 3.6, 157.3, 164.1],
+      ['M', 'M', 'CMMI10', 1, 0, 165.4, 175.4],
+      ['⊙', '⊙', 'CMSY7', 0.7, -1.5, 175.2, 180.3]
+    ] as const
+    let cursor = source.indexOf(expression)
+    const markers: ScientificScriptMarker[] = objects.map(
+      ([spelling, label, fontName, scale, offset, left, right], index) => {
+        const sourceOffset = source.indexOf(spelling, cursor)
+        cursor = sourceOffset + spelling.length
+        const rise = variant === 'flat' && label === '12' ? 0 : offset
+        const baseline = 700 + rise
+        return {
+          sourceOffset,
+          label,
+          fontName,
+          scale,
+          rise,
+          baseline,
+          bounds: [left, baseline, right, baseline + 7 * scale],
+          sourceIndices: [index]
+        }
+      }
+    )
+    expect(resolveNestedScriptGroups(source, target, markers)).toEqual(
+      variant === 'raised'
+        ? [
+            {
+              sourceOffset: source.indexOf(expression),
+              targetOffset: target.indexOf('M⋆'),
+              label: expression.replace('¹²', '^12'),
+              sourceLabel: expression,
+              sourceIndices: [0, 1, 2, 3, 4, 5, 6, 7],
+              baselineIndex: 0,
+              nativeScriptGroup: true,
+              needsInlineReflow: true
+            }
+          ]
+        : []
+    )
+  }
+)
+
+it.each(['native', 'other face', 'separate row', 'ambiguous target'] as const)(
+  'keeps proven lowered small-cap indices as complete native groups (%s)',
+  (variant) => {
+    const token = 'uA b'
+    const source = 'Compare ' + token + ' with the control.'
+    const target = variant === 'ambiguous target' ? '比较uA b和uA b。' : '比较uA b与基准。'
+    const start = source.indexOf(token)
+    const markers: ScientificScriptMarker[] = [
+      {
+        label: 'u',
+        sourceOffset: start,
+        fontName: 'CMMI10',
+        baseline: 100,
+        scale: 1,
+        rise: 0,
+        bounds: [50, 98, 56, 107],
+        sourceIndices: [3]
+      },
+      {
+        label: 'A',
+        sourceOffset: start + 1,
+        fontName: 'CMR7',
+        baseline: 98.4,
+        scale: 0.7,
+        rise: 0,
+        bounds: [56, 98.4, 61, 103],
+        sourceIndices: [4]
+      },
+      {
+        label: 'b',
+        sourceOffset: start + 3,
+        fontName: variant === 'other face' ? 'CMR10' : 'CMCSC10',
+        baseline: variant === 'separate row' ? 94 : 98.4,
+        scale: 1,
+        rise: 0,
+        bounds: [63, 98.4, 66, 103.4],
+        sourceIndices: [5]
+      }
+    ]
+    expect(resolveNestedScriptGroups(source, target, markers)).toEqual(
+      variant === 'native'
+        ? [
+            {
+              sourceOffset: start,
+              targetOffset: target.indexOf(token),
+              label: token,
+              sourceIndices: [3, 4, 5],
+              baselineIndex: 3,
+              nativeScriptGroup: true,
+              needsInlineReflow: true
+            }
+          ]
+        : []
+    )
+  }
+)
+
+it.each(['native', 'flat', 'changed dimension'] as const)(
+  'retains a blackboard-bold space with an attached dimension product (%s)',
+  (variant) => {
+    const expression = 'RN×k'
+    const source = 'The observation lies in V ∈ ' + expression + '.'
+    const target =
+      '观测值位于 V ∈ ' + (variant === 'changed dimension' ? 'RN×m' : expression) + '。'
+    const start = source.indexOf(expression)
+    const parts = [
+      ['R', 'MSBM10', 1, 0, 40, 47],
+      ['N', 'CMMI7', 0.7, 3.5, 48, 54],
+      ['×', 'CMSY7', 0.7, 3.5, 55, 59],
+      ['k', 'CMMI7', 0.7, 3.5, 60, 64]
+    ] as const
+    const markers: ScientificScriptMarker[] = parts.map(
+      ([label, fontName, scale, observedRise, left, right], index) => {
+        const rise = variant === 'flat' ? 0 : observedRise
+        const baseline = 500 + rise
+        return {
+          label,
+          fontName,
+          scale,
+          rise,
+          baseline,
+          sourceOffset: start + index,
+          sourceIndices: [index],
+          bounds: [left, baseline, right, baseline + 7 * scale]
+        }
+      }
+    )
+
+    expect(resolveNestedScriptGroups(source, target, markers)).toEqual(
+      variant === 'native'
+        ? [
+            {
+              sourceOffset: start,
+              targetOffset: target.indexOf(expression),
+              label: expression,
+              sourceIndices: [0, 1, 2, 3],
+              baselineIndex: 0,
+              nativeScriptGroup: true,
+              needsInlineReflow: true
+            }
+          ]
+        : []
+    )
+  }
+)
+
+it.each(['native', 'distant', 'missing occurrence'] as const)(
+  'keeps a geometry-proven raised prime on its native capital: %s',
+  (shape) => {
+    const label = 'Q ′′'
+    const source = 'Let ' + label + ' be the estimate.'
+    const target =
+      shape === 'missing occurrence' ? '令 Q 为估计值。' : '令 ' + label + ' 为估计值。'
+    const markers: ScientificScriptMarker[] = [
+      {
+        label: 'Q',
+        sourceOffset: 4,
+        fontName: 'CMMI10',
+        baseline: 100,
+        scale: 1,
+        rise: 0,
+        bounds: [70, 100, 78, 108],
+        sourceIndices: [4]
+      },
+      {
+        label: '′′',
+        sourceOffset: 6,
+        fontName: 'CMSY8',
+        baseline: 104.2,
+        scale: 0.73,
+        rise: 4.2,
+        bounds: [shape === 'distant' ? 81 : 78.6, 104.5, 83, 109],
+        sourceIndices: [5]
+      }
+    ]
+    expect(resolveNestedScriptGroups(source, target, markers)).toEqual(
+      shape === 'native'
+        ? [
+            {
+              sourceOffset: 4,
+              targetOffset: 2,
+              label,
+              sourceIndices: [4, 5],
+              baselineIndex: 4,
+              nativeScriptGroup: true,
+              needsInlineReflow: true
+            }
+          ]
+        : []
+    )
+  }
+)
+
+it('keeps a raised derivative prime with the same native argument', () => {
+  const label = 'g ′'
+  const source = 'We use ' + label + '(t) here.'
+  const target = '此处使用 ' + label + '(t)。'
+  const start = source.indexOf(label)
+  const markers: ScientificScriptMarker[] = [
+    {
+      label: 'g',
+      fontName: 'CMMI10',
+      sourceOffset: start,
+      baseline: 100,
+      rise: 0,
+      scale: 1,
+      bounds: [70, 98, 75, 107],
+      sourceIndices: [4]
+    },
+    {
+      label: '′',
+      fontName: 'CMSY7',
+      sourceOffset: start + 2,
+      baseline: 103.6,
+      rise: 3.6,
+      scale: 0.7,
+      bounds: [75.8, 103.9, 77.6, 107.5],
+      sourceIndices: [5]
+    }
+  ]
+
+  expect(resolveNestedScriptGroups(source, target, markers)).toEqual([
+    {
+      sourceOffset: start,
+      targetOffset: target.indexOf(label),
+      label,
+      sourceIndices: [4, 5],
+      baselineIndex: 4,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, target.replace('(t)', '(u)'), markers)).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, target, [
+      markers[0],
+      { ...markers[1], bounds: [78, 103.9, 80, 107.5] }
+    ])
+  ).toEqual([])
+})
+
+it('keeps a native upper and lower index after an attached coefficient', () => {
+  const source = 'The result is 12Kpq in both trials.',
+    target = '两个试验的结果均为 12Kpq。',
+    start = source.indexOf('Kpq'),
+    runs = [
+      ['K', 'CMMI10', 0, [80, 100, 87, 107]],
+      ['p', 'CMMI7', 3.5, [87.7, 103, 91, 108]],
+      ['q', 'CMMI7', -2.5, [87.1, 97, 91, 101]]
+    ] as const,
+    markers: ScientificScriptMarker[] = runs.map(([label, fontName, rise, bounds], index) => ({
+      label,
+      fontName,
+      scale: index === 0 ? 1 : 0.7,
+      rise,
+      bounds: [...bounds],
+      baseline: 100 + rise,
+      sourceOffset: start + index,
+      sourceIndices: [4 + index]
+    }))
+
+  expect(resolveNestedScriptGroups(source, target, markers)).toEqual([
+    {
+      sourceOffset: start,
+      targetOffset: target.indexOf('Kpq'),
+      label: 'Kpq',
+      sourceIndices: [4, 5, 6],
+      baselineIndex: 4,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, target.replace('12Kpq', '14Kpq'), markers)).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, target, [
+      markers[0],
+      markers[1],
+      { ...markers[2], bounds: [92, 97, 96, 101] }
+    ])
+  ).toEqual([])
+  expect(
+    resolveNestedScriptGroups(
+      source.replace('12Kpq', '3.12Kpq'),
+      target.replace('12Kpq', '4.12Kpq'),
+      markers.map((marker) => ({ ...marker, sourceOffset: marker.sourceOffset + 2 }))
+    )
+  ).toEqual([])
+})
+
+it('pins a signed power and its returning quantity symbol to their native row', () => {
+  const token = '10⁻⁷x'
+  const source = `The result is ∼ ${token}.`
+  const target = `结果约为 ∼ ${token}。`
+  const start = source.indexOf(token)
+  const rows = [
+    ['10', 'CMR10', 0, 1, 0, [100, 100, 109, 107]],
+    ['−', 'CMSY7', 2, 0.7, 3.6, [110, 105, 114, 106]],
+    ['7', 'CMR7', 3, 0.7, 3.6, [115, 104, 119, 109]],
+    ['x', 'CMMI10', 4, 1, 0, [120, 100, 125, 107]]
+  ] as const
+  const markers: ScientificScriptMarker[] = rows.map(
+    ([label, fontName, offset, scale, rise, bounds], index) => ({
+      sourceOffset: start + offset,
+      label,
+      fontName,
+      scale,
+      rise,
+      baseline: 100 + rise,
+      sourceIndices: [index],
+      bounds: [...bounds]
+    })
+  )
+  expect(resolveNestedScriptGroups(source, target, markers)).toEqual([
+    {
+      sourceOffset: start,
+      targetOffset: target.indexOf(token),
+      label: token,
+      sourceIndices: [0, 1, 2, 3],
+      baselineIndex: 0,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, target.replace('⁷', '⁶'), markers)).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, target, [
+      ...markers.slice(0, 3),
+      { ...markers[3], bounds: [127, 100, 132, 107] }
+    ])
+  ).toEqual([])
+})
+
+it('retains a slightly raised native definition operator as one inline group', () => {
+  const source = 'For every input, f(u) := u + 1.',
+    target = '对于每个输入，f(u) := u + 1。',
+    start = source.indexOf(':=')
+  const markers: ScientificScriptMarker[] = [
+    {
+      label: ':',
+      fontName: 'LMRoman10-Regular',
+      scale: 1,
+      rise: 0,
+      baseline: 100.35,
+      sourceOffset: start,
+      sourceIndices: [4],
+      bounds: [20, 100.35, 21.1, 104.65]
+    },
+    {
+      label: '=',
+      fontName: 'LMRoman10-Regular',
+      scale: 1,
+      rise: 0,
+      baseline: 100,
+      sourceOffset: start + 1,
+      sourceIndices: [5],
+      bounds: [21.85, 101.3, 28.1, 103.45]
+    }
+  ]
+  expect(resolveNestedScriptGroups(source, target, markers)).toEqual([
+    {
+      sourceOffset: start,
+      targetOffset: target.indexOf(':='),
+      label: ':=',
+      sourceIndices: [4, 5],
+      baselineIndex: 5,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, target.replace(':=', '='), markers)).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, target, [
+      markers[0],
+      { ...markers[1], bounds: [25, 101.3, 29, 103.45] }
+    ])
+  ).toEqual([])
+})
+
+it('moves a complete native symbolic exponent with its base', () => {
+  const power = '4q−1',
+    source = `The estimate is ${power} in both trials.`,
+    translation = `两次试验的估计均为 ${power}。`,
+    start = source.indexOf(power)
+  const runs = [
+    ['4', 'LMRoman10-Regular', 0, [20, 100, 25, 107]],
+    ['q', 'LMMathItalic7-Regular', 3.8, [26, 103.6, 30, 107.8]],
+    ['−', 'LMMathSymbols7-Regular', 3.8, [31, 105.3, 36, 105.6]],
+    ['1', 'LMRoman7-Regular', 3.8, [37, 103.8, 40, 108.4]]
+  ] as const
+  const markers: ScientificScriptMarker[] = runs.map(([label, fontName, rise, bounds], index) => ({
+    label,
+    fontName,
+    scale: index ? 0.7 : 1,
+    rise,
+    baseline: 100 + rise,
+    sourceOffset: start + index,
+    sourceIndices: [index],
+    bounds: [...bounds]
+  }))
+
+  expect(resolveNestedScriptGroups(source, translation, markers)).toEqual([
+    {
+      sourceOffset: start,
+      targetOffset: translation.indexOf(power),
+      label: power,
+      sourceIndices: [0, 1, 2, 3],
+      baselineIndex: 0,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, translation.replace(power, '4q−2'), markers)).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, translation, [
+      ...markers.slice(0, 3),
+      { ...markers[3], bounds: [41, 103.8, 44, 108.4] }
+    ])
+  ).toEqual([])
+})
+
+it.each([
+  ['ref', 'TeXGyreTermesX-Regular'],
+  ['ℓ', 'SAMPLE+NewTXMI7']
+])('keeps a native mathematical italic base with a lowered %s suffix', (suffix, fontName) => {
+  const label = `𝑙${suffix}`,
+    source = `We measure ${label} once.`,
+    target = `测得 ${label}。`,
+    sourceOffset = source.indexOf(label),
+    markers: ScientificScriptMarker[] = [
+      {
+        sourceOffset,
+        label: '𝑙',
+        scale: 1,
+        rise: 0,
+        baseline: 100,
+        fontName: 'SAMPLE+NewTXMI',
+        bounds: [30, 100, 34, 106],
+        sourceIndices: [8]
+      },
+      {
+        sourceOffset: sourceOffset + '𝑙'.length,
+        label: suffix,
+        scale: 0.72,
+        rise: -1.3,
+        baseline: 98.7,
+        fontName,
+        bounds: [33.8, 98.6, 41, 102.5],
+        sourceIndices: [9]
+      }
+    ]
+  expect(resolveNestedScriptGroups(source, target, markers)).toEqual([
+    {
+      sourceOffset,
+      targetOffset: target.indexOf(label),
+      label,
+      sourceIndices: [8, 9],
+      baselineIndex: 8,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, target.replace(label, '𝑙none'), markers)).toEqual([])
+  expect(resolveNestedScriptGroups(source, target + ' ' + label, markers)).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, target, [
+      markers[0],
+      { ...markers[1], baseline: 100, rise: 0 }
+    ])
+  ).toEqual([])
+})
+
+it('keeps a mathematical letter and its two native Cambria Math script levels', () => {
+  const source = 'The graph 𝐺21(4) is complete.'
+  const translation = '完全图 𝐺21(4) 有足够的顶点。'
+  const start = source.indexOf('𝐺')
+  const runs = [
+    ['𝐺', 0, 0, [60, 100, 68, 108]],
+    ['21', 2, -3.5, [67.8, 96.5, 76.5, 102]],
+    ['(', 4, 6.5, [69.6, 104.5, 72.2, 112.5]],
+    ['4', 5, 6.5, [73, 106.5, 76.5, 112]],
+    [')', 6, 6.5, [77.5, 104.5, 80.2, 112.5]]
+  ] as const
+  const markers = runs.map(([label, offset, rise, bounds], index): ScientificScriptMarker => ({
+    label,
+    fontName: 'CambriaMath',
+    sourceOffset: start + offset,
+    rise,
+    baseline: 100 + rise,
+    scale: index ? 0.71 : 1,
+    bounds: [...bounds],
+    sourceIndices: [index]
+  }))
+  expect(resolveNestedScriptGroups(source, translation, markers)).toEqual([
+    {
+      sourceOffset: start,
+      targetOffset: translation.indexOf('𝐺'),
+      label: '𝐺21(4)',
+      sourceIndices: [0, 1, 2, 3, 4],
+      baselineIndex: 0,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, translation.replace('21', '31'), markers)).toEqual([])
+  expect(resolveNestedScriptGroups(source, translation, markers.slice(0, -1))).toEqual([])
+})
+
+it('keeps an indexed sequence and its lowered range together', () => {
+  const label = '(Qk)k≤3'
+  const source = `We compare ${label} before the update.`
+  const translation = `更新前比较 ${label}。`
+  const sourceOffset = source.indexOf(label)
+  const runs = [
+    ['(', 0, 'LMRoman10-Regular', [32, 98, 35, 108]],
+    ['Q', 0, 'LMMathItalic10-Regular', [36, 100, 43, 107]],
+    ['k', -1.5, 'LMMathItalic8-Regular', [42.5, 98.4, 47, 102]],
+    [')', 0, 'LMRoman10-Regular', [48, 98, 51, 108]],
+    ['k', -1.5, 'LMMathItalic8-Regular', [52, 98.4, 56, 102]],
+    ['≤', -1.5, 'LMMathSymbols8-Regular', [57, 98, 62, 104]],
+    ['3', -1.5, 'LMRoman8-Regular', [63, 98.5, 67, 104]]
+  ] as const
+  const markers = runs.map(([part, rise, fontName, bounds], index): ScientificScriptMarker => ({
+    label: part,
+    fontName,
+    sourceOffset: sourceOffset + index,
+    rise,
+    baseline: 100 + rise,
+    scale: rise ? 0.73 : 1,
+    bounds: [...bounds],
+    sourceIndices: [index]
+  }))
+  expect(resolveNestedScriptGroups(source, translation, markers)).toEqual([
+    {
+      sourceOffset,
+      targetOffset: translation.indexOf(label),
+      label,
+      sourceIndices: [0, 1, 2, 3, 4, 5, 6],
+      baselineIndex: 0,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  expect(resolveNestedScriptGroups(source, translation.replace('≤3', '≤4'), markers)).toEqual([])
+  const [opening, base, index, closing, lower, relation, bound] = markers
+  expect(
+    resolveNestedScriptGroups(source, translation, [
+      opening,
+      base,
+      index,
+      closing,
+      { ...lower, baseline: 100, rise: 0 },
+      relation,
+      bound
+    ])
+  ).toEqual([])
+})
+it.each([3.5, 0])(
+  'preserves only the raised symbolic exponent of a shared numeral (%s)',
+  (rise) => {
+    const source = 'The bound is 3k for this sequence.'
+    const translation = '这个数列的上界为 3k。'
+    const start = source.indexOf('k')
+    const markers: ScientificScriptMarker[] = [
+      {
+        sourceOffset: 0,
+        label: 'The bound is 3',
+        baseline: 200,
+        scale: 1,
+        rise: 0,
+        fontName: 'CMR10',
+        bounds: [20, 198, 85, 207],
+        sourceIndices: [4]
+      },
+      {
+        sourceOffset: start,
+        label: 'k',
+        baseline: 200 + rise,
+        scale: 0.7,
+        rise,
+        fontName: 'CMMI7',
+        bounds: [86, 199 + rise, 90, 203 + rise],
+        sourceIndices: [5]
+      }
+    ]
+    expect(resolveNestedScriptGroups(source, translation, markers)).toEqual(
+      rise
+        ? [
+            {
+              sourceOffset: start,
+              targetOffset: translation.indexOf('k'),
+              label: 'k',
+              sourceIndices: [5],
+              baselineIndex: 4,
+              nativeScriptGroup: true,
+              needsInlineReflow: true
+            }
+          ]
+        : []
+    )
+  }
+)
+
+it.each([
+  [9, 6, 3.81],
+  [10, 7, 3.62]
+])('keeps an attached symbolic superscript in Computer Modern %s', (body, script, rise) => {
+  const label = '∼ V k'
+  const source = `The estimate is ${label} in this range.`
+  const translation = `这个范围内的估计值 ${label}。`
+  const sourceOffset = source.indexOf(label)
+  const runs = [
+    ['∼', `CMSY${body}`, 1, 0, [20, 101, 26, 103]],
+    ['V', `CMMI${body}`, 1, 0, [29, 100, 35.5, 106.2]],
+    ['k', `CMMI${script}`, script / body, rise, [36, 100 + rise, 39, 104 + rise]]
+  ] as const
+  const markers: ScientificScriptMarker[] = runs.map(
+    ([part, fontName, scale, elevation, bounds], index) => ({
+      label: part,
+      fontName,
+      scale,
+      rise: elevation,
+      baseline: 100 + elevation,
+      bounds: [...bounds],
+      sourceOffset: sourceOffset + index * 2,
+      sourceIndices: [index + 4]
+    })
+  )
+  expect(resolveNestedScriptGroups(source, translation, markers)).toEqual([
+    {
+      sourceOffset,
+      targetOffset: translation.indexOf(label),
+      label,
+      sourceIndices: [4, 5, 6],
+      baselineIndex: 5,
+      nativeScriptGroup: true,
+      needsInlineReflow: true
+    }
+  ])
+  const [relation, base, exponent] = markers
+  expect(resolveNestedScriptGroups(source, translation.replace('V k', 'V m'), markers)).toEqual([])
+  expect(resolveNestedScriptGroups(source, translation + label, markers)).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, translation, [
+      relation,
+      base,
+      { ...exponent, rise: 0, baseline: 100 }
+    ])
+  ).toEqual([])
+  expect(
+    resolveNestedScriptGroups(source, translation, [
+      relation,
+      base,
+      { ...exponent, bounds: [40, 100 + rise, 43, 104 + rise] }
+    ])
+  ).toEqual([])
 })

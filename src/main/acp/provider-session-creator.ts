@@ -1,5 +1,6 @@
+import { assertTaskRunTracingReady, requiresTaskRunTracing } from './task-run-tracing'
 import { recordMainAgentContext } from './main-agent-process-ownership'
-import { HARNESS_OWNER } from '../harness-acp/config'
+import { HARNESS_EPHEMERAL_SESSION, HARNESS_OWNER } from '../harness-acp/config'
 import type { ActiveSession, ClientConnection } from '@agentclientprotocol/sdk'
 import { resolve } from 'node:path'
 import type {
@@ -52,6 +53,7 @@ type AcpProviderSessionCreatorDependencies = Readonly<{
   // undefined when the project has no Agent Context or the lookup fails; failures never block
   // session creation.
   resolveProjectAgentContext?: (projectId: string) => Promise<string | undefined>
+  authorizedDirectories?: { initialize(session: ActiveSession): Promise<void> }
   registerSessionSpecialist?: (sessionId: string, specialistId: string | undefined) => void
   updateCwd: (cwd: string) => void
   pushEvent: (event: CreationEvent) => void
@@ -64,7 +66,10 @@ export class AcpProviderSessionCreator {
 
   constructor(private readonly deps: AcpProviderSessionCreatorDependencies) {}
 
-  async create(request: AcpCreateSessionRequest = {}): Promise<AcpCreateSessionResponse> {
+  async create(
+    request: AcpCreateSessionRequest = {},
+    beforePublish?: () => void
+  ): Promise<AcpCreateSessionResponse> {
     let capability: SessionCapabilityProvision | undefined
     let provisionalSession: ActiveSession | undefined
     let reservation: ReturnType<AcpSessionRegistry['reserve']>['reservation']
@@ -77,6 +82,10 @@ export class AcpProviderSessionCreator {
       const connection = await this.deps.ensureConnected(cwd)
       this.deps.assertCurrentConnection(connection)
       const startupBackend = this.deps.currentBackend()
+      if (requiresTaskRunTracing(request)) {
+        await assertTaskRunTracingReady(startupBackend.framework.id, connection)
+        this.deps.assertCurrentConnection(connection)
+      }
       const startupGeneration = this.deps.registry.startupGeneration
       const specialist = await this.resolveSpecialist(request.specialistId, startupBackend)
       const projectContextAppend = await this.resolveProjectAgentContext(projectId)
@@ -119,7 +128,14 @@ export class AcpProviderSessionCreator {
           mcpServers: sessionCapabilities.mcpServers,
           ...setup.metaArg,
           ...(startupBackend.framework.id === 'open-science-agent'
-            ? { _meta: { ...setup.metaArg._meta, [HARNESS_OWNER]: { projectId } } }
+            ? {
+                _meta: {
+                  ...setup.metaArg._meta,
+                  ...(capability.descriptor.role === 'restricted-inference'
+                    ? { [HARNESS_EPHEMERAL_SESSION]: true }
+                    : { [HARNESS_OWNER]: { projectId } })
+                }
+              }
             : {})
         })
         .start()
@@ -142,6 +158,7 @@ export class AcpProviderSessionCreator {
       log.info('createSession: configurePermissionProfile', this.deps.diagnosticContext())
       log.info('createSession: applySessionModel', this.deps.diagnosticContext())
       const permissionProfile = normalizePermissionProfile(request.permissionProfile)
+      await this.deps.authorizedDirectories?.initialize(session)
       let backend = this.deps.currentBackend()
       let configuration = await this.deps.configurator.configure({
         backend,
@@ -165,6 +182,7 @@ export class AcpProviderSessionCreator {
           continue
         }
         identityReservation.assertCurrent()
+        beforePublish?.()
         const { aggregate } = this.deps.registry.publish(identityReservation, session.sessionId, {
           session,
           cwd,

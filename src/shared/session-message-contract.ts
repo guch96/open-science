@@ -15,12 +15,22 @@ import type { AgentFrameworkId } from './settings'
 import type { PersistedUploadedAttachment } from './uploads'
 import type { TurnOutcome } from './session-turn-outcome-contract'
 import type { HarnessTurnJournal } from './harness-turn-contract'
+import type { WebInvocationMetadata } from './web-tools'
+import type { PackageWebActivityEvidence } from './session-package-web'
 
 export type PersistedMessageRole = 'user' | 'agent'
 
 export type PersistedMessageStatus = 'complete' | 'streaming' | 'error'
 
 export type MessageAttribution =
+  | Readonly<{
+      kind: 'application'
+      feature: 'schedule'
+      purpose: 'scheduled-wake'
+      scheduleId: string
+      occurrenceId: string
+      scheduledAt: number
+    }>
   | Readonly<{
       kind: 'application'
       feature: 'reviewer'
@@ -183,7 +193,7 @@ export type PersistedChatMessage = {
 
 export type PersistedToolActivityStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 
-export type PersistedToolActivityDisposition = 'declined' | 'permission-closed'
+export type PersistedToolActivityDisposition = 'declined' | 'permission-closed' | 'cancelled'
 
 // A file location a tool touched; kept small so it can always be persisted.
 export type PersistedToolCallLocation = {
@@ -204,6 +214,8 @@ export type PersistedToolActivity = {
   executionInvocationId?: string
   // Set only by the main-process permission owner, never by provider metadata.
   appOwned?: true
+  webInvocation?: WebInvocationMetadata
+  packageWebEvidence?: PackageWebActivityEvidence
   sortIndex: number
   eventIds: string[]
   providerToolName?: string

@@ -6,9 +6,12 @@ import {
   setWindowsRuntimeAccess,
   getWindowsRuntimeAccess,
   isWindowsProtectionConfigured,
+  preflightWindowsFilesystem,
   removeWindows,
   statusForPlatform,
   type SandboxDependencyCheck,
+  type WindowsAclPreflightRequest,
+  type WindowsAclPreflightResult,
   type WindowsShell,
   type WindowsRuntimeVerification
 } from '../runtime/src/index.js'
@@ -294,6 +297,7 @@ class NotebookNetworkSandbox {
     return {
       argv: wrapped.argv,
       env: wrapped.env,
+      ...(wrapped.memoryProbe ? { memoryProbe: wrapped.memoryProbe } : {}),
       ...(wrapped.processTreeProof ? { processTreeProof: wrapped.processTreeProof } : {}),
       ...(wrapped.confirmProcessTreeTermination
         ? { confirmProcessTreeTermination: wrapped.confirmProcessTreeTermination }
@@ -389,6 +393,45 @@ class NotebookNetworkSandbox {
       throw new Error('Windows protection is only available on Windows.')
     // Configuration is independent of runtime readiness, including an in-flight fence probe.
     return isWindowsProtectionConfigured(createRuntimeConfig(this.#options))
+  }
+
+  /**
+   * Read-only protected-mode validation of a granted root. Defaults to `scope: 'tree'`, which is
+   * what the grant dialog needs before persisting; the per-command re-check passes
+   * `scope: 'target'` so it does not re-walk a large granted folder on every launch.
+   */
+  async preflightGrantedRoot(
+    path: string,
+    access: 'ro' | 'rw',
+    requestedPath = path,
+    options: {
+      signal?: AbortSignal
+      filesystem?: WindowsAclPreflightRequest['filesystem']
+      scope?: WindowsAclPreflightRequest['scope']
+    } = {}
+  ): Promise<void> {
+    options.signal?.throwIfAborted()
+    if (process.platform !== 'win32') return
+    const config = createRuntimeConfig(this.#options)
+    if (!(await isWindowsProtectionConfigured(config))) return
+    options.signal?.throwIfAborted()
+    const request: WindowsAclPreflightRequest = {
+      path,
+      access,
+      requestedPath,
+      scope: options.scope ?? 'tree',
+      filesystem: options.filesystem
+    }
+    const result: WindowsAclPreflightResult = await preflightWindowsFilesystem(
+      config,
+      request,
+      options.signal
+    )
+    if (result.ok) return
+    const failure = result.error
+    throw new Error(
+      `WINDOWS_ACL_PREFLIGHT_FAILED: code=${failure.code} path=${failure.path} access=${failure.access} stage=${failure.stage}${failure.win32Code === undefined ? '' : ` win32Code=${failure.win32Code}`}: ${failure.message}. ${failure.remediation}`
+    )
   }
 
   async getWindowsRuntimeAccess(
@@ -542,7 +585,8 @@ class NotebookNetworkSandbox {
 }
 
 export { NotebookNetworkSandbox, NotebookSandboxPreparationError }
-export { mapWsl2Path } from '../runtime/src/platform/wsl2-isolation.js'
+export { probeLinuxIsolation } from '../runtime/src/platform/linux-isolation.js'
+export { mapWsl2Path, wslUncDistro } from '../runtime/src/platform/wsl2-isolation.js'
 // Shared transport accepts an already validated numeric destination, preserving DNS pinning.
 export {
   tunnelThroughProxy,

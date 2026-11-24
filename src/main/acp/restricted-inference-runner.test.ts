@@ -5,7 +5,10 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { CODEX_SHARED_PROVIDER_ID, CODEX_SUBSCRIPTION_PROVIDER_ID } from '../../shared/settings'
+import {
+  CODEX_SHARED_PROVIDER_ID,
+  CODEX_SUBSCRIPTION_PROVIDER_ID
+} from '../../shared/settings-runtime'
 import type { AcpRuntimeEvent, AcpTurnTokenUsage } from '../../shared/acp'
 import type { ResolvedAgentBackend } from '../agent-framework'
 import { listAgentFrameworks } from '../agent-framework/registry'
@@ -282,6 +285,7 @@ const runtimeHarness = (
     respondToPermission: vi.fn(async () => undefined),
     shutdownForQuit: vi.fn(async () => {
       await resolvedBackend?.responsesTransportLease?.release()
+      return { reaped: true }
     })
   } as unknown as RestrictedInferenceRuntime
 }
@@ -299,7 +303,8 @@ const makeRunner = async (
   resolved: ResolvedAgentBackend,
   runtime: RuntimeHarnessOptions = {},
   taskOnly = false,
-  preserveModelRoute = false
+  preserveModelRoute = false,
+  allowCodeBuddySubscription = false
 ): Promise<{
   runner: RestrictedInferenceRunner
   resolveTarget: ReturnType<typeof vi.fn>
@@ -314,6 +319,7 @@ const makeRunner = async (
     profileNamespace: 'test-inference',
     taskOnly,
     preserveModelRoute,
+    allowCodeBuddySubscription,
     resolveTarget,
     allowNativeCodexSubscription: true,
     createRuntime: (options) => {
@@ -338,6 +344,53 @@ const runInput = (
 })
 
 describe('RestrictedInferenceRunner', () => {
+  it.each(['confirmed', 'unconfirmed', 'unconfirmed-success', 'rejected', 'default'] as const)(
+    'gates Film cleanup before retry admission: %s',
+    async (cleanup) => {
+      temporaryRoot = await mkdtemp(join(tmpdir(), 'restricted-cleanup-'))
+      const usage = { inputTokens: 10, outputTokens: 20, cacheTokens: 0 }
+      const original = new Error('Request interrupted')
+      const runner = new RestrictedInferenceRunner({
+        appVersion: 'test',
+        configRoot: temporaryRoot,
+        profileNamespace: 'test',
+        requireConfirmedCleanup: cleanup !== 'default',
+        resolveTarget: async () => backend(claudeCodeFramework),
+        createRuntime: (options) => ({
+          ...runtimeHarness(options, {
+            events: [event({ kind: 'stop', turnUsage: usage })],
+            onPrompt: async () => {
+              if (cleanup !== 'unconfirmed-success') throw original
+            }
+          }),
+          shutdownForQuit: async () => {
+            if (cleanup === 'rejected') throw new Error('Cleanup failed')
+            return { reaped: cleanup === 'confirmed' }
+          }
+        })
+      })
+      const result = await runner.run(runInput()).catch((error: unknown) => error)
+      if (
+        cleanup === 'unconfirmed' ||
+        cleanup === 'unconfirmed-success' ||
+        cleanup === 'rejected'
+      ) {
+        expect(result).toMatchObject({
+          code: 'transport-unavailable',
+          usage,
+          cause: cleanup === 'unconfirmed-success' ? undefined : original
+        })
+        // Retain a profile whose files may still belong to a live runtime.
+        expect(await readdir(join(temporaryRoot, 'runtime-support', 'test'))).toHaveLength(1)
+      } else {
+        expect(result).toBe(original)
+        expect(await readdir(join(temporaryRoot, 'runtime-support', 'test'))).toEqual([])
+      }
+      // Even a failed cleanup must release shutdown waiters.
+      await runner.shutdown()
+    }
+  )
+
   it.each(['codex-responses', 'codex-responses-compatibility', 'codex-bridge'] as const)(
     'preserves the actual %s route for validation',
     async (modelRoute) => {
@@ -365,78 +418,89 @@ describe('RestrictedInferenceRunner', () => {
     }
   )
 
-  it('bounds cancelled resolution and cleans up a backend that arrives later', async () => {
-    temporaryRoot = await mkdtemp(join(tmpdir(), 'validation-resolution-'))
-    let finish!: (value: ResolvedAgentBackend) => void
-    const resolving = new Promise<ResolvedAgentBackend>((resolve) => {
-      finish = resolve
-    })
-    const resolveTarget = vi.fn(async () => resolving)
-    const createRuntime = vi.fn()
-    const runner = new RestrictedInferenceRunner({
-      appVersion: 'test',
-      configRoot: temporaryRoot,
-      profileNamespace: 'test',
-      taskOnly: true,
-      preserveModelRoute: true,
-      resolveTarget,
-      createRuntime
-    })
-    const controller = new AbortController()
-    const pending = runner.run(runInput({ signal: controller.signal }))
-    const rejected = expect(pending).rejects.toMatchObject({ code: 'cancelled' })
-    await vi.waitFor(() => expect(resolveTarget).toHaveBeenCalledOnce())
-    controller.abort()
-    await rejected
-    await runner.shutdown()
-    expect(createRuntime).not.toHaveBeenCalled()
-    const release = vi.fn(async () => undefined)
-    finish(
-      backend(claudeCodeFramework, { messagesBridgeLease: { setTarget: () => true, release } })
-    )
-    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce())
-    await vi.waitFor(async () =>
-      expect(await readdir(join(temporaryRoot!, 'runtime-support', 'test'))).toEqual([])
-    )
-  })
-
-  it('shuts down a validation runtime when cancelled before session creation completes', async () => {
-    temporaryRoot = await mkdtemp(join(tmpdir(), 'validation-abort-'))
-    let rejectSession!: (error: Error) => void
-    const runtime = {
-      createSession: vi.fn(
-        () =>
-          new Promise<never>((_resolve, reject) => {
-            rejectSession = reject
-          })
-      ),
-      sendPrompt: vi.fn(),
-      cancelPrompt: vi.fn(),
-      respondToPermission: vi.fn(),
-      shutdownForQuit: vi.fn(async () => {
-        rejectSession(new Error('closed'))
-        return { reaped: true }
+  it.each([false, true])(
+    'bounds cancelled resolution and cleans up a late backend (preserveModelRoute=%s)',
+    async (preserveModelRoute) => {
+      temporaryRoot = await mkdtemp(join(tmpdir(), 'restricted-resolution-'))
+      const resolving = Promise.withResolvers<ResolvedAgentBackend>()
+      const resolveTarget = vi.fn(() => resolving.promise)
+      const createRuntime = vi.fn()
+      const runner = new RestrictedInferenceRunner({
+        appVersion: 'test',
+        configRoot: temporaryRoot,
+        profileNamespace: 'test',
+        taskOnly: true,
+        preserveModelRoute,
+        resolveTarget,
+        createRuntime
       })
+      const controller = new AbortController()
+      const pending = runner.run(runInput({ signal: controller.signal }))
+      const settled = vi.fn()
+      void pending.catch(settled)
+      await vi.waitFor(() => expect(resolveTarget).toHaveBeenCalledOnce())
+      const release = vi.fn(async () => undefined)
+      controller.abort(new DOMException('Timed out', 'TimeoutError'))
+      try {
+        await vi.waitFor(
+          () =>
+            expect(settled).toHaveBeenCalledWith(expect.objectContaining({ code: 'cancelled' })),
+          { timeout: 500 }
+        )
+      } finally {
+        resolving.resolve(
+          backend(claudeCodeFramework, { messagesBridgeLease: { setTarget: () => true, release } })
+        )
+        await runner.shutdown()
+      }
+      expect(createRuntime).not.toHaveBeenCalled()
+      await vi.waitFor(() => expect(release).toHaveBeenCalledOnce())
+      await vi.waitFor(async () =>
+        expect(await readdir(join(temporaryRoot!, 'runtime-support', 'test'))).toEqual([])
+      )
     }
-    const runner = new RestrictedInferenceRunner({
-      appVersion: 'test',
-      configRoot: temporaryRoot,
-      profileNamespace: 'test',
-      taskOnly: true,
-      preserveModelRoute: true,
-      resolveTarget: async () => backend(claudeCodeFramework),
-      createRuntime: () => runtime
-    })
-    const controller = new AbortController()
-    const pending = runner.run(runInput({ signal: controller.signal }))
-    const rejected = expect(pending).rejects.toThrow('closed')
-    await vi.waitFor(() => expect(runtime.createSession).toHaveBeenCalledOnce())
-    controller.abort()
-    await rejected
-    expect(runtime.sendPrompt).not.toHaveBeenCalled()
-    expect(runtime.shutdownForQuit).toHaveBeenCalled()
-    expect(await readdir(join(temporaryRoot, 'runtime-support', 'test'))).toEqual([])
-  })
+  )
+
+  it.each([false, true])(
+    'interrupts a restricted runtime during session setup (preserveModelRoute=%s)',
+    async (preserveModelRoute) => {
+      temporaryRoot = await mkdtemp(join(tmpdir(), 'restricted-setup-'))
+      const creating = Promise.withResolvers<never>()
+      const runtime = {
+        createSession: vi.fn(() => creating.promise),
+        sendPrompt: vi.fn(),
+        cancelPrompt: vi.fn(),
+        respondToPermission: vi.fn(),
+        shutdownForQuit: vi.fn(async () => {
+          creating.reject(new Error('closed'))
+          return { reaped: true }
+        })
+      }
+      const runner = new RestrictedInferenceRunner({
+        appVersion: 'test',
+        configRoot: temporaryRoot,
+        profileNamespace: 'test',
+        taskOnly: true,
+        preserveModelRoute,
+        resolveTarget: async () => backend(claudeCodeFramework),
+        createRuntime: () => runtime
+      })
+      const controller = new AbortController()
+      const pending = runner
+        .run(runInput({ signal: controller.signal }))
+        .catch((error: unknown) => error)
+      await vi.waitFor(() => expect(runtime.createSession).toHaveBeenCalledOnce())
+      controller.abort(new DOMException('Timed out', 'TimeoutError'))
+      try {
+        expect(runtime.shutdownForQuit).toHaveBeenCalledOnce()
+      } finally {
+        creating.reject(new Error('closed'))
+        await expect(pending).resolves.toMatchObject({ code: 'cancelled' })
+      }
+      expect(runtime.sendPrompt).not.toHaveBeenCalled()
+      expect(await readdir(join(temporaryRoot, 'runtime-support', 'test'))).toEqual([])
+    }
+  )
 
   it.each(listAgentFrameworks())(
     'delivers only task instructions through the $id adapter',
@@ -489,7 +553,7 @@ describe('RestrictedInferenceRunner', () => {
               expect(prepared.args?.[1]).toContain(temporaryRoot!)
           }
         },
-        true
+        framework.id !== 'open-science-agent'
       )
       if (framework.id === 'pi') {
         await writeFile(join(temporaryRoot!, 'models.json'), '{}')
@@ -648,6 +712,40 @@ describe('RestrictedInferenceRunner', () => {
     expect(JSON.stringify(claudeOptions)).not.toContain(projectionRoot)
     expect(JSON.stringify(claudeOptions)).not.toContain(LOAD_SKILL_TOOL_CALLABLE_NAME)
   })
+
+  it.each([false, true])(
+    'gates CodeBuddy subscription profiles on task opt-in (%s)',
+    async (allowed) => {
+      const resolved = backend(codeBuddyFramework, { modelRoute: 'codebuddy-subscription' })
+      const { runner } = await makeRunner(
+        resolved,
+        {
+          events: [event({ role: 'assistant', text: 'OK' })],
+          onCreateSession: async (prepared) => {
+            expect(prepared.env.HOME).toBe(resolved.env.HOME)
+            expect(prepared.env.CODEBUDDY_CONFIG_DIR).not.toBe(resolved.env.CODEBUDDY_CONFIG_DIR)
+            expect(await readdir(prepared.env.CODEBUDDY_CONFIG_DIR!)).toEqual(['settings.json'])
+            expect(prepared.args).toEqual(['--tools', ''])
+          }
+        },
+        false,
+        false,
+        allowed
+      )
+      const account = join(temporaryRoot!, 'account')
+      await mkdir(account)
+      await writeFile(join(account, 'settings.json'), '{}')
+      resolved.env = {
+        CODEBUDDY_INTERNET_ENVIRONMENT: 'external',
+        CODEBUDDY_CONFIG_DIR: account,
+        HOME: account
+      }
+      const result = runner.run(runInput({ target: target('codebuddy') }))
+      if (allowed) await expect(result).resolves.toMatchObject({ text: 'OK' })
+      else
+        await expect(result).rejects.toThrow('This task does not support CodeBuddy subscriptions.')
+    }
+  )
 
   it('isolates CodeBuddy configuration and removes native tools from restricted inference', async () => {
     temporaryRoot = await mkdtemp(join(tmpdir(), 'open-science-restricted-codebuddy-'))

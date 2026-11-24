@@ -201,6 +201,29 @@ describe('desktop projection of application commands and events', () => {
     }
   )
 
+  it('opens a complete history page larger than one desktop frame', async () => {
+    const channel = 'sessions:load-history-page'
+    const page = {
+      complete: true,
+      session: { messages: [{ content: 'x'.repeat(16 * 1024 * 1024) }] }
+    }
+    const server = await startDesktopRuntimeTransport({
+      version: 'test',
+      events: new ApplicationEventHub(),
+      commands: { commandNames: () => [channel], invoke: async () => page }
+    })
+    cleanups.push(server.close)
+    const client = await connectDesktopRuntime({
+      endpoint: server.endpoint,
+      onEvent: vi.fn(),
+      onDisconnect: vi.fn()
+    })
+    cleanups.push(async () => client.close())
+    await expect(
+      client.invoke(randomUUID(), channel, [{ projectId: 'project', sessionId: 'history' }])
+    ).resolves.toEqual(page)
+  })
+
   it.each([undefined, null, false, 0])(
     'preserves the command result %s for renderer and host callers',
     async (result) => {
@@ -222,6 +245,78 @@ describe('desktop projection of application commands and events', () => {
       await expect(client.invokeHost('projects:list')).resolves.toBe(result)
     }
   )
+
+  it('cancels an in-flight host command in the runtime process', async () => {
+    let operationSignal: AbortSignal | undefined
+    const commands = {
+      commandNames: () => ['projects:list'],
+      invoke: async (_name: string, invocation: ApplicationInvocation<readonly unknown[]>) => {
+        operationSignal = invocation.callerLease.signal
+        await new Promise<void>((resolve) =>
+          operationSignal!.addEventListener('abort', () => resolve(), { once: true })
+        )
+        return []
+      }
+    }
+    const server = await startDesktopRuntimeTransport({
+      version: 'test',
+      events: new ApplicationEventHub(),
+      commands,
+      hostCommands: commands
+    })
+    cleanups.push(server.close)
+    const client = await connectDesktopRuntime({
+      endpoint: server.endpoint,
+      onEvent: vi.fn(),
+      onDisconnect: vi.fn()
+    })
+    cleanups.push(async () => client.close())
+    const cancellation = new AbortController()
+    const pending = client.invokeHost('projects:list', [], cancellation.signal)
+    await vi.waitFor(() => expect(operationSignal).toBeDefined())
+    cancellation.abort(new Error('cancel fixture'))
+    await expect(pending).rejects.toThrow('cancel fixture')
+    await vi.waitFor(() => expect(operationSignal?.aborted).toBe(true))
+  })
+
+  it('keeps an abandoned host command budgeted until the runtime settles it', async () => {
+    let release!: () => void
+    const released = new Promise<void>((resolve) => (release = resolve))
+    const commands = {
+      commandNames: () => ['projects:list'],
+      // Ignores cancellation, like synchronous runtime inspection.
+      invoke: async () => {
+        await released
+        return []
+      }
+    }
+    const server = await startDesktopRuntimeTransport({
+      version: 'test',
+      events: new ApplicationEventHub(),
+      commands,
+      hostCommands: commands
+    })
+    cleanups.push(server.close)
+    const onDisconnect = vi.fn()
+    const client = await connectDesktopRuntime({
+      endpoint: server.endpoint,
+      onEvent: vi.fn(),
+      onDisconnect
+    })
+    cleanups.push(async () => client.close())
+    const abandoned = Array.from({ length: 256 }, () => {
+      const cancellation = new AbortController()
+      const pending = client.invokeHost('projects:list', [], cancellation.signal)
+      cancellation.abort(new Error('abandoned'))
+      return pending.catch(() => undefined)
+    })
+    await Promise.all(abandoned)
+    // The runtime still counts these requests; the client must not exceed its admission limit.
+    await expect(client.invokeHost('projects:list')).rejects.toThrow('Too many pending')
+    release()
+    await vi.waitFor(async () => expect(await client.invokeHost('projects:list')).toEqual([]))
+    expect(onDisconnect).not.toHaveBeenCalled()
+  })
 
   it('connects the desktop client to the real transport and rejects pending calls on disconnect', async () => {
     const events = new ApplicationEventHub()
@@ -831,6 +926,66 @@ describe('native desktop requests over the authenticated connection', () => {
       expect(value.disconnected).not.toHaveBeenCalled()
     } finally {
       for (const finish of finishes) finish()
+      value.client.close()
+    }
+  })
+
+  it('keeps a queued Film inspection cancellable beyond the native dialog deadline', async () => {
+    const started = Promise.withResolvers<AbortSignal>()
+    const value = await nativeSetup(async (_request, signal) => {
+      started.resolve(signal)
+      return new Promise(() => {})
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const controller = new AbortController()
+    try {
+      const pending = expect(
+        value.server.requestNative(
+          {
+            operation: 'research-video-check',
+            htmlPath: '/film/player.html',
+            includeFrames: false
+          },
+          undefined,
+          controller.signal
+        )
+      ).rejects.toThrow(/cancel/i)
+      const signal = await started.promise
+      await vi.advanceTimersByTimeAsync(310_000)
+      expect(signal.aborted).toBe(false)
+      controller.abort()
+      await pending
+      while (!signal.aborted) await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      controller.abort()
+      vi.useRealTimers()
+      value.client.close()
+    }
+  })
+
+  it('allows a progressing 4K render to cross one hour', async () => {
+    const started = Promise.withResolvers<void>()
+    const output = Promise.withResolvers<string>()
+    const value = await nativeSetup(async () => {
+      started.resolve()
+      return output.promise
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const htmlPath = '/film/player.html'
+      const pending = value.server.requestNative({
+        operation: 'research-video-mp4',
+        htmlPath,
+        encoderPath: '/tools/encoder',
+        probePath: '/tools/probe',
+        resolution: '4k'
+      })
+      await started.promise
+      await vi.advanceTimersByTimeAsync(3_602_000)
+      output.resolve(htmlPath + '.mp4')
+      await expect(pending).resolves.toBe(htmlPath + '.mp4')
+    } finally {
+      vi.useRealTimers()
       value.client.close()
     }
   })

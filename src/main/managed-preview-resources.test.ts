@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rename, rm, stat, truncate, utimes, writeFile } from
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateSync } from 'node:zlib'
+import { randomBytes } from 'node:crypto'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
@@ -12,6 +13,7 @@ import {
   readExactRange
 } from './managed-preview-resources'
 import { observeFile, type FileObservation } from './bounded-file-io'
+import { readRasterImageDimensions } from './raster-image-safety'
 
 describe('ManagedPreviewResources', () => {
   let temporaryDirectory: string | undefined
@@ -69,6 +71,34 @@ describe('ManagedPreviewResources', () => {
     ])
   }
 
+  it('protects open previews and admitted readers, and reserves files during retention', async () => {
+    const path = await createFile(Buffer.from('film'), 'player.html')
+    const owner = new ManagedPreviewResources({ resolvePath: async () => path })
+    const request = { source: 'local' as const, path }
+    const resource = await owner.acquire(1, request)
+    const remove = vi.fn(async () => undefined)
+    expect(await owner.withUnusedFiles([path], remove)).toBe(false)
+    const reader = await owner.resolveProtocolResource(resource.id)
+    if (!('fileHandle' in reader)) throw new Error('Expected pinned file reader')
+    owner.release(1, { resourceId: resource.id })
+    expect(await owner.withUnusedFiles([path], remove)).toBe(false)
+    await reader.fileHandle.close()
+    expect(
+      await owner.withUnusedFiles([path], async () => {
+        await expect(owner.acquire(2, request)).rejects.toThrow('being removed')
+        await remove()
+      })
+    ).toBe(true)
+    expect(remove).toHaveBeenCalledOnce()
+    await expect(
+      owner.withUnusedFiles([path], async () => {
+        throw new Error('disk failure')
+      })
+    ).rejects.toThrow('disk failure')
+    const next = await owner.acquire(2, request)
+    owner.release(2, { resourceId: next.id })
+  })
+
   it('registers the preview scheme for streaming and cross-scheme capability fetches', () => {
     expect(MANAGED_PREVIEW_SCHEME).toEqual({
       scheme: 'open-science-preview',
@@ -116,6 +146,24 @@ describe('ManagedPreviewResources', () => {
       total: 10,
       data: new Uint8Array(Buffer.from('2345'))
     })
+  })
+
+  it('streams unchanged high-resolution download bytes without admitting an inline raster', async () => {
+    const png = createCompressedPng(5472, 3072)
+    const filePath = await createFile(png, 'large.png')
+    const resources = new ManagedPreviewResources({ resolvePath: async () => filePath })
+    const source = { source: 'local' as const, path: filePath, mimeType: 'image/png' }
+    await expect(resources.acquire(17, source)).rejects.toThrow(/16,000,000.*pixel/i)
+    const download = await resources.acquire(17, { ...source, purpose: 'download' })
+    expect(download).toMatchObject({ size: png.length, mimeType: 'application/octet-stream' })
+    expect(download.width).toBeUndefined()
+    const range = await resources.readRange(17, {
+      resourceId: download.id,
+      begin: 0,
+      end: png.length
+    })
+    expect(range.data).toEqual(new Uint8Array(png))
+    resources.release(17, { resourceId: download.id })
   })
 
   it.each([
@@ -262,13 +310,74 @@ describe('ManagedPreviewResources', () => {
     }
   })
 
+  it.each(['png', 'webp'] as const)(
+    'orients the %s preview and preserves the original file',
+    async (format) => {
+      const width = 880
+      const height = 640
+      const source = await sharp(randomBytes(width * height * 3), {
+        raw: { width, height, channels: 3 }
+      })
+        .withMetadata({ orientation: 6 })
+        .toFormat(format, { lossless: true })
+        .toBuffer()
+      // For WebP this places the EXIF chunk after the first 1 MiB.
+      expect(source.length).toBeGreaterThan(1024 * 1024)
+      const path = await createFile(source, `portrait.${format}`)
+      const resources = new ManagedPreviewResources({ resolvePath: async () => path })
+      try {
+        const resource = await resources.acquire(17, { source: 'local', path, imagePreview: true })
+        expect(resource).toMatchObject({
+          width: height,
+          height: width,
+          mimeType: 'image/png'
+        })
+        const preview = await resources.readRange(17, {
+          resourceId: resource.id,
+          begin: 0,
+          end: 33
+        })
+        expect(readRasterImageDimensions(Buffer.from(preview.data), 'image/png')).toEqual({
+          width: height,
+          height: width
+        })
+        expect(await readFile(path)).toEqual(source)
+      } finally {
+        resources.releaseOwner(17)
+      }
+    }
+  )
+
+  it('previews a source above 50 MiB within the image generation byte budget', async () => {
+    const filePath = await createFile(createCompressedPng(6_000, 3_000), 'figure.png')
+    await truncate(filePath, 55 * 1024 * 1024)
+    const resources = new ManagedPreviewResources({ resolvePath: async () => filePath })
+    try {
+      const resource = await resources.acquire(17, {
+        source: 'local',
+        path: filePath,
+        imagePreview: true
+      })
+      expect(resource).toMatchObject({ width: 6_000, height: 3_000, mimeType: 'image/png' })
+      const preview = await resources.readRange(17, {
+        resourceId: resource.id,
+        begin: 0,
+        end: 33
+      })
+      const dimensions = readRasterImageDimensions(Buffer.from(preview.data), 'image/png')!
+      expect(dimensions.width * dimensions.height).toBeLessThanOrEqual(16_000_000)
+    } finally {
+      resources.releaseOwner(17)
+    }
+  })
+
   it('rejects a large compressed source before reading its full body', async () => {
     const filePath = await createFile(createCompressedPng(9_456, 2_800), 'figure.png')
-    await truncate(filePath, 50 * 1024 * 1024 + 1)
+    await truncate(filePath, 64 * 1024 * 1024 + 1)
     const resources = new ManagedPreviewResources({ resolvePath: async () => filePath })
     await expect(
       resources.acquire(17, { source: 'local', path: filePath, imagePreview: true })
-    ).rejects.toThrow(/50 MiB/)
+    ).rejects.toThrow(/64 MiB/)
   })
 
   it('closes a managed source lease when decoding a large malformed image fails', async () => {
@@ -332,6 +441,42 @@ describe('ManagedPreviewResources', () => {
     }
   )
 
+  it('opens a staged edit through its in-memory lease and rejects it when unconfigured', async () => {
+    const close = vi.fn().mockResolvedValue(undefined)
+    const lease = {
+      path: '/staged/deck.pptx',
+      size: 64,
+      versionToken: 1,
+      snapshot: { dev: 1n, ino: 2n, size: 64n, mtimeNs: 3n },
+      read: vi.fn(),
+      readRange: vi.fn(),
+      verifyUnchanged: vi.fn(),
+      close
+    }
+    const openStagedEdit = vi.fn().mockResolvedValue(lease)
+    const resources = new ManagedPreviewResources({
+      resolvePath: vi.fn(),
+      openStagedEdit,
+      createId: () => 'staged-resource'
+    } as never)
+    const resource = await resources.acquire(17, {
+      source: 'staged-edit',
+      path: 'session-1:3'
+    } as never)
+
+    expect(openStagedEdit).toHaveBeenCalledWith('session-1:3')
+    expect(resource.size).toBe(64)
+    await resources.release(17, { resourceId: resource.id })
+    expect(close).toHaveBeenCalledOnce()
+
+    await expect(
+      new ManagedPreviewResources({ resolvePath: vi.fn() } as never).acquire(17, {
+        source: 'staged-edit',
+        path: 'session-1:3'
+      } as never)
+    ).rejects.toThrow(/not configured/)
+  })
+
   it.each([
     ['upload', 'upload-v2'],
     ['upload', undefined],
@@ -368,6 +513,8 @@ describe('ManagedPreviewResources', () => {
         source,
         projectId: 'project-1',
         fileId: 'upload-1',
+        imagePreview: true,
+        imageGenerationSessionId: 'session-1',
         ...(versionId ? { versionId } : {})
       })
       expect(resource.sourceChecksum).toBe('a'.repeat(64))
@@ -383,7 +530,8 @@ describe('ManagedPreviewResources', () => {
       expect(openManagedFileVersion).toHaveBeenCalledWith(source, {
         projectId: 'project-1',
         fileId: 'upload-1',
-        ...(versionId ? { versionId } : {})
+        ...(versionId ? { versionId } : {}),
+        ...(source === 'artifact' && versionId ? { imageGenerationSessionId: 'session-1' } : {})
       })
       expect(resolvePath).not.toHaveBeenCalled()
 
@@ -391,6 +539,46 @@ describe('ManagedPreviewResources', () => {
       expect(close).toHaveBeenCalledOnce()
     }
   )
+
+  it('keeps trusted text/html MIME metadata for extension-mismatched managed versions', async () => {
+    const trustedBytes = Buffer.from('<!doctype html><p>report</p>')
+    const resources = new ManagedPreviewResources({
+      resolvePath: vi.fn(),
+      openManagedFileVersion: vi.fn().mockResolvedValue({
+        path: '/managed/report.pdf',
+        size: trustedBytes.byteLength,
+        versionToken: 1,
+        snapshot: { dev: 1n, ino: 2n, size: BigInt(trustedBytes.byteLength), mtimeNs: 3n },
+        read: vi.fn(),
+        readRange: vi.fn(async (begin: number, end: number) => trustedBytes.subarray(begin, end)),
+        verifyUnchanged: vi.fn(),
+        close: vi.fn().mockResolvedValue(undefined)
+      })
+    })
+
+    const resource = await resources.acquire(17, {
+      source: 'artifact',
+      projectId: 'project-1',
+      fileId: 'artifact-1',
+      versionId: 'version-1',
+      mimeType: 'text/html; charset=UTF-8'
+    })
+
+    expect(resource.mimeType).toBe('text/html; charset=utf-8')
+  })
+
+  it('keeps extension precedence for untrusted path-backed MIME metadata', async () => {
+    const filePath = await createFile(Buffer.from('not html'), 'report.pdf')
+    const resources = new ManagedPreviewResources({ resolvePath: async () => filePath })
+
+    const resource = await resources.acquire(17, {
+      source: 'local',
+      path: filePath,
+      mimeType: 'text/html'
+    })
+
+    expect(resource.mimeType).toBe('application/pdf')
+  })
 
   it.each(['release', 'owner teardown', 'read failure'])(
     'keeps admitted protocol and IPC reads alive through %s, while rejecting new reads',

@@ -1,4 +1,9 @@
 import {
+  scheduleToolDescriptions,
+  scheduleToolInputs,
+  SCHEDULE_MCP_NAME
+} from '../../shared/session-schedules'
+import {
   listPdfAnnotationsInput,
   locatePdfAnnotationInput,
   createPdfAnnotationInput
@@ -27,11 +32,11 @@ import {
   LITERATURE_LIBRARY_SEARCH_TOOL_NAME,
   LITERATURE_LIBRARY_SCOPES,
   LITERATURE_LIBRARY_READ_SCOPES
-} from '../literature/library-mcp-server'
+} from '../literature/library-mcp-contract'
 import {
   LITERATURE_MCP_SERVER_NAME,
   LITERATURE_READ_DOCUMENT_TOOL_NAME
-} from '../literature/mcp-server'
+} from '../literature/mcp-contract'
 import {
   REQUEST_SKILL_IMPORT_TOOL_DESCRIPTION,
   REQUEST_SKILL_IMPORT_TOOL_NAME,
@@ -39,7 +44,14 @@ import {
 } from '../../shared/skill-import'
 import { requestSkillImportToolSchema } from '../skills/mcp-server'
 import type { ResponsesNamespacedTool } from '@aipoch/providers/protocol'
+import { IMAGE_MCP_SERVER_NAME, imageMcpToolDefinitions } from '../image-model/mcp-server'
 import { ARTIFACT_MCP_SERVER_NAME, writeArtifactFileToolSchema } from '../artifacts/mcp-server'
+import { proposePptxOperationsInput, readPptxOutlineInput } from '../pptx-edit/agent-tools'
+import {
+  PPTX_MCP_SERVER_NAME,
+  PROPOSE_PPTX_OPERATIONS_DESCRIPTION,
+  READ_PPTX_OUTLINE_DESCRIPTION
+} from '../pptx-edit/mcp-server'
 
 const jsonSchema = (schema: z.ZodType): ResponsesNamespacedTool['parameters'] =>
   z.toJSONSchema(schema, { target: 'draft-7' }) as ResponsesNamespacedTool['parameters']
@@ -250,6 +262,21 @@ const literatureTools = (
     : [])
 ]
 
+const PPTX_TOOLS: ResponsesNamespacedTool[] = [
+  tool(
+    PPTX_MCP_SERVER_NAME,
+    'read_pptx_outline',
+    READ_PPTX_OUTLINE_DESCRIPTION,
+    readPptxOutlineInput
+  ),
+  tool(
+    PPTX_MCP_SERVER_NAME,
+    'propose_pptx_operations',
+    PROPOSE_PPTX_OPERATIONS_DESCRIPTION,
+    proposePptxOperationsInput
+  )
+]
+
 const ARTIFACT_TOOLS: ResponsesNamespacedTool[] = [
   tool(
     ARTIFACT_MCP_SERVER_NAME,
@@ -271,6 +298,7 @@ const notebookTools = (options: NotebookToolEnvironmentOptions): ResponsesNamesp
   }))
 
 export const createCodexBridgeMcpTools = (options: {
+  schedules?: boolean
   notebook?: NotebookToolEnvironmentOptions
   skillImport?: boolean
   library?:
@@ -283,9 +311,36 @@ export const createCodexBridgeMcpTools = (options: {
       }
   literature?: boolean | { elements?: boolean; annotations?: boolean }
   artifacts?: boolean
+  pptx?: boolean
+  images?: boolean
+  imagePresetId?: string
 }): ResponsesNamespacedTool[] => {
   const tools = [
+    ...(options.schedules
+      ? Object.entries(scheduleToolInputs).map(([name, schema]) =>
+          tool(
+            SCHEDULE_MCP_NAME,
+            name,
+            scheduleToolDescriptions[name as keyof typeof scheduleToolInputs],
+            schema
+          )
+        )
+      : []),
     ...(options.artifacts ? ARTIFACT_TOOLS : []),
+    ...(options.pptx ? PPTX_TOOLS : []),
+    ...(options.images
+      ? Object.entries(imageMcpToolDefinitions(options.imagePresetId)).map(
+          ([name, definition]) => ({
+            namespace: namespaceFor(IMAGE_MCP_SERVER_NAME),
+            name,
+            description: definition.description,
+            parameters: z.toJSONSchema(z.object(definition.inputSchema), {
+              target: 'draft-7',
+              io: 'input'
+            }) as ResponsesNamespacedTool['parameters']
+          })
+        )
+      : []),
     ...(options.notebook ? notebookTools(options.notebook) : []),
     ...(options.skillImport ? SKILL_IMPORT_TOOLS : []),
     ...(options.library
@@ -298,6 +353,7 @@ export const createCodexBridgeMcpTools = (options: {
   return tools
 }
 
+// Image tools require a mounted Session capability and must not enter the global fallback.
 export const codexBridgeStaticMcpTools = (): ResponsesNamespacedTool[] =>
   createCodexBridgeMcpTools({
     notebook: { memoryTools: false, wslSetupTools: false },

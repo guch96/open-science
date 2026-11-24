@@ -474,6 +474,36 @@ it('preserves permission trace classifications and rejects spoofed raw identity 
   expect(JSON.stringify(invalid)).not.toContain('private-')
 })
 
+it.each([
+  ["Unsupported parameter: 'temperature'. PRIVATE_PROMPT", "Unsupported parameter: 'temperature'"],
+  ['Unknown upstream message: PRIVATE_PROMPT', undefined]
+])('exports only the safe part of a confirmed provider message', (message, expected) => {
+  const projected = projectDiagnosticSession({
+    failure: {
+      category: 'service',
+      responseMessage: message,
+      diagnostics: { status: 502, raw: 'Internal error: ' + message }
+    }
+  })
+  expect(JSON.stringify(projected)).not.toContain('PRIVATE_PROMPT')
+  if (expected) expect(JSON.stringify(projected)).toContain(expected)
+})
+
+it.each([
+  ['Maximum call stack size exceeded', 'Maximum call stack size exceeded'],
+  ['Maximum call stack size exceeded. PRIVATE_PROMPT', undefined],
+  ['PRIVATE_PROMPT', undefined]
+])('exports only validated built-in model error excerpts', (providerExcerpt, expected) => {
+  const data = { protocol: 'responses', providerExcerpt, phase: 'response' }
+  const log = projectDiagnosticLog({ scope: 'acp', msg: 'model request failed', data })
+  const saved = projectDiagnosticSession({ failure: { category: 'service', diagnostics: data } })
+  for (const projection of [log, saved]) {
+    expect(JSON.stringify(projection)).not.toContain('PRIVATE_PROMPT')
+    if (expected) expect(JSON.stringify(projection)).toContain(expected)
+    else expect(JSON.stringify(projection)).not.toContain('providerExcerpt')
+  }
+})
+
 it('retains classified failure evidence in session and turn diagnostics with redaction and limits', () => {
   const failure = {
     category: 'service',
@@ -509,7 +539,16 @@ it('retains classified failure evidence in session and turn diagnostics with red
 
 it('retains film request evidence without exporting the generated content', () => {
   const fields = {
+    invocationId: 'film-invocation',
     operationId: 'film-job',
+    frameworkId: 'pi',
+    providerId: 'provider-1',
+    purpose: 'correction',
+    workerRole: 'speech',
+    lane: 1,
+    exitCode: 23,
+    totalMs: 54000,
+    stagesMs: { readiness: 100, voice: 200 },
     requestId: 'call-1',
     attempt: 2,
     phase: 'animation',
@@ -522,7 +561,12 @@ it('retains film request evidence without exporting the generated content', () =
   expect(
     projectDiagnosticLog({
       scope: 'research-video',
-      data: { ...fields, text: 'private draft', prompt: 'private session' }
+      data: {
+        ...fields,
+        stagesMs: { ...fields.stagesMs, 'private stage': 200, build: -1 },
+        text: 'private draft',
+        prompt: 'private session'
+      }
     })
   ).toEqual({ scope: 'research-video', diagnostics: fields })
 })

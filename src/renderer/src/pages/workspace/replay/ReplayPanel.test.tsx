@@ -1827,33 +1827,47 @@ it('keeps replay following delayed automatic scroll and resumes after manual bro
   expect(conversation.scrollTop).toBe(1800)
 })
 
-it('generates directly from the replay source branch without opening a discussion', async () => {
-  const document = makeDocument()
-  document.branches[0].agentFrameId = 'root'
-  const props = callbacks()
-  const start = vi.fn().mockResolvedValue({ progress: { phase: 'writing', startedAt: Date.now() } })
-  vi.stubGlobal('api', {
-    ...window.api,
-    researchVideo: { status: vi.fn().mockResolvedValue({}), start },
-    localModels: { getSnapshot: vi.fn().mockResolvedValue({ availability: 'ready' }) }
-  })
-  render(<ReplayPanel document={document} {...props} />)
-  expect(
-    within(screen.getByTestId('replay-header')).queryByRole('button', {
-      name: 'Generate research film'
+it.each(['Research explanation', 'Operation replay'])(
+  'generates %s from the replay source branch after mode selection',
+  async (mode) => {
+    const document = makeDocument()
+    document.branches[0].agentFrameId = 'root'
+    const props = callbacks()
+    const start = vi
+      .fn()
+      .mockResolvedValue({ progress: { phase: 'writing', startedAt: Date.now() } })
+    vi.stubGlobal('api', {
+      ...window.api,
+      researchVideo: { status: vi.fn().mockResolvedValue({}), start },
+      localModels: { getSnapshot: vi.fn().mockResolvedValue({ availability: 'ready' }) }
     })
-  ).toBeNull()
-  expect(screen.queryByRole('button', { name: 'Generate research film' })).toBeNull()
-  fireEvent.keyDown(
-    within(screen.getByTestId('replay-header')).getByRole('button', { name: 'More actions' }),
-    { key: 'ArrowDown' }
-  )
-  fireEvent.click(await screen.findByRole('menuitem', { name: 'Generate research film' }))
-  await waitFor(() =>
-    expect(start).toHaveBeenCalledWith({ projectId: 'p', sessionId: 's', branchId: 'main' })
-  )
-  expect(props.onAskStep).not.toHaveBeenCalled()
-})
+    render(<ReplayPanel document={document} {...props} />)
+    expect(
+      within(screen.getByTestId('replay-header')).queryByRole('button', {
+        name: 'Generate research film'
+      })
+    ).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Generate research film' })).toBeNull()
+    fireEvent.keyDown(
+      within(screen.getByTestId('replay-header')).getByRole('button', { name: 'More actions' }),
+      { key: 'ArrowDown' }
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Generate research film' }))
+    expect(start).not.toHaveBeenCalled()
+    fireEvent.click(await screen.findByRole('button', { name: mode }))
+    expect(start).not.toHaveBeenCalled()
+    fireEvent.click(await screen.findByRole('button', { name: 'Start generation' }))
+    await waitFor(() =>
+      expect(start).toHaveBeenCalledExactlyOnceWith({
+        projectId: 'p',
+        sessionId: 's',
+        branchId: 'main',
+        ...(mode === 'Operation replay' ? { mode: 'operation-replay' } : {})
+      })
+    )
+    expect(props.onAskStep).not.toHaveBeenCalled()
+  }
+)
 
 it('quotes a completed card from the displayed branch only on explicit Ask', () => {
   const doc = makeDocument()
@@ -1870,7 +1884,9 @@ it('quotes a completed card from the displayed branch only on explicit Ask', () 
   const card = container.querySelector<HTMLElement>('[data-replay-step="b2"]')!
   fireEvent.wheel(card, { deltaY: -100 })
   expect(props.onAskStep).not.toHaveBeenCalled()
-  fireEvent.click(within(card).getByRole('button', { name: 'Ask' }))
+  const ask = within(card).getByRole('button', { name: 'Ask' })
+  expect(ask.textContent).toBe('')
+  fireEvent.click(ask)
   expect(props.onAskStep).toHaveBeenCalledWith(
     expect.objectContaining({
       stepNumber: 3,
@@ -1881,4 +1897,32 @@ it('quotes a completed card from the displayed branch only on explicit Ask', () 
     })
   )
   expect(screen.getByTestId('replay-current-step').textContent).toContain('11')
+})
+
+it('quotes only the selected Notebook run through its icon action', async () => {
+  const doc = makeDocument()
+  doc.branches[0].steps[2].evidence.push({
+    kind: 'notebook-run',
+    id: 'run1',
+    projectId: 'p',
+    sessionId: 's',
+    branchId: 'main'
+  })
+  const props = callbacks()
+  const { container } = render(<ReplayPanel document={doc} {...props} />)
+  seekProgress(2900)
+  openMaterials()
+  const card = container.querySelector<HTMLElement>('[data-replay-run-item="run1"]')!
+  const ask = await within(card).findByRole('button', { name: 'Ask' })
+  expect(ask.textContent).toBe('')
+  fireEvent.click(ask)
+  expect(props.onAskStep).toHaveBeenCalledWith(
+    expect.objectContaining({
+      stepId: 'three',
+      branchId: 'main',
+      stepOffsetMs: 900,
+      evidence: [expect.objectContaining({ kind: 'notebook-run', id: 'run1' })],
+      records: [expect.objectContaining({ id: 'notebook-run:run1', text: 'print(42)\n42' })]
+    })
+  )
 })

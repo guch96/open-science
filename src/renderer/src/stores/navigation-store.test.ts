@@ -60,6 +60,7 @@ beforeEach(() => {
   useSessionStore.setState(createInitialSessionState())
   useNavigationStore.setState({
     view: 'home',
+    scheduleScope: undefined,
     marketplaceListContext: undefined,
     activeProjectId: undefined,
     userNavigationRevision: 0,
@@ -277,6 +278,56 @@ describe('navigation store', () => {
     })
     expect(useSessionStore.getState().selectedSessionId).toBeUndefined()
     expect(useSessionStore.getState().sessions).toHaveLength(1)
+  })
+
+  it('selects an unloaded Session and queues details recovery atomically', () => {
+    useSessionStore.getState().hydrateSessions([createSession({})])
+    useSessionStore.setState((state) => ({
+      sessions: state.sessions.map((session) => ({
+        ...session,
+        contentLoaded: false,
+        needsStartupRecovery: true
+      }))
+    }))
+    const snapshots: Array<{
+      selectedSessionId: string | undefined
+      sessionDetailsRecoveryRequest: { projectId: string; sessionId: string } | undefined
+    }> = []
+    const unsubscribe = useSessionStore.subscribe((state) => {
+      snapshots.push({
+        selectedSessionId: state.selectedSessionId,
+        sessionDetailsRecoveryRequest: state.sessionDetailsRecoveryRequest
+      })
+    })
+    try {
+      useNavigationStore.getState().openSession('project-a', 'session-1', 'user')
+    } finally {
+      unsubscribe()
+    }
+
+    expect(snapshots).toContainEqual({
+      selectedSessionId: 'session-1',
+      sessionDetailsRecoveryRequest: { projectId: 'project-a', sessionId: 'session-1' }
+    })
+  })
+
+  it('queues details recovery for an automatic deep-link to an unloaded Session', () => {
+    useSessionStore.getState().hydrateSessions([createSession({})])
+    useSessionStore.setState((state) => ({
+      sessions: state.sessions.map((session) => ({
+        ...session,
+        contentLoaded: false,
+        needsStartupRecovery: true
+      }))
+    }))
+
+    useNavigationStore.getState().openSession('project-a', 'session-1', 'automatic')
+
+    expect(useSessionStore.getState().selectedSessionId).toBe('session-1')
+    expect(useSessionStore.getState().sessionDetailsRecoveryRequest).toEqual({
+      projectId: 'project-a',
+      sessionId: 'session-1'
+    })
   })
 
   it('returns Home after a Home entry even with a retained Session selection', () => {
@@ -1077,4 +1128,24 @@ describe('navigation store global Artifact actions', () => {
     useNavigationStore.getState().requestArtifactMention({ ...file, projectId: 'project-b' })
     expect(useNavigationStore.getState().pendingArtifactMention).toBeUndefined()
   })
+})
+
+it('opens Schedule in the current project without changing the conversation, and clears its scope on project exit', () => {
+  useSessionStore.getState().hydrateSessions([createSession({ id: 'selected' })])
+  useSessionStore.setState({ selectedSessionId: 'selected' })
+  useNavigationStore.setState({ view: 'workspace', activeProjectId: 'project-a' })
+  const nav = useNavigationStore.getState()
+  nav.openSchedule('project-b')
+  expect(useNavigationStore.getState().scheduleScope).toBeUndefined()
+  nav.openSchedule('project-a', 'selected')
+  expect(useNavigationStore.getState().scheduleScope).toEqual({
+    projectId: 'project-a',
+    sessionId: 'selected',
+    revision: 1
+  })
+  expect(useSessionStore.getState().selectedSessionId).toBe('selected')
+  nav.openSchedule('project-a')
+  expect(useNavigationStore.getState().scheduleScope?.sessionId).toBeUndefined()
+  nav.goHome('user')
+  expect(useNavigationStore.getState().scheduleScope).toBeUndefined()
 })

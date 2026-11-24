@@ -388,6 +388,32 @@ const baseRequest = (
   runtimeRoot: join(cwd, 'runtime')
 })
 
+gate('NotebookKernelExecutor process monitoring', () => {
+  it('terminates an exact interpreter and rejects its old handle after cold restart', async () => {
+    const directory = await makeDefaultEnvCwd('os-process-monitor-')
+    const executor = makeExecutor()
+    try {
+      await executor.execute({ ...baseRequest(directory), code: 'monitor' })
+      const [original] = executor.monitoredProcesses()
+      expect(original.pid).toBeGreaterThan(0)
+      expect(original.status).toBe('idle')
+      expect(original.lastCell).toEqual({ code: 'monitor', truncated: false })
+      await original.terminate()
+      expect(executor.monitoredProcesses()).toEqual([])
+      expect(processIsAlive(original.pid!)).toBe(false)
+      await executor.execute({ ...baseRequest(directory), code: 'continue' })
+      const [replacement] = executor.monitoredProcesses()
+      expect(replacement.identity).not.toBe(original.identity)
+      expect(replacement.lastCell).toEqual({ code: 'continue', truncated: false })
+      await expect(original.terminate()).rejects.toThrow('changed')
+      expect(processIsAlive(replacement.pid!)).toBe(true)
+    } finally {
+      await executor.shutdown()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+})
+
 gate('NotebookKernelExecutor failed-cell output capture', () => {
   it.each(['timeout', 'cancelled'] as const)(
     'still cancels generation freezing when an execution is %s',
@@ -584,11 +610,25 @@ process.emitWarning('keep this diagnostic', { code: 'OTHER_WARNING' })`
   }
 )
 
+// These adapter tests launch the real protocol host on POSIX; Windows Job containment is covered
+// by the native Windows integration suite. Keep the receipt platform consistent with the executor
+// without requesting a Windows-only native Job from this test host.
+const windowsAdapterLifecycle = (storageRoot: string): KernelProcessLifecycleOwner => {
+  const owner = new KernelProcessLifecycleOwner({ storageRoot, platform: 'win32' })
+  if (process.platform !== 'win32') {
+    const beginSpawn = owner.beginSpawn.bind(owner)
+    vi.spyOn(owner, 'beginSpawn').mockImplementation((scope, token, proof) =>
+      beginSpawn(scope, token, proof, false)
+    )
+  }
+  return owner
+}
+
 it.each([false, true])(
   'hides Windows kernel consoles with durable ownership %s while preserving execution and cleanup',
   async (owned) => {
     cwdDir = await mkdtemp(join(tmpdir(), 'os-kernel-hidden-console-'))
-    const lifecycle = new KernelProcessLifecycleOwner({ storageRoot: cwdDir })
+    const lifecycle = windowsAdapterLifecycle(cwdDir)
     await lifecycle.ensureReady()
     const spawn = vi.mocked(childProcess.spawn)
     spawn.mockClear()
@@ -3307,6 +3347,58 @@ describe.skipIf(!process.env.OPEN_SCIENCE_TEST_RSCRIPT || !process.env.OPEN_SCIE
   }
 )
 
+it.skipIf(process.platform !== 'darwin' || !process.env.OPEN_SCIENCE_TEST_R_ENV)(
+  'starts an external Conda R kernel without allowing writes into the interpreter',
+  async () => {
+    const interpreter = realpathSync(join(process.env.OPEN_SCIENCE_TEST_R_ENV!, 'bin', 'Rscript'))
+    const prefix = dirname(dirname(interpreter))
+    cwdDir = await mkdtemp(join(tmpdir(), 'os-external-conda-r-'))
+    const request = baseRequest(cwdDir)
+    const outside = join(cwdDir, 'ungranted.txt')
+    await Promise.all([
+      mkdir(request.inputRoot),
+      mkdir(request.dataRoot, { recursive: true }),
+      mkdir(request.runtimeRoot),
+      writeFile(outside, 'outside')
+    ])
+    const owner = new NotebookNetworkSandboxOwner({
+      resourceRoot: resolve(
+        import.meta.dirname,
+        '../../../packages/notebook-network-sandbox/vendor'
+      ),
+      temporaryRoot: join(cwdDir, 'commands'),
+      getSettings: async () => DEFAULT_NOTEBOOK_NETWORK_SETTINGS,
+      getFolderRestrictionEnabled: async () => true,
+      persistAlwaysAllow: async () => DEFAULT_NOTEBOOK_NETWORK_SETTINGS,
+      requestDecision: async () => 'deny'
+    })
+    const executor = new NotebookKernelExecutor({
+      rLoopPath: resolve(import.meta.dirname, '../../../resources/notebook/r_loop.R'),
+      processSandbox: owner
+    })
+    try {
+      const result = await executor.execute({
+        ...request,
+        cwd: request.notebookSessionRoot,
+        language: 'r',
+        sessionId: 'external-r-session',
+        projectId: 'external-r-project',
+        resolvedInterpreter: { command: interpreter },
+        code: [
+          'cat(mean(c(8, 12, 16)), "\\n", sep="")',
+          `cat(file.access(${JSON.stringify(join(prefix, 'lib', 'R'))}, mode=2), "\\n", sep="")`,
+          `cat(file.access(${JSON.stringify(outside)}, mode=4), "\\n", sep="")`
+        ].join('\n')
+      })
+      expect(result, result.stderr).toMatchObject({ status: 'completed', stdout: '12\n-1\n-1' })
+    } finally {
+      await executor.shutdown()
+      await owner.dispose()
+    }
+  },
+  30_000
+)
+
 describe.skipIf(!rExecutable || !rScriptExecutable)('NotebookKernelExecutor (real R loop)', () => {
   it('bounds R output before it crosses the loop protocol', async () => {
     cwdDir = await mkdtemp(join(tmpdir(), 'os-r-loop-output-limit-'))
@@ -4988,7 +5080,7 @@ describe('NotebookKernelExecutor repl kind (real repl_loop.js)', () => {
 
   it('retains Windows ownership until the native supervisor host has exited', async () => {
     cwdDir = await mkdtemp(join(tmpdir(), 'os-kernel-supervisor-exit-'))
-    const lifecycle = new KernelProcessLifecycleOwner({ storageRoot: cwdDir })
+    const lifecycle = windowsAdapterLifecycle(cwdDir)
     await lifecycle.ensureReady()
     const complete = vi.spyOn(lifecycle, 'complete')
     const confirm = vi.fn(async () => true)

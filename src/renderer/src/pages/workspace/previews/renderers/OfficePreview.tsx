@@ -10,6 +10,7 @@ import type {
   OfficePreviewPhase,
   OfficePreviewRequestedExtension,
   OfficePreviewRuntimeState,
+  OfficePreviewSlideView,
   OfficePreviewSource
 } from '../../../../../../shared/office-preview'
 import {
@@ -25,7 +26,7 @@ import {
 
 import { LocalFileFallbackAction } from '../../LocalFileHeaderActions'
 import { ManagedFileDownloadButton } from '../../ManagedFileDownloadButton'
-import { PreviewFallbackCard, PreviewLoadingContent } from '../PreviewFallback'
+import { PreviewErrorCard, PreviewFallbackCard, PreviewLoadingContent } from '../PreviewFallback'
 import { usePreviewRuntime } from '../preview-runtime-context'
 import type { PreviewFileRendererProps } from '../preview-types'
 import { officePreviewHostLeaseCoordinator } from './office-preview-lease'
@@ -34,7 +35,7 @@ type OfficeHostState =
   | { kind: 'loading'; phase: OfficePreviewPhase | 'checking' }
   | { kind: 'ready' }
   | { kind: 'too-large' }
-  | { kind: 'error'; error?: OfficePreviewErrorCode }
+  | { kind: 'error'; error?: OfficePreviewErrorCode; cause?: unknown }
 
 const OFFICE_CHECKING_STATE: OfficeHostState = {
   kind: 'loading',
@@ -95,14 +96,14 @@ const createOfficePreviewRequestId = (hostId: string): string => {
   return `${hostId}:${uniquePart ?? `${Date.now()}-${fallbackOfficePreviewRequestSequence}`}`
 }
 
-const OfficeDownloadFallback = ({
+const OfficeFileFallback = ({
   item,
   source,
   title,
   message
 }: {
   item: PreviewFileItem
-  source: OfficePreviewSource
+  source?: OfficePreviewSource
   title: string
   message: string
 }): React.JSX.Element => {
@@ -115,37 +116,46 @@ const OfficeDownloadFallback = ({
       title={title}
       message={message}
       action={
-        <ManagedFileDownloadButton
-          source={source}
-          path={item.path}
-          projectId={item.projectId}
-          fileId={item.managedFileId}
-          versionId={item.selectedVersionId}
-          versionNumber={runtime?.downloadVersionContext?.versionNumber}
-          latestVersionId={runtime?.downloadVersionContext?.latestVersionId}
-          latestVersionNumber={runtime?.downloadVersionContext?.latestVersionNumber}
-          suggestedName={item.name}
-          appearance="primary"
-          wrapperClassName="mt-3"
-        />
+        source && (
+          <ManagedFileDownloadButton
+            source={source}
+            path={item.path}
+            projectId={item.projectId}
+            fileId={item.managedFileId}
+            versionId={item.selectedVersionId}
+            versionNumber={runtime?.downloadVersionContext?.versionNumber}
+            latestVersionId={runtime?.downloadVersionContext?.latestVersionId}
+            latestVersionNumber={runtime?.downloadVersionContext?.latestVersionNumber}
+            suggestedName={item.name}
+            appearance="primary"
+            wrapperClassName="mt-3"
+          />
+        )
       }
     />
   )
 }
 
-// Returns the catalog key for errors that leave download as the only remedy, or undefined when the
-// error is a plain render failure that keeps the retryable card.
-const getDownloadOnlyErrorMessageKey = (
-  error: OfficePreviewErrorCode | undefined
-):
-  | 'This Office file is damaged or unsupported. Download it to view.'
-  | 'This Office file exceeds the safe preview limits. Download it to view.'
-  | undefined => {
-  if (error === 'INVALID_PACKAGE')
-    return 'This Office file is damaged or unsupported. Download it to view.'
-  if (error === 'RESOURCE_LIMIT_EXCEEDED')
-    return 'This Office file exceeds the safe preview limits. Download it to view.'
-  return undefined
+const getOfficeFileFailureMessage = (
+  error: OfficePreviewErrorCode | undefined,
+  t: ReturnType<typeof useTranslation>['t']
+): string | undefined => {
+  switch (error) {
+    case 'ENCRYPTED_PACKAGE':
+      return t('This file contains encrypted content.')
+    case 'EXTERNAL_RESOURCES':
+      return t('This file uses external content that the preview cannot load.')
+    case 'UNSUPPORTED_FORMAT':
+      return t('This Office format cannot be previewed.')
+    case 'PREVIEW_PROCESS_NOT_ISOLATED':
+      return t('The secure Office preview could not start.')
+    case 'INVALID_PACKAGE':
+      return t('This Office file is damaged or unsupported.')
+    case 'RESOURCE_LIMIT_EXCEEDED':
+      return t('This Office file exceeds the safe preview limits.')
+    default:
+      return undefined
+  }
 }
 
 type OfficePreviewFrame = {
@@ -155,13 +165,38 @@ type OfficePreviewFrame = {
 
 // Owns isolated iframe coordination; Office bytes and vendor libraries stay in the child runtime.
 // Managed sources use version leases; local files retain their OS fallback below.
+// Opens an in-memory edit revision instead of a stored file and reports where the slide sits.
+export type StagedOfficePreview = {
+  key: string
+  slideIndex: number
+  onSlideView: (view: OfficePreviewSlideView) => void
+}
+
+// Asks the open deck to show a slide. A new serial repeats the jump even for the same slide.
+export type OfficeSlideRequest = { slideIndex: number; serial: number }
+
 const RemoteOfficePreviewContent = ({
   item,
-  source
+  source,
+  staged,
+  slideRequest,
+  onSlideView
 }: {
   item: PreviewFileItem
   source: OfficePreviewSource
+  staged?: StagedOfficePreview
+  slideRequest?: OfficeSlideRequest
+  onSlideView?: (view: OfficePreviewSlideView) => void
 }): React.JSX.Element => {
+  const stagedKey = staged?.key
+  const stagedSlideRef = useRef(staged?.slideIndex ?? 0)
+  const onStagedSlideView = useEffectEvent((view: OfficePreviewSlideView): void => {
+    staged?.onSlideView(view)
+    onSlideView?.(view)
+  })
+  useEffect(() => {
+    stagedSlideRef.current = staged?.slideIndex ?? 0
+  }, [staged?.slideIndex])
   const { t, i18n } = useTranslation()
   const hostId = useId()
   const frameRef = useRef<HTMLIFrameElement | null>(null)
@@ -176,6 +211,7 @@ const RemoteOfficePreviewContent = ({
   const [frame, setFrame] = useState<OfficePreviewFrame | undefined>(undefined)
   const [frameLoadGeneration, setFrameLoadGeneration] = useState(0)
   const hasSourceIdentity =
+    stagedKey !== undefined ||
     source === 'compute-output' ||
     source === 'notebook-input' ||
     source === 'literature' ||
@@ -202,17 +238,19 @@ const RemoteOfficePreviewContent = ({
   useEffect(() => {
     if (!ownsLease || !hasSourceIdentity) return
     const sourceIdentity =
-      source === 'compute-output' ||
-      source === 'notebook-input' ||
-      source === 'literature' ||
-      source === 'local'
-        ? { source, path: item.path }
-        : {
-            source,
-            projectId: item.projectId!,
-            fileId: item.managedFileId!,
-            ...(item.selectedVersionId ? { versionId: item.selectedVersionId } : {})
-          }
+      stagedKey !== undefined
+        ? { source: 'staged-edit' as const, path: stagedKey }
+        : source === 'compute-output' ||
+            source === 'notebook-input' ||
+            source === 'literature' ||
+            source === 'local'
+          ? { source, path: item.path }
+          : {
+              source,
+              projectId: item.projectId!,
+              fileId: item.managedFileId!,
+              ...(item.selectedVersionId ? { versionId: item.selectedVersionId } : {})
+            }
 
     const requestId = createOfficePreviewRequestId(hostId)
     let active = true
@@ -282,7 +320,7 @@ const RemoteOfficePreviewContent = ({
           applyRuntimeState(pendingState)
           pendingState = undefined
         } else {
-          setState({ kind: 'error', error: 'FILE_READ_FAILED' })
+          setState({ kind: 'error', error: 'FILE_READ_FAILED', cause: error })
         }
       })
 
@@ -304,7 +342,8 @@ const RemoteOfficePreviewContent = ({
     item.projectId,
     item.selectedVersionId,
     ownsLease,
-    source
+    source,
+    stagedKey
   ])
 
   useEffect(() => {
@@ -325,6 +364,11 @@ const RemoteOfficePreviewContent = ({
 
       if (event.data.type === 'state' && event.data.state.sessionId === frame.sessionId) {
         window.api.officePreview.reportState(frame.sessionId, event.data.state)
+      } else if (
+        event.data.type === 'slide-view' &&
+        event.data.slideView.sessionId === frame.sessionId
+      ) {
+        onStagedSlideView(event.data.slideView)
       } else if (
         event.data.type === 'context-menu' &&
         event.data.contextMenu.sessionId === frame.sessionId
@@ -395,28 +439,67 @@ const RemoteOfficePreviewContent = ({
     })
   }, [extension, frame, state.kind])
 
+  useEffect(() => {
+    if (!frame || stagedKey === undefined || state.kind !== 'ready') return
+    const message: OfficePreviewHostMessage = {
+      channel: OFFICE_PREVIEW_FRAME_MESSAGE_CHANNEL,
+      version: OFFICE_PREVIEW_FRAME_MESSAGE_VERSION,
+      type: 'goto-slide',
+      sessionId: frame.sessionId,
+      slideIndex: stagedSlideRef.current
+    }
+    frameRef.current?.contentWindow?.postMessage(message, OFFICE_PREVIEW_RUNTIME_ORIGIN)
+  }, [frame, stagedKey, state.kind])
+
+  const requestedSlide = slideRequest?.slideIndex
+  const requestSerial = slideRequest?.serial
+  // A reopened frame must not replay a jump the user has since navigated away from.
+  const postedRequestRef = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    if (!frame || state.kind !== 'ready' || requestSerial === undefined) return
+    if (requestedSlide === undefined || postedRequestRef.current === requestSerial) return
+    postedRequestRef.current = requestSerial
+    const message: OfficePreviewHostMessage = {
+      channel: OFFICE_PREVIEW_FRAME_MESSAGE_CHANNEL,
+      version: OFFICE_PREVIEW_FRAME_MESSAGE_VERSION,
+      type: 'goto-slide',
+      sessionId: frame.sessionId,
+      slideIndex: requestedSlide
+    }
+    frameRef.current?.contentWindow?.postMessage(message, OFFICE_PREVIEW_RUNTIME_ORIGIN)
+  }, [frame, requestSerial, requestedSlide, state.kind])
+
   const visibleState: OfficeHostState =
     ownsLease && !hasSourceIdentity ? { kind: 'error', error: 'FILE_READ_FAILED' } : state
 
   if (visibleState.kind === 'too-large') {
     return (
-      <OfficeDownloadFallback
+      <OfficeFileFallback
         item={item}
-        source={source}
+        source={staged ? undefined : source}
         title={t('File too large to preview')}
-        message={t('This file is larger than 40 MB. Download it to view.')}
+        message={t('This file is larger than 40 MB.')}
       />
     )
   }
   if (visibleState.kind === 'error') {
-    const downloadOnlyMessageKey = getDownloadOnlyErrorMessageKey(visibleState.error)
-    if (downloadOnlyMessageKey) {
+    if (visibleState.error === 'FILE_READ_FAILED') {
       return (
-        <OfficeDownloadFallback
+        <PreviewErrorCard
+          name={item.name}
+          error={visibleState.cause}
+          fallbackMessage={t('The Office file could not be read. Try opening it again.')}
+        />
+      )
+    }
+    const downloadMessage = getOfficeFileFailureMessage(visibleState.error, t)
+    if (downloadMessage) {
+      return (
+        <OfficeFileFallback
           item={item}
-          source={source}
+          source={staged ? undefined : source}
           title={t('Preview unavailable')}
-          message={t(downloadOnlyMessageKey)}
+          message={downloadMessage}
         />
       )
     }
@@ -424,7 +507,13 @@ const RemoteOfficePreviewContent = ({
       <PreviewFallbackCard
         icon={FileWarning}
         name={item.name}
-        message={t("This Office file couldn't be rendered for preview")}
+        message={
+          visibleState.error === 'PREVIEW_TIMEOUT'
+            ? t('The Office preview timed out. Try opening it again.')
+            : visibleState.error === 'PREVIEW_PROCESS_CRASHED'
+              ? t('The Office preview stopped unexpectedly. Try opening it again.')
+              : t("This Office file couldn't be rendered for preview")
+        }
         retryable={isRetryableOfficeError(visibleState.error)}
       />
     )
@@ -463,14 +552,20 @@ const RemoteOfficePreviewContent = ({
 // Notebook reply links open original documents in the isolated Office renderer.
 export const OfficePreviewContent = ({
   item,
-  source = 'artifact'
+  source = 'artifact',
+  staged,
+  slideRequest,
+  onSlideView
 }: {
   item: PreviewFileItem
   source?: PreviewFileSource
+  staged?: StagedOfficePreview
+  slideRequest?: OfficeSlideRequest
+  onSlideView?: (view: OfficePreviewSlideView) => void
 }): React.JSX.Element => {
   const { t } = useTranslation()
 
-  if (source === 'local' && !item.fromNotebookDataLink) {
+  if (source === 'local' && !item.fromNotebookDataLink && !staged) {
     return (
       <PreviewFallbackCard
         icon={FileWarning}
@@ -482,17 +577,23 @@ export const OfficePreviewContent = ({
   }
   if (!window.api.officePreview) {
     return (
-      <OfficeDownloadFallback
+      <OfficeFileFallback
         item={item}
-        source={source}
+        source={staged ? undefined : source}
         title={t('Preview unavailable')}
-        message={t(
-          'Office preview is only available in the desktop app. Download this file to view it.'
-        )}
+        message={t('Office preview is only available in the desktop app.')}
       />
     )
   }
-  return <RemoteOfficePreviewContent item={item} source={source} />
+  return (
+    <RemoteOfficePreviewContent
+      item={item}
+      source={source}
+      staged={staged}
+      slideRequest={slideRequest}
+      onSlideView={onSlideView}
+    />
+  )
 }
 
 export const OfficePreviewRenderer = ({ item }: PreviewFileRendererProps): React.JSX.Element => (

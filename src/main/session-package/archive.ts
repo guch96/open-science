@@ -17,11 +17,13 @@ import { readFileWithinLimit } from '@aipoch/durable-files'
 import { assertRegularStoragePath as assertPackageSourcePath } from '../artifacts/provenance-storage'
 import { digestFileWithinBudget } from '../bounded-file-io'
 import { pacedFileTransform } from '../file-io-pacing'
-import { assertPackageCapacity, packageCapacityChecker } from './capacity'
+import { assertPackageCapacity, packageCapacityChecker, packageDiskReserveBytes } from './capacity'
 import { createPackageContentVerifier } from './materialize'
 
 // Keep this diagnostic stable across the inspection worker's error-message boundary.
 export const PACKAGE_REQUIRES_UPDATE = 'Session package requires a newer version of Open Science.'
+export const isInvalidPackageArchive = (error: unknown): boolean =>
+  error instanceof Error && 'tarCode' in error && error.tarCode === 'TAR_BAD_ARCHIVE'
 const compatibilityHeaderSchema = z.object({
   format: z.literal('open-science-session'),
   schemaVersion: z.number().int().positive(),
@@ -185,7 +187,7 @@ export const readPackageArchive = async (
     if (!metadata.isFile() || metadata.size > PACKAGE_MAX_BYTES)
       throw new Error('Session package exceeds the archive limit.')
     await mkdir(directory, { recursive: true, mode: 0o700 })
-    const checkCapacity = await packageCapacityChecker(directory)
+    const checkCapacity = await packageCapacityChecker(directory, packageDiskReserveBytes)
     const entries = new Set<string>()
     let total = 0
     let unknownEntries = false
@@ -376,7 +378,10 @@ export const validatePackageDirectory = async (
       details.size !== entry.sizeBytes ||
       (await verifyContent(file, entry.sizeBytes, signal)).checksum !== entry.checksum
     ) {
-      throw new Error('Session package content checksum or size mismatch.')
+      // The inspection worker already preserves this archive classification across processes.
+      throw Object.assign(new Error('Session package content checksum or size mismatch.'), {
+        tarCode: 'TAR_BAD_ARCHIVE'
+      })
     }
     onProgress?.({
       phase: 'validating',

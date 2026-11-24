@@ -14,7 +14,11 @@ import {
   usePreviewWorkbenchStore,
   type PendingPdfContextSelection
 } from '@/stores/preview-workbench-store'
-import type { PdfAnnotation, TextAnnotation } from '../../../../shared/annotations'
+import {
+  ANNOTATION_LIMITS,
+  type PdfAnnotation,
+  type TextAnnotation
+} from '../../../../shared/annotations'
 import {
   SessionSizeLimitError,
   type SessionPdfContext
@@ -1795,11 +1799,35 @@ describe('workspace composer controller', () => {
     expect(hook.result.current.view.transfers).toEqual([
       expect.objectContaining({
         status: 'error',
-        error: 'Could not attach the file. Check available storage and try again.'
+        error: 'Could not attach the file. Try again.'
       })
     ])
     expect(hook.result.current.view.errorDetail).toBe('claim failed')
     expect(uploadApi.abortTransfer).toHaveBeenCalledWith({ transferId: expect.any(String) })
+  })
+
+  it('keeps the draft removal when staged copy cleanup fails', async () => {
+    const file = {
+      id: 'notes',
+      name: 'notes.md',
+      originalName: 'notes.md',
+      path: '/staged/notes.md',
+      size: 5,
+      sessionId: '.pending'
+    }
+    const api = uploads(vi.fn().mockResolvedValue(file))
+    vi.mocked(api.deleteUpload).mockRejectedValue(new Error('cleanup unavailable'))
+    const hook = renderController(api)
+    mounted.push(hook)
+    act(() => hook.result.current.actions.stageFiles([new File(['notes'], file.name)]))
+    await flushAsyncWork()
+    act(() => hook.result.current.actions.removeAttachment(file))
+    await flushAsyncWork()
+    expect(hook.result.current.view.attachments).toEqual([])
+    expect(hook.result.current.view.error).toBe(
+      'Attachment removed from the draft. Cleanup of the temporary copy could not be confirmed.'
+    )
+    expect(hook.result.current.view.errorDetail).toBe('cleanup unavailable')
   })
 
   it('captures the viewed single-page PDF before send-time candidate filtering', () => {
@@ -2392,6 +2420,85 @@ describe('workspace composer controller', () => {
     expect(hook.result.current.view.annotations).toEqual([annotation()])
   })
 
+  it('keeps annotation callbacks stable through composer renders and uses the latest annotations', () => {
+    const hook = renderController()
+    mounted.push(hook)
+    const { addAnnotation, updateAnnotationNote, removeAnnotation } = hook.result.current.actions
+
+    act(() => hook.result.current.actions.changeDoc(textDoc('Unrelated composer edit')))
+    hook.selectSession({ id: 'session-a', projectId: 'project' })
+    expect(hook.result.current.actions.updateAnnotationNote).toBe(updateAnnotationNote)
+    expect(hook.result.current.actions.removeAnnotation).toBe(removeAnnotation)
+
+    act(() => addAnnotation(annotation()))
+    act(() => expect(updateAnnotationNote('annotation-1', '  First note  ')).toBeUndefined())
+    act(() => addAnnotation(annotation('annotation-2')))
+    act(() => expect(updateAnnotationNote('annotation-2', '  Latest note  ')).toBeUndefined())
+    expect(hook.result.current.view.annotations).toEqual([
+      { ...annotation(), note: 'First note' },
+      { ...annotation('annotation-2'), note: 'Latest note' }
+    ])
+    expect(hook.result.current.actions.updateAnnotationNote).toBe(updateAnnotationNote)
+    expect(hook.result.current.actions.removeAnnotation).toBe(removeAnnotation)
+
+    act(() => removeAnnotation('annotation-1'))
+    expect(hook.result.current.view.annotations).toEqual([
+      { ...annotation('annotation-2'), note: 'Latest note' }
+    ])
+    act(() => expect(hook.result.current.actions.undo()).toBe(true))
+    expect(hook.result.current.view.annotations).toEqual([
+      { ...annotation(), note: 'First note' },
+      { ...annotation('annotation-2'), note: 'Latest note' }
+    ])
+  })
+
+  it('uses the active draft after switching Sessions through retained annotation callbacks', () => {
+    const hook = renderController()
+    mounted.push(hook)
+    act(() => hook.result.current.actions.addAnnotation({ ...annotation(), note: 'Session A' }))
+    const { updateAnnotationNote, removeAnnotation } = hook.result.current.actions
+
+    hook.selectSession({ id: 'session-b', projectId: 'project' })
+    const second = { ...annotation(), quote: 'Session B quote', note: 'Session B' }
+    act(() => hook.result.current.actions.addAnnotation(second))
+    expect(hook.result.current.actions.updateAnnotationNote).toBe(updateAnnotationNote)
+    expect(hook.result.current.actions.removeAnnotation).toBe(removeAnnotation)
+    act(() => expect(updateAnnotationNote(second.id, '  ')).toBeUndefined())
+    expect(hook.result.current.view.annotations).toEqual([{ ...second, note: undefined }])
+    act(() => expect(hook.result.current.actions.undo()).toBe(true))
+    expect(hook.result.current.view.annotations).toEqual([second])
+    act(() => removeAnnotation(second.id))
+    expect(hook.result.current.view.annotations).toEqual([])
+    act(() => expect(hook.result.current.actions.undo()).toBe(true))
+    expect(hook.result.current.view.annotations).toEqual([second])
+
+    hook.selectSession({ id: 'session-a', projectId: 'project' })
+    expect(hook.result.current.view.annotations).toEqual([{ ...annotation(), note: 'Session A' }])
+  })
+
+  it('does not dirty the draft or capture undo for rejected annotation notes or absent removals', () => {
+    const hook = renderController()
+    mounted.push(hook)
+    const { updateAnnotationNote, removeAnnotation } = hook.result.current.actions
+    act(() => hook.result.current.actions.addAnnotation(annotation()))
+    const revision = (): ReturnType<typeof hook.result.current.lifecycle.captureRevision> =>
+      hook.result.current.lifecycle.captureRevision(
+        hook.result.current.view.doc,
+        hook.result.current.view.annotations
+      )
+    const before = revision()
+
+    act(() => {
+      expect(updateAnnotationNote('annotation-1', 'x'.repeat(ANNOTATION_LIMITS.note + 1))).toBe(
+        'note-too-long'
+      )
+      removeAnnotation('absent')
+    })
+    expect(revision()).toEqual(before)
+    act(() => expect(hook.result.current.actions.undo()).toBe(true))
+    expect(hook.result.current.view.annotations).toEqual([])
+  })
+
   it('restores annotations with a failed send snapshot', () => {
     const hook = renderController()
     mounted.push(hook)
@@ -2797,7 +2904,7 @@ describe('workspace composer controller', () => {
     expect(hook.result.current.view.transfers[0]).toMatchObject({
       name: 'paper.pdf',
       status: 'error',
-      error: 'Could not attach the file. Check available storage and try again.'
+      error: 'Free up space on the device running Open Science, then try again.'
     })
 
     act(() => expect(hook.result.current.actions.undo()).toBe(true))
@@ -2807,7 +2914,7 @@ describe('workspace composer controller', () => {
     expect(hook.result.current.view.transfers[0]).toMatchObject({
       name: 'paper.pdf',
       status: 'error',
-      error: 'Could not attach the file. Check available storage and try again.'
+      error: 'Free up space on the device running Open Science, then try again.'
     })
     expect(stageLocalFile).toHaveBeenCalledOnce()
   })
@@ -3240,7 +3347,10 @@ describe('workspace composer controller', () => {
     expect(hook.result.current.view.transfers).toEqual([])
     expect(hook.result.current.view.doc).toEqual(textDoc('before payload after'))
     expect(hook.result.current.view.attachments).toEqual([])
-    expect(hook.result.current.view.error).not.toBe('disk full')
+    expect(hook.result.current.view.attachmentNotice?.description).toBe(
+      'Your pasted text is back in the draft. You can edit or send it.'
+    )
+    expect(hook.result.current.view.errorDetail).toBe('disk full')
     expect(hook.result.current.view.error).toMatch(/try again|storage|space/i)
     act(() => expect(hook.result.current.actions.undo()).toBe(true))
     expect(hook.result.current.view.doc).toEqual(emptyDoc)
@@ -3323,7 +3433,7 @@ describe('workspace composer controller', () => {
     act(() => hook.result.current.actions.stagePastedText(pastedDoc(node), node))
 
     expect(hook.result.current.view.doc).toEqual(textDoc('before payload after'))
-    expect(hook.result.current.view.error).toBe('You can attach up to 10 files')
+    expect(hook.result.current.view.error).toBe('You can attach up to 10 files.')
   })
 
   it('finishes a pasted-text upload in the draft that started it after a session switch', async () => {

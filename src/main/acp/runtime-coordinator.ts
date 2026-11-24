@@ -1,3 +1,5 @@
+import { requiresTaskRunTracing, requireTracingFramework } from './task-run-tracing'
+import { SessionPromptAdmissionError } from './runtime-activity-port'
 import type { NetworkApprovalRecordStatus } from '../../shared/sandbox-network-approval'
 import {
   trackLifecycleSettlement,
@@ -9,7 +11,6 @@ import { randomUUID } from 'node:crypto'
 import { createLogger, diagnosticErrorFields } from '@aipoch/diagnostics/node'
 
 import type {
-  AcpCancelPromptRequest,
   AcpCompactSessionRequest,
   AcpConnectRequest,
   AcpCreateSessionRequest,
@@ -35,6 +36,7 @@ import type { AgentUserChoiceRequest, AgentUserChoiceResult } from '../../shared
 import type { ResolvedReasoningEffort } from '@aipoch/providers'
 import type { MessageAttribution } from '../../shared/session-persistence'
 import type { AgentFrameworkId } from '../../shared/settings'
+import type { TaskContinuationTracker } from '../../shared/task-continuation'
 import type { AgentModelChangeTarget } from '../agent-framework'
 import type { ApprovedSwitchReadBack, ClaudeCodeReplayInput } from '../agents/claude-code-handoff'
 import {
@@ -51,7 +53,7 @@ import {
   waitForSessionCreationCleanup
 } from './session-creation-cleanup'
 import type { AcpRuntimeActivity, AcpRuntimeActivityOptions } from './runtime-activity'
-import type { AcpRuntimeCallbacks } from './runtime-contract'
+import type { AcpRuntimeCallbacks, RuntimeCancelPromptRequest } from './runtime-contract'
 import { projectPermissionRequest } from './runtime-publication-owner'
 
 const log = createLogger('acp')
@@ -166,6 +168,21 @@ type PromptAdmissionGuard = <Result>(
 // Keeps each framework generation in its own AcpRuntime. Framework changes preserve active turns, then
 // retire their runtime so every later turn resumes through the newly selected framework.
 class AcpRuntimeCoordinator {
+  private continuationTracker?: TaskContinuationTracker
+
+  setContinuationTracker(tracker: TaskContinuationTracker): () => void {
+    this.continuationTracker = tracker
+    return () => {
+      if (this.continuationTracker === tracker) this.continuationTracker = undefined
+    }
+  }
+
+  trackTaskContinuation: TaskContinuationTracker = (identity, send) => {
+    if (this.continuationTracker) return this.continuationTracker(identity, send)
+    if (identity.kind === 'permission')
+      return Promise.reject(new Error('Task continuation tracking is unavailable.'))
+    return send(() => undefined)
+  }
   private readonly runtimes = new Set<AcpRuntime>()
   // A failed incoming resume must retry the same provider history even after its writer detached.
   private readonly sessionWriterTransfers = new Map<
@@ -270,6 +287,10 @@ class AcpRuntimeCoordinator {
     return this.projectState(
       Array.from(this.runtimes, (runtime) => ({ runtime, state: runtime.getState() }))
     )
+  }
+
+  pendingNotebookReviews(sessionId: string): ReturnType<AcpRuntime['pendingNotebookReviews']> {
+    return Array.from(this.runtimes).flatMap((runtime) => runtime.pendingNotebookReviews(sessionId))
   }
 
   getSnapshot(): AcpStateSnapshot {
@@ -429,9 +450,10 @@ class AcpRuntimeCoordinator {
   }
 
   respondSessionPlan(
-    input: Parameters<AcpRuntime['respondSessionPlan']>[0]
+    input: Parameters<AcpRuntime['respondSessionPlan']>[0],
+    isAuthorizationCurrent?: () => boolean
   ): ReturnType<AcpRuntime['respondSessionPlan']> {
-    return this.runtimeForSession(input.sessionId).respondSessionPlan(input)
+    return this.runtimeForSession(input.sessionId).respondSessionPlan(input, isAuthorizationCurrent)
   }
 
   getActivePromptSessions(): { projectId: string; sessionId: string }[] {
@@ -568,13 +590,24 @@ class AcpRuntimeCoordinator {
     for (const sessionId of durableWaitSessionIds) {
       this.durableQuitDetachedSessionIds.add(sessionId)
     }
+    // A durable question can outlive its provider turn: the live interaction is already gone while
+    // the snapshot still lists the session as prompt-in-flight. Cancel-prompting such a session
+    // would destroy the question that restart recovery is supposed to restore.
+    const durableQuestionSessionIds = new Set(
+      (this.getSnapshot().pendingElicitations ?? [])
+        .filter((request) => request.durable)
+        .map((request) => request.sessionId)
+    )
     const sessionIds = Array.from(
       new Set([
         ...this.activePromptRequests.keys(),
         ...this.pendingPromptStarts.keys(),
         ...this.getSnapshot().promptInFlightSessionIds
       ])
-    ).filter((sessionId) => !durableWaitSessionIds.has(sessionId))
+    ).filter(
+      (sessionId) =>
+        !durableWaitSessionIds.has(sessionId) && !durableQuestionSessionIds.has(sessionId)
+    )
     if (sessionIds.length === 0 && !this.delegatedWork) return 'completed'
 
     const cancelAndDrain = async (): Promise<void> => {
@@ -646,16 +679,37 @@ class AcpRuntimeCoordinator {
   }
 
   async createSession(request: AcpCreateSessionRequest = {}): Promise<AcpCreateSessionResponse> {
+    return this.createSessionOnCurrentRuntime(request, 2)
+  }
+
+  private async createSessionOnCurrentRuntime(
+    request: AcpCreateSessionRequest,
+    remainingSkillReloads: number
+  ): Promise<AcpCreateSessionResponse> {
     this.assertPromptAdmissionOpen()
     await this.waitForInitialization()
     this.assertPromptAdmissionOpen()
+    const initialization = this.initializationGeneration
+    const configuration = this.configurationGeneration
+    const skills = this.skillsReloadGeneration
     const runtime = await this.runtimeForTarget(request.agentTarget, undefined, request.cwd)
     this.assertPromptAdmissionOpen()
     const pending = { runtime, projectId: request.projectId }
     this.pendingSessionCreations.add(pending)
+    const superseded = new Error('ACP session creation was superseded before publication.')
+    const assertCurrent = (): void => {
+      this.assertPromptAdmissionOpen()
+      if (
+        initialization !== this.initializationGeneration ||
+        !this.runtimes.has(runtime) ||
+        this.retiredRuntimes.has(runtime)
+      )
+        throw superseded
+    }
     let response: AcpCreateSessionResponse
     try {
-      response = await runtime.createSession(request)
+      assertCurrent()
+      response = await runtime.createSession(request, assertCurrent)
     } catch (error) {
       this.pendingSessionCreations.delete(pending)
       const capabilityCleanup = waitForSessionCreationCleanup(error)
@@ -669,6 +723,19 @@ class AcpRuntimeCoordinator {
           diagnosticErrorFields(cleanupError)
         )
       })
+      // Retry only an unpublished provider session, after its provisional capabilities settle.
+      if (
+        error === superseded &&
+        remainingSkillReloads > 0 &&
+        skills !== this.skillsReloadGeneration
+      ) {
+        await cleanup
+        if (
+          initialization === this.initializationGeneration &&
+          configuration === this.configurationGeneration
+        )
+          return this.createSessionOnCurrentRuntime(request, remainingSkillReloads - 1)
+      }
       retainSessionCreationCleanup(error, cleanup)
       throw error
     } finally {
@@ -786,6 +853,7 @@ class AcpRuntimeCoordinator {
       request.specialistBindingPending === true &&
       request.specialistId === pendingReconciliation.specialistId
     ) {
+      if (requiresTaskRunTracing(request)) await owner.assertAttachedTracingReady(request.sessionId)
       await this.sessionResumeObserver?.(request, pendingReconciliation.response)
       if (this.pendingResumeReconciliations.get(request.sessionId) === pendingReconciliation) {
         this.pendingResumeReconciliations.delete(request.sessionId)
@@ -795,6 +863,7 @@ class AcpRuntimeCoordinator {
     }
     if (pendingReconciliation) this.pendingResumeReconciliations.delete(request.sessionId)
     const target = request.agentTarget
+    if (target && requiresTaskRunTracing(request)) requireTracingFramework(target.frameworkId)
     const ownerTarget = owner && this.runtimeTargets.get(owner)
     const reuseCodexSession = Boolean(
       owner &&
@@ -919,7 +988,7 @@ class AcpRuntimeCoordinator {
       const retrySkills =
         remainingSkillReloads > 0 &&
         !pinnedRuntime &&
-        !admissionCurrent &&
+        (!admissionCurrent || admissionCurrent()) &&
         resumeGeneration === this.initializationGeneration &&
         configurationGeneration === this.configurationGeneration &&
         skillsGeneration !== this.skillsReloadGeneration &&
@@ -948,7 +1017,12 @@ class AcpRuntimeCoordinator {
             this.sessionResumeOperations.get(request.sessionId)?.invalidated
           )
             throw new Error('ACP session resume was superseded.')
-          return this.performSessionResume(request, undefined, undefined, remainingSkillReloads - 1)
+          return this.performSessionResume(
+            request,
+            undefined,
+            admissionCurrent,
+            remainingSkillReloads - 1
+          )
         }
       } else if (this.pendingSessionAdoptions.get(request.sessionId) === pendingAdoption) {
         this.pendingSessionAdoptions.delete(request.sessionId)
@@ -1251,6 +1325,14 @@ class AcpRuntimeCoordinator {
     return this.sendObservedPrompt(request)
   }
 
+  async assertAttachedTracingReady(sessionId: string): Promise<void> {
+    await this.runtimeForSession(sessionId).assertAttachedTracingReady(sessionId)
+  }
+
+  captureNotebookTaskIntent(request: AcpPromptRequest): AcpPromptRequest {
+    return this.runtimeForSession(request.sessionId).captureNotebookTaskIntent(request)
+  }
+
   // Interactive prompt dispatch is an admission RPC, while the authoritative turn lifecycle is
   // streamed through runtime state/events. Settle when the application runtime publishes the exact
   // matching prompt start after its durable Session turn is admitted. Provider output and later
@@ -1313,7 +1395,8 @@ class AcpRuntimeCoordinator {
         options?.onPromptAdmitted,
         'renderer',
         undefined,
-        cancellation
+        cancellation,
+        options?.beforeSessionWrite
       )
     )
   }
@@ -1692,7 +1775,8 @@ class AcpRuntimeCoordinator {
     onPromptAdmitted?: () => Promise<AcpPromptRequest['provenanceContext']>,
     runtimeReviewOwner: 'task' | 'renderer' = 'renderer',
     startAdmission?: PromptAcceptance,
-    cancellation?: RootAdmissionCancellation
+    cancellation?: RootAdmissionCancellation,
+    beforeSessionWrite?: () => Promise<void>
   ): ReturnType<AcpRuntime['sendPrompt']> {
     let dispatchStarted = false
     const dispatch = (): ReturnType<AcpRuntime['sendPrompt']> => {
@@ -1710,7 +1794,8 @@ class AcpRuntimeCoordinator {
         runtimeReviewOwner,
         startAdmission,
         undefined,
-        cancellation
+        cancellation,
+        beforeSessionWrite
       )
     }
     if (!this.promptDispatchAdmissionGuard) return dispatch()
@@ -1728,7 +1813,11 @@ class AcpRuntimeCoordinator {
           throw error
         })
       }
-      if (error instanceof DelegateMessagePreAcceptanceError) throw error
+      if (
+        error instanceof SessionPromptAdmissionError ||
+        error instanceof DelegateMessagePreAcceptanceError
+      )
+        throw error
       throw new DelegateMessagePreAcceptanceError(
         error instanceof Error ? error.message : String(error),
         error
@@ -1748,7 +1837,8 @@ class AcpRuntimeCoordinator {
     runtimeReviewOwner: 'task' | 'renderer' = 'renderer',
     startAdmission?: PromptAcceptance,
     delegatedMessageId?: string,
-    cancellation?: RootAdmissionCancellation
+    cancellation?: RootAdmissionCancellation,
+    beforeSessionWrite?: () => Promise<void>
   ): ReturnType<AcpRuntime['sendPrompt']> {
     if (this.admissionClosedReason()) return this.rejectPromptForQuit()
     const resume = this.sessionResumeOperations.get(request.sessionId)
@@ -1851,7 +1941,8 @@ class AcpRuntimeCoordinator {
         if (operation === 'sendApplicationPrompt') {
           return runtime.sendApplicationPrompt(taskRequest, attribution!, {
             promptAttemptId: attempt.id,
-            onPromptAdmitted: admitPrompt
+            onPromptAdmitted: admitPrompt,
+            beforeSessionWrite
           })
         }
         if (operation === 'sendPrompt') {
@@ -1942,7 +2033,7 @@ class AcpRuntimeCoordinator {
       : dispatch()
   }
 
-  async cancelPrompt(request: AcpCancelPromptRequest): Promise<AcpRuntimeState> {
+  async cancelPrompt(request: RuntimeCancelPromptRequest): Promise<AcpRuntimeState> {
     if (request.scope === 'subagents') {
       await this.delegatedWork?.stopActiveBranch?.(request.sessionId)
       return this.getState()
@@ -2028,6 +2119,31 @@ class AcpRuntimeCoordinator {
     return this.getState()
   }
 
+  getTaskPermissions(
+    sessionId: string,
+    promptMessageId: string
+  ): ReturnType<AcpRuntime['getTaskPermissions']> {
+    return this.sessionRuntimes.get(sessionId)?.getTaskPermissions(sessionId, promptMessageId) ?? []
+  }
+
+  get delegateInteractions(): RootDelegatedWorkControl['taskInteractions'] {
+    return this.delegatedWork?.taskInteractions
+  }
+
+  respondTaskPermission(
+    ...args: Parameters<AcpRuntime['respondTaskPermission']>
+  ): Promise<boolean> {
+    return (
+      this.sessionRuntimes.get(args[0])?.respondTaskPermission(...args) ?? Promise.resolve(false)
+    )
+  }
+
+  restoreTaskPermission(
+    ...args: Parameters<AcpRuntime['restoreTaskPermission']>
+  ): Promise<boolean> {
+    return this.runtimeForSession(args[0].sessionId).restoreTaskPermission(...args)
+  }
+
   async respondToPermission(response: AcpPermissionResponse): Promise<AcpRuntimeState> {
     if (this.delegatedWork && (await this.delegatedWork.respondToPermission(response))) {
       return this.getState()
@@ -2069,6 +2185,16 @@ class AcpRuntimeCoordinator {
       this.preparedElicitationContinuations.set(sessionId, response.requestId)
     }
     return this.getState()
+  }
+
+  listTaskQuestions(sessionId: string): ReturnType<AcpRuntime['listTaskQuestions']> {
+    return this.findRuntimeForSession(sessionId)?.listTaskQuestions(sessionId) ?? []
+  }
+
+  respondToTaskQuestion(
+    input: Parameters<AcpRuntime['respondToTaskQuestion']>[0]
+  ): ReturnType<AcpRuntime['respondToTaskQuestion']> {
+    return this.runtimeForSession(input.request.sessionId).respondToTaskQuestion(input)
   }
 
   getPermissionPrompts(sessionId: string): 'none' | undefined {
@@ -2215,6 +2341,10 @@ class AcpRuntimeCoordinator {
     // generation, including explicit provider/model targets. Retire them as one global capability
     // epoch so a prompt admitted immediately after this Promise settles cannot use the old backend.
     await this.retireRuntimeGenerations(this.runtimes, 'shell-capabilities')
+  }
+
+  async requestImageCapabilityRefresh(): Promise<void> {
+    await this.retireRuntimeGenerations(this.runtimes, 'image-capabilities')
   }
 
   async requestProjectAgentContextReload(projectId: string): Promise<void> {

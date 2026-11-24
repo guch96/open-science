@@ -9,7 +9,8 @@ import type { PermissionProfileId } from '../../../shared/permission-profiles'
 import type { SessionAttention } from '../../../shared/session-attention-contract'
 import type {
   PersistedArtifact,
-  PersistedChatMessage
+  PersistedChatMessage,
+  PersistedToolActivity
 } from '../../../shared/session-message-contract'
 import type { PersistedSessionStatus } from '../../../shared/session-run-contract'
 import type { PersistedChatSession } from '../../../shared/session-persistence'
@@ -29,8 +30,10 @@ export type ToolActivity = {
   activityGroupId?: string
   promptMessageId?: string
   status: ToolActivityStatus
-  toolDisposition?: 'declined' | 'permission-closed'
+  toolDisposition?: 'declined' | 'permission-closed' | 'cancelled'
   executionInvocationId?: string
+  webInvocation?: PersistedToolActivity['webInvocation']
+  packageWebEvidence?: PersistedToolActivity['packageWebEvidence']
   // Set only by the main-process permission owner, never by provider metadata.
   appOwned?: true
   eventIds: string[]
@@ -105,8 +108,17 @@ export type ChatSession = Omit<
   liveInteractionState?: Pick<SessionInteractionState, 'permission' | 'elicitation'> & {
     presentationOnly?: true
   }
-  // False only for a SQLite-backed startup row whose transcript JSON has not been opened yet.
+  // False for a catalog row or a display-only history page. Neither is a save authority.
   contentLoaded?: false
+  // Transient projection fact. Details recovery is requested only when the Session is opened.
+  needsStartupRecovery?: boolean
+  historyPage?: {
+    revision: number
+    beforeCursor?: string
+    hasMore: boolean
+    totalItems: number
+    messageBranchId?: string
+  }
   activeMessageCount?: number
   artifactCount?: number
   presentedActivityAt?: number

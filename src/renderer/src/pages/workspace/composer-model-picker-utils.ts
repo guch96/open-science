@@ -5,12 +5,8 @@ import {
   type ConfiguredModelCatalogEntry
 } from '../../../../shared/configured-model-catalog'
 import type { ModelProtocol } from '@aipoch/providers'
-import {
-  ENDPOINT_PATHS,
-  providerEndpoints,
-  type ProviderType,
-  type ProviderView
-} from '../../../../shared/settings'
+import type { ProviderType, ProviderView } from '../../../../shared/settings'
+import { ENDPOINT_PATHS, providerEndpoints } from '../../../../shared/settings-runtime'
 
 // Human-readable route for an endpoint, so a reason reads as a route rather than a vendor name. The
 // routes are literal API paths, identical in every locale; only the joining word is translated.
@@ -18,8 +14,8 @@ const routeList = (endpoints: readonly ModelProtocol[], t: TFunction): string =>
   endpoints.map((endpoint) => ENDPOINT_PATHS[endpoint]).join(t(' or '))
 
 export const modelUnavailableReason = (
-  option: Pick<ConfiguredModelCatalogEntry, 'label' | 'model' | 'unavailableReason'>,
-  provider: Pick<ProviderView, 'type' | 'vendorId' | 'apiEndpoints'>,
+  option: Pick<ConfiguredModelCatalogEntry, 'model' | 'label' | 'metadata' | 'unavailableReason'>,
+  provider: Pick<ProviderView, 'type' | 'apiEndpoints' | 'modelProtocols'>,
   frameworkName: string,
   frameworkEndpoints: readonly ModelProtocol[],
   t: TFunction
@@ -30,10 +26,13 @@ export const modelUnavailableReason = (
       'This model is not supported over the Codex Chat Completions bridge. Pick another model for a Codex session.'
     )
   }
+  if (option.unavailableReason === 'streaming-unsupported') {
+    return t('This model does not support streaming. Pick a streaming-capable model for the Agent.')
+  }
 
   return t('{{model}} uses {{modelRoutes}}, but {{framework}} supports {{frameworkRoutes}}.', {
     model: option.label,
-    modelRoutes: routeList(configuredModelApiEndpoints(provider, option.model), t),
+    modelRoutes: routeList(configuredModelApiEndpoints(provider, option.metadata, option.model), t),
     framework: frameworkName,
     frameworkRoutes: routeList(frameworkEndpoints, t)
   })

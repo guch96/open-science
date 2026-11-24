@@ -403,6 +403,7 @@ describe('computeCall RPC', () => {
           probeResult: undefined
         }
       ],
+      listExternalTargets: async () => [],
       callCommand
     }
     const admitted = new AgentComputeService(raw as never, {
@@ -1201,7 +1202,8 @@ describe('computeCall RPC', () => {
         method: 'POST',
         headers: {
           authorization: `Bearer ${connection.token}`,
-          'content-type': 'application/json'
+          'content-type': 'application/json',
+          'x-open-science-control-invocation': endInvocation.nonce
         },
         body: JSON.stringify({
           method: 'computeCall',

@@ -11,6 +11,11 @@ import { normalizeNotebookNetworkSettings } from '../../shared/notebook-network'
 import type { RuntimeEnablement } from '../../shared/notebook-runtime'
 import { isPermissionProfileId } from '../../shared/permission-profiles'
 import type { ProjectFilesFilterPreference } from '../../shared/settings'
+import type {
+  SessionDetailsModelConfiguration,
+  SubagentModelConfiguration,
+  VisionModelConfiguration
+} from '../../shared/settings'
 import {
   CODEX_SUBSCRIPTION_PROVIDER_ID,
   codexSubscriptionProviderIdentity,
@@ -21,11 +26,8 @@ import {
   isCodexSubscriptionProvider,
   isCodexSubscriptionProviderId,
   isReasoningEffort,
-  SETTINGS_FILE_VERSION,
-  type SessionDetailsModelConfiguration,
-  type SubagentModelConfiguration,
-  type VisionModelConfiguration
-} from '../../shared/settings'
+  SETTINGS_FILE_VERSION
+} from '../../shared/settings-runtime'
 import { isRecord } from '../value-guards'
 import { PROVIDER_RESOURCE_LIMITS } from './provider-resource-limits'
 import {
@@ -34,7 +36,8 @@ import {
   sanitizeComputeGrant,
   sanitizeConnectors,
   sanitizePackageMirror,
-  sanitizeProvider
+  sanitizeProvider,
+  sanitizeImageSettings
 } from './record-codec'
 import {
   createEmptySettings,
@@ -261,6 +264,7 @@ const sanitizeSettings = (value: unknown): StoredSettings => {
     ...(modalRuntime.success ? { modalRuntime: modalRuntime.data } : {}),
     version: SETTINGS_FILE_VERSION,
     providers,
+    ...sanitizeImageSettings(value, providers),
     ...(classification ? { classification } : {}),
     subagentModel: sanitizeSubagentModel(value.subagentModel),
     reviewerModel: sanitizeSubagentModel(value.reviewerModel),
@@ -297,6 +301,7 @@ const sanitizeSettings = (value: unknown): StoredSettings => {
 
   const onboardingCompletedAt = asNumber(value.onboardingCompletedAt)
   if (onboardingCompletedAt !== undefined) settings.onboardingCompletedAt = onboardingCompletedAt
+  if (value.kiloDefaultInitialized === true) settings.kiloDefaultInitialized = true
 
   const disabledSkillIds = Array.isArray(value.disabledSkillIds)
     ? [

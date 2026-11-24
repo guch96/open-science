@@ -1,9 +1,10 @@
 import { literatureItemInputSchema } from '@aipoch/literature-library/contracts'
 import { expect } from '@playwright/test'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { once } from 'node:events'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   PDFDict,
   PDFDocument,
@@ -14,6 +15,10 @@ import {
   rgb
 } from 'pdf-lib'
 import type { ElectronApplication, Page } from 'playwright'
+import type { WebSocket } from 'ws'
+import { connectToDesktopEndpoint, type DesktopEndpoint } from '../src/main/desktop-connection'
+import { parseRpcJson, stringifyRpcJson } from '../src/main/rpc-json'
+import { WEB_RPC_PROTOCOL_VERSION, type WebRpcResponse } from '../src/shared/web-rpc-contract'
 import { test } from './fixtures/electron-app'
 import { openAllReferences } from './fixtures/library'
 
@@ -44,13 +49,98 @@ const selectRendition = async (
 }
 
 const directServers = new Set<Server>()
+const capacitySockets = new Set<WebSocket>()
 test.afterEach(async () => {
+  for (const socket of capacitySockets) socket.terminate()
+  capacitySockets.clear()
   for (const server of directServers) {
     server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
   directServers.clear()
 })
+
+async function occupyPdfWriter(configRoot: string, bytes: number[]): Promise<() => Promise<void>> {
+  const { desktop } = JSON.parse(
+    await readFile(join(configRoot, 'runtime-owner.json'), 'utf8')
+  ) as {
+    desktop: DesktopEndpoint
+  }
+  const socket = await connectToDesktopEndpoint(desktop)
+  capacitySockets.add(socket)
+  const initialized = once(socket, 'message')
+  socket.send(JSON.stringify({ kind: 'bootstrap', desktopInstanceId: randomUUID() }))
+  await initialized
+  const clientId = randomUUID()
+  let sequence = 0
+  const invoke = (channel: string, argument: unknown): Promise<unknown> => {
+    const id = ++sequence
+    return new Promise((resolve, reject) => {
+      const receive = (raw: Buffer): void => {
+        const message = parseRpcJson(raw.toString()) as WebRpcResponse & {
+          kind: string
+          id: number
+        }
+        if (message.kind !== 'response' || message.id !== id) return
+        cleanup()
+        if (message.ok) resolve(message.result)
+        else reject(new Error(message.error.message))
+      }
+      const closed = (): void => {
+        cleanup()
+        reject(new Error('PDF capacity fixture disconnected.'))
+      }
+      const cleanup = (): void => {
+        socket.off('message', receive)
+        socket.off('close', closed)
+      }
+      socket.on('message', receive)
+      socket.once('close', closed)
+      socket.send(
+        stringifyRpcJson({
+          kind: 'invoke',
+          protocolVersion: WEB_RPC_PROTOCOL_VERSION,
+          id,
+          clientId,
+          channel,
+          args: [argument]
+        })
+      )
+    })
+  }
+  // The holder uses the authenticated desktop command boundary with inline payloads.
+  // The reader keeps its normal document-serialized payload path and can reach the occupied writer.
+  const unit = {
+    source: 'Cell growth is measured in controlled laboratory cultures.',
+    translation: '测量受控实验室培养物中的细胞生长。'.repeat(4),
+    fragments: [
+      { pageNumber: 1, rect: { x: 40 / 612, y: 60 / 792, width: 530 / 612, height: 40 / 792 } }
+    ]
+  }
+  const request = {
+    data: new Uint8Array(bytes),
+    pages: Array.from({ length: 4 }, () => ({ width: 612, height: 792 }))
+  }
+  const ids = ['pdf-capacity-a', 'pdf-capacity-b']
+  const done = Promise.allSettled(
+    ids.map((id) =>
+      invoke('pdf-translation:generate-pdf', { ...request, id, units: Array(5000).fill(unit) })
+    )
+  )
+  await expect(
+    invoke('pdf-translation:generate-pdf', {
+      ...request,
+      id: 'pdf-capacity-probe',
+      units: [unit]
+    })
+  ).rejects.toThrow('[pdf-generation:busy:0]')
+  return async () => {
+    await Promise.all(ids.map((id) => invoke('pdf-translation:cancel-pdf', id)))
+    await done
+    socket.terminate()
+    capacitySockets.delete(socket)
+  }
+}
 
 // Actual application/IPC/WASM/renderer, synthetic document and controlled agent/API output.
 // This verifies reader integration, not translation-model quality.
@@ -98,18 +188,18 @@ for (const variant of [
     const directRequests: Array<Record<string, unknown>> = []
     let paragraphRequests = 0
     let directProvider: { id: string; baseUrl: string } | undefined
+    const useDirectProvider = [
+      'direct-api',
+      'provider-overloaded',
+      'close-confirmation',
+      'streaming-reading',
+      'retained-paragraph',
+      'busy'
+    ].includes(variant)
     let replacementText: string | undefined
     let holdTranslation = ['close-confirmation', 'streaming-reading'].includes(variant)
     const heldTranslations: Array<() => void> = []
-    if (
-      [
-        'direct-api',
-        'provider-overloaded',
-        'close-confirmation',
-        'streaming-reading',
-        'retained-paragraph'
-      ].includes(variant)
-    ) {
+    if (useDirectProvider) {
       const server = createServer(async (request, response) => {
         if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
           response.writeHead(404).end()
@@ -136,7 +226,11 @@ for (const variant of [
           )
           return
         }
-        if (holdTranslation && !isBatch && paragraphRequests > 1) {
+        if (
+          !isBatch &&
+          ((holdTranslation && paragraphRequests > 1) ||
+            (variant === 'busy' && paragraphRequests === 4))
+        ) {
           await new Promise<void>((resolve) => heldTranslations.push(resolve))
         }
         // Controlled latency makes the actual running state observable.
@@ -375,27 +469,11 @@ for (const variant of [
     await panel.getByRole('combobox', { name: 'Translation method' }).click()
     await page
       .getByRole('option', {
-        name: [
-          'direct-api',
-          'provider-overloaded',
-          'close-confirmation',
-          'streaming-reading',
-          'retained-paragraph'
-        ].includes(variant)
-          ? 'Direct API'
-          : 'Agent',
+        name: useDirectProvider ? 'Direct API' : 'Agent',
         exact: true
       })
       .click()
-    if (
-      [
-        'direct-api',
-        'provider-overloaded',
-        'close-confirmation',
-        'streaming-reading',
-        'retained-paragraph'
-      ].includes(variant)
-    ) {
+    if (useDirectProvider) {
       await panel.getByRole('combobox', { name: 'Model', exact: true }).click()
       await page
         .getByRole('option', {
@@ -819,35 +897,15 @@ for (const variant of [
       await restoredPage.screenshot({ path: testInfo.outputPath('resumed-complete.png') })
       return
     }
+    let releasePdfWriter: (() => Promise<void>) | undefined
     if (variant === 'busy') {
       await expect(panel).toContainText('3 / 4', { timeout: 60000 })
       // Wait for the previous page generation to release its slot before occupying both.
       await expect(panel.getByRole('button', { name: '0 Not in PDF', exact: true })).toBeVisible()
-      // Occupy the actual writer slots with bounded requests, then cancel them below.
-      // No replacement IPC, mocked error state, or provider response changes.
-      await page.evaluate((bytes) => {
-        const api = window.api.pdfTranslation
-        if (!api) throw new Error('PDF translation API is unavailable')
-        const requests = ['pdf-capacity-a', 'pdf-capacity-b'].map((id) =>
-          api.generatePdf({
-            id,
-            data: new Uint8Array(bytes),
-            pages: Array.from({ length: 4 }, () => ({ width: 612, height: 792 })),
-            units: Array.from({ length: 5000 }, () => ({
-              source: 'Cell growth is measured in controlled laboratory cultures.',
-              translation: '测量受控实验室培养物中的细胞生长。'.repeat(4),
-              fragments: [
-                {
-                  pageNumber: 1,
-                  rect: { x: 40 / 612, y: 60 / 792, width: 530 / 612, height: 40 / 792 }
-                }
-              ]
-            }))
-          })
-        )
-        ;(window as Window & { pdfCapacityDone?: Promise<unknown> }).pdfCapacityDone =
-          Promise.allSettled(requests)
-      }, bytes)
+      const fixtureRoot = dirname(await app.createTestDirectory('pdf-capacity'))
+      await expect.poll(() => heldTranslations.length).toBe(1)
+      releasePdfWriter = await occupyPdfWriter(join(fixtureRoot, 'storage'), bytes)
+      heldTranslations.shift()!()
     }
     await expect(panel.getByRole('button', { name: '4 Translated', exact: true })).toBeVisible({
       timeout: 60000
@@ -869,11 +927,12 @@ for (const variant of [
       await expect(updatePreview).toBeHidden({ timeout: 60000 })
     }
     const failure = panel.getByRole('alert')
-    let promptsBeforeRetry: Awaited<ReturnType<typeof app.readFakeAgentPrompts>> | undefined
+    let requestsBeforeRetry: number | undefined
     if (variant === 'busy') {
       await expect(failure).toContainText(
         'PDF generation is busy. Retry after another document finishes.'
       )
+      await releasePdfWriter!()
       await expect(panel.getByRole('button', { name: 'Compare PDFs', exact: true })).toBeEnabled()
       await panel.getByRole('button', { name: 'Close translation', exact: true }).click()
       await expect(panel).toBeHidden()
@@ -885,19 +944,9 @@ for (const variant of [
       await translationEntry.click()
       await expect(failure).toContainText('PDF generation is busy.')
       await page.screenshot({ path: testInfo.outputPath('pdf-generation-retry.png') })
-      await page.evaluate(async () => {
-        const api = window.api.pdfTranslation
-        if (!api) throw new Error('PDF translation API is unavailable')
-        await Promise.all(['pdf-capacity-a', 'pdf-capacity-b'].map((id) => api.cancelPdf(id)))
-        const scope = window as Window & { pdfCapacityDone?: Promise<unknown> }
-        await scope.pdfCapacityDone
-        delete scope.pdfCapacityDone
-      })
-      promptsBeforeRetry = await app.readFakeAgentPrompts()
       // One unsupported batch falls back to four individual paragraph requests.
-      expect(
-        promptsBeforeRetry.filter((entry) => entry.prompt.includes('PAIR_PDF_ACCEPTANCE'))
-      ).toHaveLength(5)
+      requestsBeforeRetry = directRequests.length
+      expect(requestsBeforeRetry).toBe(5)
       await page.getByRole('button', { name: 'Retry PDF generation', exact: true }).focus()
       await page.keyboard.press('Enter')
       await expect(
@@ -1192,8 +1241,8 @@ for (const variant of [
           expect(Math.abs(positions[0].y - positions[1].y)).toBeLessThan(1)
         }
       }
-    if (promptsBeforeRetry) {
-      expect(await app.readFakeAgentPrompts()).toEqual(promptsBeforeRetry)
+    if (requestsBeforeRetry !== undefined) {
+      expect(directRequests).toHaveLength(requestsBeforeRetry)
       await page.screenshot({ path: testInfo.outputPath('pdf-generation-recovered.png') })
     }
     if (await panel.isVisible())
@@ -1242,7 +1291,7 @@ for (const variant of [
     if (variant === 'standard') {
       // Shared resizing is a docked-sidebar contract; narrow readers use floating sidebars.
       const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }))
-      await page.setViewportSize({ width: 1440, height: 900 })
+      await app.setMainWindowSize(1440, 900)
       const translationToggle = page.getByRole('button', {
         name: 'View translation',
         exact: true

@@ -4,6 +4,7 @@ import { MessageScrollerItem } from '@/components/ui/message-scroller'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { formatDisplayNumber } from '@/lib/locale-format'
 import { cn, formatByteSize } from '@/lib/utils'
+import { useDesktopRuntimeRecoveryStore } from '@/stores/desktop-runtime-recovery-store'
 import { useNavigationStore } from '@/stores/navigation-store'
 import type { ChatMessage, ChatSession } from '@/stores/session-store-contract'
 import { useSessionStore } from '@/stores/session-store'
@@ -11,6 +12,7 @@ import { useSettingsStore } from '@/stores/settings-store'
 import {
   BookOpenText,
   Bot,
+  Clock,
   Brain,
   Check,
   ChevronDown,
@@ -571,7 +573,7 @@ const editCardClassName =
 const editCancelButtonClassName =
   'flex h-7 items-center rounded-md px-2.5 text-[12px] font-medium text-text-300 transition-colors duration-200 ease-out hover:bg-bg-200 hover:text-text-100'
 const editSendButtonClassName =
-  'flex h-7 items-center rounded-md bg-primary px-2.5 text-[12px] font-medium text-primary-foreground transition-colors duration-200 ease-out hover:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-primary'
+  'flex h-7 items-center rounded-md bg-primary px-2.5 text-[12px] font-medium text-primary-foreground transition-colors duration-200 ease-out hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-primary'
 // The inline editor ignores pasted files; plain-text paste is handled by the editor itself.
 const ignoreEditPaste = (): void => {}
 // A branch-changing resend with several downstream turns asks for confirmation first.
@@ -702,8 +704,8 @@ const CollapsibleUserMessageContent = ({
   const contentId = useId()
   const measurementRef = useRef<HTMLDivElement>(null)
   const [isExpanded, setIsExpanded] = useState(false)
-  const [canExpand, setCanExpand] = useState(false)
-  const isCollapsed = canExpand && !isExpanded
+  const [canExpand, setCanExpand] = useState<boolean>()
+  const isCollapsed = canExpand === true && !isExpanded
   const measurementParts =
     staticParts && staticParts.length > 0
       ? staticParts
@@ -716,6 +718,7 @@ const CollapsibleUserMessageContent = ({
     if (!measurement) return
 
     setIsExpanded(false)
+    setCanExpand(undefined)
     const measureOverflow = (): void => {
       // Reading a skipped subtree's geometry defeats content-visibility containment.
       // ResizeObserver measures it again when the browser resumes rendering the row.
@@ -766,7 +769,8 @@ const CollapsibleUserMessageContent = ({
       <div
         id={contentId}
         data-slot="user-message-content"
-        className={cn(isCollapsed && 'max-h-[12.5lh] overflow-hidden')}
+        // Cap the first layout even when containment defers the overflow measurement.
+        className={cn(canExpand !== false && !isExpanded && 'max-h-[12.5lh] overflow-hidden')}
       >
         {isCollapsed && hasInteractiveContent ? (
           <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
@@ -867,11 +871,18 @@ const VisibleArtifactPreview = ({
         if (!canceled) setPreviewState({ requestKey, preview })
       })
       .catch((error: unknown) => {
-        // Missing or cross-root files are represented by the card badge, not noisy console errors.
+        // An in-flight thumbnail can settle after unmount or after desktop shutdown starts.
+        if (
+          canceled ||
+          useDesktopRuntimeRecoveryStore.getState().closing ||
+          (error instanceof Error &&
+            String(error).endsWith('ApplicationCommandError: The local service is stopping.'))
+        )
+          return
         if (!isUnavailableFileError(error) && !isManagedFilePublicationPendingError(error)) {
           console.error('Failed to read artifact preview', error)
         }
-        if (!canceled) setPreviewState({ requestKey, preview: undefined })
+        setPreviewState({ requestKey, preview: undefined })
       })
 
     return () => {
@@ -1778,6 +1789,12 @@ const WorkspaceMessageItemImpl = ({
               </div>
             ) : (
               <div className="group flex flex-col items-end">
+                {message.attribution?.feature === 'schedule' && (
+                  <span className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    <Clock className="size-3" aria-hidden="true" />
+                    {t('Sent by scheduled task')}
+                  </span>
+                )}
                 <div
                   data-slot="user-bubble-row"
                   className="flex w-full max-w-full items-center justify-end gap-1"

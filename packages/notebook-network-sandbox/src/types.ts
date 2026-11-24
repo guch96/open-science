@@ -1,5 +1,7 @@
 import type { TrustedPrivateDestination } from '../runtime/src/gateway/address-policy.js'
 export type NotebookNetworkPolicy = Readonly<{
+  mode?: 'relaxed' | 'strict'
+  strictWhitelist?: readonly import('./network-address.js').StrictNetworkRule[]
   trustedPrivateDestinations?: readonly TrustedPrivateDestination[]
   allowedDomains: readonly string[]
   /** Overrides wildcard allows; an exact allow still represents explicit approval. */
@@ -119,6 +121,8 @@ export type NotebookSandboxCommand = Readonly<{
 }>
 
 export type NotebookSandboxedProcess = Readonly<{
+  /** Original WSL launch capability; never accepted from the caller or persisted. */
+  memoryProbe?: import('../runtime/src/platform/wsl2-isolation.js').Wsl2Launch['memoryProbe']
   argv: readonly string[]
   env: NodeJS.ProcessEnv
   /** Durable proof files for a Windows supervisor Job Object, when one owns this process tree. */

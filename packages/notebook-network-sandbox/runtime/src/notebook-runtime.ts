@@ -27,11 +27,14 @@ import {
   installWindowsAppContainer,
   setWindowsRuntimeAccess as setWindowsRuntimeAccessImpl,
   getWindowsRuntimeAccess as getWindowsRuntimeAccessImpl,
+  preflightWindowsFilesystem as preflightWindowsFilesystemImpl,
   readAppContainerStatus,
   removeWindowsAppContainer,
   windowsLaunch,
   windowsSupervisedLaunch,
   windowsStandardLaunch,
+  type WindowsAclPreflightRequest,
+  type WindowsAclPreflightResult,
   type WindowsShell,
   type WindowsRuntimeVerification
 } from './platform/windows-appcontainer.js'
@@ -45,6 +48,8 @@ import {
 type SandboxDependencyCheck = Readonly<{ warnings: string[]; errors: string[] }>
 
 type NetworkRuntimeConfig = Readonly<{
+  mode?: 'relaxed' | 'strict'
+  strictWhitelist?: readonly import('../../src/network-address.js').StrictNetworkRule[]
   trustedPrivateDestinations?: readonly TrustedPrivateDestination[]
   allowedDomains: readonly string[]
   askDomains?: readonly string[]
@@ -176,6 +181,8 @@ const parentSettings = (config: NetworkRuntimeConfig): ParentProxySettings | und
 
 const buildPolicy = (config: NetworkRuntimeConfig): DestinationPolicy =>
   new DestinationPolicy({
+    mode: config.mode,
+    strictWhitelist: config.strictWhitelist,
     trustedPrivateDestinations: config.trustedPrivateDestinations,
     allowedDomains: config.allowedDomains,
     askDomains: config.askDomains,
@@ -299,6 +306,7 @@ const wrap = async (
   requestProcessTreeTermination?: () => Promise<boolean>
   confirmProcessState?: () => Promise<SandboxProcessState>
   beginSpawn?: () => Readonly<{ started: () => void; notStarted: () => void }>
+  memoryProbe?: import('./platform/wsl2-isolation.js').Wsl2Launch['memoryProbe']
 }> => {
   if (finishing.size > 0) await Promise.allSettled([...finishing])
   const config = runtimeConfig
@@ -356,7 +364,12 @@ const wrap = async (
         executionActive: false,
         epoch: 0
       })
-      return { argv: launch.argv, env: launch.env, beginSpawn: launch.beginSpawn }
+      return {
+        argv: launch.argv,
+        env: launch.env,
+        beginSpawn: launch.beginSpawn,
+        memoryProbe: launch.memoryProbe
+      }
     } catch (error) {
       if (commandContexts.has(request.commandId)) {
         const cleanup = await cleanupAfterCommand(request.commandId, 'spawn-failed', {
@@ -795,6 +808,19 @@ const setWindowsRuntimeAccess = (
     )
   )
 
+const preflightWindowsFilesystem = (
+  config: NetworkRuntimeConfig,
+  request: WindowsAclPreflightRequest,
+  signal?: AbortSignal
+): Promise<WindowsAclPreflightResult> =>
+  preflightWindowsFilesystemImpl(
+    config.windowsHostPath,
+    config.installationId,
+    config.windowsOwnershipRoot,
+    request,
+    signal
+  )
+
 const NotebookNetworkRuntime = {
   initialize,
   wrap,
@@ -819,6 +845,7 @@ const NotebookNetworkRuntime = {
   resetCommandConnections,
   cleanupAfterCommand,
   refreshWindowsProtection,
+  preflightWindowsFilesystem,
   reset
 } as const
 
@@ -828,6 +855,7 @@ export {
   removeWindows,
   setWindowsRuntimeAccess,
   getWindowsRuntimeAccess,
+  preflightWindowsFilesystem,
   isWindowsProtectionConfigured,
   statusForPlatform
 }
@@ -837,5 +865,7 @@ export type {
   NetworkWrapRequest,
   SandboxDependencyCheck,
   WindowsShell,
+  WindowsAclPreflightRequest,
+  WindowsAclPreflightResult,
   WindowsRuntimeVerification
 }

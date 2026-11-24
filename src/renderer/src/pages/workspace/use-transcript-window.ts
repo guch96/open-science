@@ -60,12 +60,14 @@ const useTranscriptWindow = (
   items: readonly WorkspaceConversationTimelineItem[],
   presentationBarrierIndex: number,
   viewportRef: RefObject<HTMLDivElement | null>,
-  followingPaused = false
+  followingPaused = false,
+  initialWindowSize = TRANSCRIPT_WINDOW_SIZE
 ): {
   entries: Array<{ item: WorkspaceConversationTimelineItem; itemIndex: number }>
   end: number
   revealMessage: (messageId: string) => void
   revealAll: () => void
+  revealEarlier: () => void
   restoreWindow: () => void
   expandAtScrollEdge: (previousScrollTop: number) => void
   followEnd: () => void
@@ -89,7 +91,7 @@ const useTranscriptWindow = (
   >(undefined)
   const scrollInputTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const finding = state.scopeId === scopeId && state.finding === true
-  const initialStart = Math.max(0, items.length - TRANSCRIPT_WINDOW_SIZE)
+  const initialStart = Math.max(0, items.length - initialWindowSize)
   if (state.scopeId !== scopeId) {
     setState({
       scopeId,
@@ -115,7 +117,7 @@ const useTranscriptWindow = (
     stateMatchesScope &&
     state.followEnd !== false &&
     state.end === state.itemCount
-  const retainedWindowSize = Math.max(TRANSCRIPT_WINDOW_SIZE, state.end - state.start)
+  const retainedWindowSize = Math.max(initialWindowSize, state.end - state.start)
   const retainedStart =
     stateMatchesScope && state.anchorId ? items.findIndex((item) => item.id === state.anchorId) : -1
   const start = finding
@@ -134,6 +136,48 @@ const useTranscriptWindow = (
         ? items.length
         : Math.min(start + retainedWindowSize, items.length)
       : items.length
+
+  // A short tail must still let the reader scroll up after a resize or row collapse.
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    if (
+      !viewport ||
+      initialWindowSize === TRANSCRIPT_WINDOW_SIZE ||
+      start === 0 ||
+      end !== items.length ||
+      presentationBarrierIndex >= 0 ||
+      followingPaused ||
+      state.followEnd === false
+    )
+      return
+    const fillViewport = (): void => {
+      if (viewport.clientHeight > 0 && viewport.scrollHeight <= viewport.clientHeight) {
+        setState({
+          scopeId,
+          itemCount: items.length,
+          start: Math.max(0, start - (end - start)),
+          end,
+          followEnd: true
+        })
+      }
+    }
+    fillViewport()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(fillViewport)
+    observer.observe(viewport)
+    if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
+    return () => observer.disconnect()
+  }, [
+    end,
+    followingPaused,
+    initialWindowSize,
+    items.length,
+    presentationBarrierIndex,
+    scopeId,
+    start,
+    state.followEnd,
+    viewportRef
+  ])
 
   // Preserve mounted reading rows as well as scrollTop during an explicit interaction pause.
   // Persist the release so ending the pause alone cannot jump to a newer bounded tail.
@@ -235,6 +279,24 @@ const useTranscriptWindow = (
     viewportRef
   ])
 
+  const revealEarlier = useCallback((): void => {
+    const anchor = captureReadingAnchor(scopeId, viewportRef.current)
+    if (anchor) {
+      readingAnchorRef.current = anchor
+      pendingTargetRef.current = anchor
+    }
+    const anchorIndex = anchor ? items.findIndex((item) => item.id === anchor.messageId) : -1
+    const nextStart = Math.max(0, anchorIndex - TRANSCRIPT_WINDOW_SIZE + 1)
+    setState({
+      scopeId,
+      itemCount: items.length,
+      start: nextStart,
+      end: Math.min(items.length, nextStart + TRANSCRIPT_WINDOW_SIZE),
+      anchorId: items[nextStart]?.id,
+      followEnd: false
+    })
+  }, [items, scopeId, viewportRef])
+
   const restoreWindow = useCallback((): void => {
     const snapshot = findRestoreRef.current
     findRestoreRef.current = undefined
@@ -245,7 +307,7 @@ const useTranscriptWindow = (
       setState({
         scopeId,
         itemCount: items.length,
-        start: Math.max(0, items.length - TRANSCRIPT_WINDOW_SIZE),
+        start: initialStart,
         end: items.length,
         followEnd: true
       })
@@ -281,7 +343,7 @@ const useTranscriptWindow = (
       pendingTargetRef.current = anchor
       setState(snapshot.window)
     }
-  }, [items, scopeId, viewportRef])
+  }, [initialStart, items, scopeId, viewportRef])
 
   const finishUserScroll = (): void => {
     clearTimeout(scrollInputTimerRef.current)
@@ -490,6 +552,7 @@ const useTranscriptWindow = (
     end,
     revealMessage,
     revealAll,
+    revealEarlier,
     restoreWindow,
     expandAtScrollEdge,
     followEnd,

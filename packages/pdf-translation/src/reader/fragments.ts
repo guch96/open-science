@@ -27,7 +27,22 @@ export function pdfTranslationLayoutFragments(
       width: Math.max(a.x + a.width, b.x + b.width) - x,
       height: Math.max(a.y + a.height, b.y + b.height) - y
     }
-    let otherContent = false
+    const intersects = (candidate: typeof rect, other: typeof rect): boolean =>
+      candidate.x < other.x + other.width &&
+      candidate.x + candidate.width > other.x &&
+      candidate.y < other.y + other.height &&
+      candidate.y + candidate.height > other.y
+    // Widening a row can cover a same-unit expression retained on its left.
+    // Keep the native regions separate when the union would claim new ink.
+    let otherContent = result
+      .slice(0, -1)
+      .some(
+        (earlier) =>
+          earlier.pageNumber === fragment.pageNumber &&
+          intersects(rect, earlier.rect) &&
+          !intersects(a, earlier.rect) &&
+          !intersects(b, earlier.rect)
+      )
     for (const other of source.units) {
       if (other === unit) continue
       for (const f of other.fragments) {
@@ -54,19 +69,34 @@ export function pdfTranslationLayoutFragments(
         } else otherContent = true
       }
     }
+    const openingPanel =
+      previous.items.length === 2 && previous.items[1].text === '-'
+        ? /^\p{Ll}{3,} \(([a-z])$/u.exec(previous.items[0].text)
+        : null
+    const closingPanel = openingPanel && /^([a-z])\)\s+\p{Ll}/u.exec(fragment.items[0]?.text ?? '')
+    const splitCaptionPanelRow =
+      !!openingPanel &&
+      !!closingPanel &&
+      !unit.sourceOnly &&
+      isPdfTranslationCaption(unit.source) &&
+      unit.source.includes(`(${openingPanel[1]}-${closingPanel[1]})`) &&
+      Math.abs(a.y - b.y) * page.height <= 0.1 &&
+      Math.abs(a.height - b.height) * page.height <= 0.1 &&
+      Math.abs(b.x - a.x - a.width) * page.width <= 0.25
     if (
-      b.y > a.y &&
-      // Tall inline fractions can overlap the next line's font box. Merge
-      // only a minority of the shorter box; neighbor ownership is checked above.
-      gap >= -Math.max(2, Math.min(a.height, b.height) * page.height * 0.5) &&
-      gap <= 2 &&
-      // A paragraph can narrow beside a figure. Keep that change in footprint
-      // instead of filling its bounding rectangle across the neighboring graphic.
-      (overlap >= Math.max(a.width, b.width) * 0.8 ||
-        (isPdfTranslationCaption(unit.source) &&
-          fragment === unit.fragments.at(-1) &&
-          Math.abs(a.x - b.x) * page.width <= 1 &&
-          b.width < a.width)) &&
+      (splitCaptionPanelRow ||
+        (b.y > a.y &&
+          // Tall inline fractions can overlap the next line's font box. Merge
+          // only a minority of the shorter box; neighbor ownership is checked above.
+          gap >= -Math.max(2, Math.min(a.height, b.height) * page.height * 0.5) &&
+          gap <= 2 &&
+          // A paragraph can narrow beside a figure. Keep that change in footprint
+          // instead of filling its bounding rectangle across the neighboring graphic.
+          (overlap >= Math.max(a.width, b.width) * 0.8 ||
+            (isPdfTranslationCaption(unit.source) &&
+              fragment === unit.fragments.at(-1) &&
+              Math.abs(a.x - b.x) * page.width <= 1 &&
+              b.width < a.width)))) &&
       !otherContent
     ) {
       result[result.length - 1] = {

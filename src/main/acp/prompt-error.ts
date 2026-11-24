@@ -1,9 +1,13 @@
+import { type FailureFacts, readHarnessErrorDiagnostics } from '../../shared/failure/contract'
+import { providerErrorExcerpt } from '@aipoch/providers/errors'
 import { redactSensitiveText } from '@aipoch/diagnostics'
 
 import { classifyFailure } from '../../shared/failure/classify'
 import {
+  CALL_STACK_LIMIT_MESSAGE,
   PROVIDER_CONNECTION_FAILED_PREFIX,
-  PROVIDER_RESOURCE_NOT_FOUND_PREFIX
+  PROVIDER_RESOURCE_NOT_FOUND_PREFIX,
+  upstreamHttpErrorPrefix
 } from '../../shared/failure/messages'
 
 // Turns an agent prompt failure into user-visible text. Agents (opencode) relay an upstream provider
@@ -18,6 +22,7 @@ export type PromptErrorContext = {
   // The active model id, when the framework selects it over the protocol (opencode). Named in the hint
   // so the user knows exactly which value to fix.
   model?: string
+  providerName?: string
 }
 
 // The innermost provider detail pulled from a wrapped error message.
@@ -200,6 +205,44 @@ const isClaudeProviderApiError = (error: unknown): boolean =>
     classifyFailure({ origin: 'agent-runtime', text: error.message }).reason ===
       'service/response-interrupted')
 
+// After retrying, codex-acp 1.6.2 flattens the response and appends the local route URL.
+const codexServiceFailure = (
+  error: unknown,
+  context: PromptErrorContext
+): FailureFacts | undefined => {
+  if (!(error instanceof Error) || error.name !== 'RequestError' || errorCode(error) !== -32603)
+    return undefined
+  const data = (error as { data?: { codexErrorInfo?: unknown; message?: unknown } }).data
+  const model = context.model
+  const provider = context.providerName
+  // The native high-demand variant omits the original HTTP status.
+  if (
+    data?.codexErrorInfo === 'internalServerError' &&
+    data.message === 'We’re currently experiencing high demand, which may cause temporary errors.'
+  )
+    return { origin: 'provider', code: 'overloaded_error', model, provider, text: data.message }
+  if (data?.codexErrorInfo !== 'other' || typeof data.message !== 'string') return undefined
+  const match =
+    /^unexpected status (5\d{2}) [^:\r\n]+: (.*), url: http:\/\/127\.0\.0\.1:\d+\/v1\/responses$/s.exec(
+      data.message
+    )
+  if (!match) return undefined
+  const status = Number(match[1])
+  const detail = match[2]
+  if (status === 502 && detail === PROVIDER_CONNECTION_FAILED_PREFIX)
+    return { origin: 'provider', status, model, adapterCode: 'network', text: detail }
+  const prefix = upstreamHttpErrorPrefix(status)
+  if (!detail.startsWith(prefix)) return undefined
+  return {
+    origin: 'provider',
+    status,
+    model,
+    provider,
+    responseMessage: safeProviderErrorDetail(detail.slice(prefix.length)),
+    text: `HTTP ${status}`
+  }
+}
+
 const connectionFailureDetail = (message: string): string | undefined =>
   message.match(/\(([A-Za-z][A-Za-z0-9_-]{0,63})\)\s*$/)?.[1]
 
@@ -210,15 +253,20 @@ export const describePromptError = (error: unknown, ctx: PromptErrorContext = {}
   const raw = rawErrorMessage(error)
   const detail = extractUpstreamDetail(raw)
 
+  const codexFailure = codexServiceFailure(error, ctx)
   if (
-    isClaudeProviderApiError(error) &&
-    classifyFailure({ origin: 'agent-runtime', text: raw }).reason === 'service/connection-failed'
+    codexFailure?.adapterCode === 'network' ||
+    (isClaudeProviderApiError(error) &&
+      classifyFailure({ origin: 'agent-runtime', text: raw }).reason ===
+        'service/connection-failed')
   ) {
     const modelPart = ctx.model ? ` for model "${ctx.model}"` : ''
     const connectionDetail = connectionFailureDetail(raw)
 
     return `${PROVIDER_CONNECTION_FAILED_PREFIX}${modelPart}. Check the base URL in Settings → Model and your proxy, VPN, or firewall, then retry.${connectionDetail ? ` Connection detail: ${connectionDetail}.` : ''}`
   }
+
+  if (codexFailure) return codexFailure.responseMessage ?? codexFailure.text ?? raw
 
   if (isProviderNotFound(error, raw, detail)) {
     const providerText = safeProviderErrorDetail(detail?.text ?? stripWrapperPrefixes(raw))
@@ -283,23 +331,6 @@ export const withAgentAuthenticationRecovery = async <T>(
   }
 }
 
-// Collect upstream ownership from framework wire markers.
-const hasProviderOrigin = (error: unknown): boolean => {
-  if (isAgentAuthenticationFailure(error)) return true
-  if (isApiError(error)) return true
-  if (isProviderErrorKind(error)) return true
-  if (isClaudeProviderApiError(error)) return true
-
-  // Codex's native error data already identifies capacity failures. Keep unknown/internal Codex
-  // failures reportable, and never infer provider ownership from the human-readable message.
-  const data = (error as { data?: { codexErrorInfo?: unknown } } | null)?.data
-  if (errorCode(error) === -32603 && data?.codexErrorInfo === 'serverOverloaded') return true
-
-  const raw = rawErrorMessage(error)
-
-  return isProviderNotFound(error, raw, extractUpstreamDetail(raw))
-}
-
 // OpenCode reports a provider-side Session that no longer exists as a generic JSON-RPC Internal
 // error with a machine-readable service marker. This is distinct from provider/MCP failures and can
 // be recovered by replacing the lost provider Session while keeping the app Session and transcript.
@@ -332,7 +363,7 @@ export const isOpenCodeContextOverflow = (error: unknown): boolean => {
 export const collectPromptFailureFacts = (
   error: unknown,
   context: PromptErrorContext = {}
-): import('../../shared/failure/contract').FailureFacts => {
+): FailureFacts => {
   const record = (value: unknown): Record<string, unknown> =>
     value !== null && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -341,6 +372,36 @@ export const collectPromptFailureFacts = (
   const data = record(top.data)
   const codex = record(data.codexErrorInfo)
   const detail = record(Object.values(codex)[0])
+  const protocol = data.protocol
+  if (
+    isProviderErrorKind(error) &&
+    (protocol === 'chat-completions' || protocol === 'responses' || protocol === 'messages')
+  ) {
+    const field = (value: unknown, max = 300): string | undefined => {
+      if (typeof value !== 'string') return undefined
+      const text = value.replace(/\s+/g, ' ').trim()
+      return !text || text.startsWith('<') ? undefined : text.slice(0, max)
+    }
+    const model = context.model ?? field(data.model)
+    const provider = context.providerName
+    const status =
+      typeof data.status === 'number' &&
+      Number.isInteger(data.status) &&
+      data.status >= 100 &&
+      data.status <= 599
+        ? data.status
+        : undefined
+    return {
+      origin: 'provider',
+      protocol,
+      ...(status === undefined ? {} : { status }),
+      ...readHarnessErrorDiagnostics(data),
+      ...(model ? { model } : {}),
+      ...(provider ? { provider } : {})
+    }
+  }
+  const codexFailure = codexServiceFailure(error, context)
+  if (codexFailure) return codexFailure
   const text = rawErrorMessage(error)
   const upstream = extractUpstreamDetail(text)
   const explicitStatus = [
@@ -372,39 +433,100 @@ export const collectPromptFailureFacts = (
       'responseTooManyFailedAttempts',
       'contextWindowExceeded'
     ].includes(codexKind ?? '')
+  const providerService = top.code === -32603 && data.service === 'provider'
+  const taggedProvider =
+    providerService || isApiError(error) || isProviderErrorKind(error) || codexProvider
+  // Only consult known adapter wrappers when the wire metadata leaves ownership unspecified.
+  const untaggedRequest =
+    error instanceof Error &&
+    error.name === 'RequestError' &&
+    top.code === -32603 &&
+    !data.service &&
+    !data.errorName &&
+    (!codexKind ||
+      (codexKind === 'other' &&
+        /^Internal error:\s*\{/i.test(text) &&
+        upstream?.type === 'upstream_error' &&
+        upstream.status !== undefined)) &&
+    (!data.errorKind || data.errorKind === 'unknown')
+  const bareEnvelope = untaggedRequest && /^Internal error:\s*\{/i.test(text)
+  const summarizedUpstream =
+    bareEnvelope && upstream?.type === 'upstream_error' && providerErrorExcerpt(upstream.text)
+  const typedUpstreamStatus = upstream?.type === 'upstream_error' && upstream.status !== undefined
+  const providerWrapper =
+    untaggedRequest &&
+    (apiWrapper ||
+      isClaudeProviderApiError(error) ||
+      summarizedUpstream ||
+      typedUpstreamStatus ||
+      (bareEnvelope && upstream?.type === 'invalid_upstream_response') ||
+      (upstream?.type && NOT_FOUND_PATTERN.test(upstream.type)))
+  const authenticationFailure = isAgentAuthenticationFailure(error)
   const origin = isOpenCodeSessionServiceFailure(error)
     ? 'session'
-    : hasProviderOrigin(error) || apiWrapper || codexProvider
+    : taggedProvider || providerWrapper || authenticationFailure
       ? 'provider'
       : 'agent-runtime'
   // Our compatibility bridge deliberately transports deterministic upstream failures as HTTP 400.
   // Only its typed envelope, inside a confirmed provider failure, can restore the original status.
   const status =
-    origin === 'provider' && transportStatus === 400 && upstream?.status !== undefined
+    origin === 'provider' &&
+    (transportStatus === 400 ||
+      (transportStatus === undefined && (summarizedUpstream || typedUpstreamStatus))) &&
+    upstream?.status !== undefined
       ? upstream.status
       : transportStatus
+  const providerResponse =
+    origin === 'provider' &&
+    (taggedProvider || providerWrapper) &&
+    (upstream !== undefined ||
+      (!authenticationFailure && (taggedProvider || transportStatus !== undefined)))
+  const responseText =
+    upstream?.text ??
+    ((typeof data.message === 'string' && data.message.trim()) || stripWrapperPrefixes(text))
+  const excerpt = providerResponse ? providerErrorExcerpt(responseText) : undefined
+  const responseMessage =
+    providerResponse && !/^internal error[.:]?$/i.test(responseText.trim())
+      ? (excerpt ?? safeProviderErrorDetail(responseText))
+      : undefined
+  // `upstream_error` only identifies the bridge wrapper. The nested HTTP status and bounded message
+  // carry the actionable provider facts, so do not persist the generic wrapper as the error code.
   const code =
     origin === 'agent-runtime' && top.code === -32002
       ? top.code
       : isOpenCodeContextOverflow(error) || codexKind === 'contextWindowExceeded'
         ? 'ContextOverflowError'
-        : isAgentAuthenticationFailure(error)
+        : authenticationFailure
           ? 'authentication_error'
           : codexKind === 'usageLimitExceeded'
             ? 'quota_exceeded'
             : data.codexErrorInfo === 'serverOverloaded'
               ? 'overloaded_error'
-              : (upstream?.type ??
-                (data.errorKind !== 'unknown' ? data.errorKind : undefined) ??
-                codexKind ??
-                top.code)
+              : ((upstream?.type === 'upstream_error' ? undefined : upstream?.type) ??
+                (!isProviderErrorKind(error) && data.errorKind !== 'unknown'
+                  ? data.errorKind
+                  : undefined) ??
+                (typedUpstreamStatus && codexKind === 'other' ? undefined : codexKind) ??
+                (origin === 'provider' ? undefined : top.code))
+  const provider =
+    (responseMessage && context.providerName) ||
+    (typeof data.provider === 'string' ? data.provider : undefined)
+  // ACP reports this signature without identifying the component that exhausted its stack.
+  const reportedStackOverflow =
+    untaggedRequest &&
+    /^Internal error:\s*\{/i.test(text) &&
+    (upstream?.type === 'invalid_request_error' || upstream?.type === 'upstream_error') &&
+    upstream.text === CALL_STACK_LIMIT_MESSAGE
   return {
     origin,
+    ...(responseMessage ? { responseMessage } : {}),
     ...(status === undefined ? {} : { status }),
     ...(typeof code === 'string' || typeof code === 'number' ? { code } : {}),
-    ...(typeof data.provider === 'string' ? { provider: data.provider } : {}),
+    ...(provider ? { provider } : {}),
     ...(context.model ? { model: context.model } : {}),
     ...(typeof data.requestId === 'string' ? { requestId: data.requestId } : {}),
-    text
+    text: reportedStackOverflow
+      ? CALL_STACK_LIMIT_MESSAGE
+      : (excerpt ?? (responseMessage ? redactSensitiveText(text) : text))
   }
 }

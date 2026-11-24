@@ -283,3 +283,215 @@ test.each([
     preserve: 'reference'
   })
 })
+
+test.each(['complete columns', 'undated entry', 'right heading'] as const)(
+  'scopes an author-date bibliography by its native columns: %s',
+  (shape) => {
+    const rightHeading = shape === 'right heading'
+    const earlier =
+      'The observations agree with the expected conditions and preserve the independent control measurements.'
+    const entry = (x: number, y: number, name: string, dated = true): PdfLayoutTextItem[] => [
+      item(
+        name + '. Experimental comparisons and recorded observations.',
+        x,
+        y,
+        230,
+        9,
+        'Reference'
+      ),
+      item(
+        dated ? 'Independent Journal, 2020.' : 'Separate measurement notes.',
+        x + 10,
+        y + 11,
+        150,
+        9,
+        'Reference'
+      )
+    ]
+    const left = rightHeading
+      ? []
+      : ['First', 'Second', 'Third'].flatMap((name, n) => entry(54, 440 + n * 38, name))
+    const right = ['Fourth', 'Fifth', 'Sixth'].flatMap((name, n) =>
+      entry(320, (rightHeading ? 440 : 65) + n * 38, name, shape !== 'undated entry' || n !== 1)
+    )
+    const result = group([
+      page(1, [
+        item(earlier, 54, 350, 238, 10),
+        item('References', rightHeading ? 410 : 144, 410, 55, 12, 'Heading'),
+        ...left,
+        ...right
+      ])
+    ])
+    expect(result.units.find((unit) => unit.source.includes(earlier))?.sourceOnly).toBeUndefined()
+    expect(result.units.find((unit) => unit.source.startsWith('Fourth.'))?.preserve).toBe(
+      shape === 'undated entry' ? undefined : 'reference'
+    )
+  }
+)
+
+function compactReferenceColumns(
+  fault?: 'no heading' | 'body in right lane' | 'right gap' | 'mixed typography' | 'overlap'
+): PdfTranslationLayout {
+  const row = (text: string, y: number, x: number, width = 200, font = 'Body'): PdfLayoutTextItem =>
+    item(text, x, y, width, 10, font)
+  return group([
+    page(1, [
+      row('Substantial report with independent observations and results.', 110, 42),
+      row(fault === 'no heading' ? 'ADDITIONAL NOTES' : 'REFERENCES', 675, 42, 65, 'Heading'),
+      row('Adler K. et al., 2005, Journal, 14, 4', 699, 47),
+      row('Bauer S. J., Chen L. E., 2009, Proceedings of the', 711, 47, 234),
+      row('Annual Meeting, 18, 31', 723, 52),
+      row('Caro P. L., 2010, Letters, 48, 133', 735, 47),
+      row('Eaton B., Kim K., 2006, Journal, 5, 299', 200, 306),
+      row('Faber J., 2015a, Letters, 22, A18', 212, 306),
+      row('Greer T., Han Y., 2011, Catalog of the Annual', 224, 306, 220),
+      item('Research Cent˚', 311, 236, 63, 10, 'Body', false),
+      row('er, 2, 14', fault === 'right gap' ? 238 : 236, fault === 'overlap' ? 345 : 371),
+      row(
+        fault === 'body in right lane'
+          ? 'This is a separate body paragraph providing substantial narrative explanation.'
+          : 'Jensen D. et al., 2020, Journal, 58, 413',
+        248,
+        306,
+        204,
+        fault === 'mixed typography' ? 'Other' : 'Body'
+      ),
+      row('An independent note from the publisher.', 280, 301, 180)
+    ])
+  ])
+}
+
+test('preserves compact references continuing above a lower left reference heading', () => {
+  const result = compactReferenceColumns()
+  const owner = (index: number): PdfTranslationLayout['units'][number] | undefined =>
+    result.units.find((unit) => unit.items.includes(`1:${index}`))
+  for (const index of [6, 7, 8, 9, 10, 11])
+    expect(owner(index)).toMatchObject({ sourceOnly: true, preserve: 'reference' })
+  expect(owner(0)?.sourceOnly).toBeUndefined()
+  expect(owner(12)?.preserve).not.toBe('reference')
+  expect(result.units.flatMap((unit) => unit.items).sort()).toEqual(
+    Array.from({ length: 13 }, (_, index) => `1:${index}`).sort()
+  )
+})
+
+test.each([
+  'no heading',
+  'body in right lane',
+  'right gap',
+  'mixed typography',
+  'overlap'
+] as const)('keeps the compact reference continuation unproved with %s', (fault) => {
+  const result = compactReferenceColumns(fault)
+  const initial = result.units.find((unit) => unit.items.includes('1:6'))
+  expect(initial?.sourceOnly).toBeUndefined()
+})
+
+test.each(['textless leaf', 'later prose', 'wrong sequence'])(
+  'keeps only a complete final native bracketed bibliography in its source layout (%s)',
+  (scenario) => {
+    const prior = item(
+      'The experiments illustrate the magnitude and consistency of the independent findings.',
+      55,
+      620,
+      225
+    )
+    const record = (number: number, x: number, y: number): PdfLayoutTextItem[] => [
+      item(`[${number}] R. Writer, Notes on measured response`, x, y, 215, 10),
+      item('Research Journal (2020). 10.9999/example', x + 16, y + 12, 205, 10)
+    ]
+    const bibliography = page(1, [
+      prior,
+      item('References', 55, 665, 62, 12, 'Heading'),
+      ...record(1, 60, 685),
+      ...record(2, 60, 710),
+      ...Array.from({ length: 5 }, (_, index) =>
+        record(scenario === 'wrong sequence' && index === 1 ? 8 : index + 3, 315, 82 + index * 25)
+      ).flat()
+    ])
+    const lastPage = page(
+      2,
+      scenario === 'later prose'
+        ? [item('An independent result follows in a new paragraph.', 55, 95, 228)]
+        : []
+    )
+    const units = group([bibliography, lastPage]).units
+    const right = units.filter((u) => u.fragments.some((f) => f.page === 1 && f.rect.x >= 315))
+    expect(right.length).toBeGreaterThan(0)
+    expect(right.every((u) => u.preserve === 'reference')).toBe(scenario === 'textless leaf')
+    expect(units.find((u) => u.items.includes('1:0'))?.sourceOnly).toBeUndefined()
+    expect(new Set(units.flatMap((u) => u.items)).size).toBe(
+      bibliography.items.length + lastPage.items.length
+    )
+  }
+)
+
+test.each(['complete', 'foreign text', 'different font'] as const)(
+  'keeps a short journal-reference column continuation eligible only when unproved (%s)',
+  (shape) => {
+    const entries = [
+      item('The concluding discussion summarizes the independent measurements.', 42, 215, 239),
+      item('REFERENCES', 42, 265, 69, 9, 'Heading'),
+      item('Adler A., 1996, Field Review, 2, 18.', 42, 285, 159, 8),
+      item('Baird M., 2000, Field Review, 7, 42.', 42, 742, 170, 8),
+      item('Cline T., Archer D., 2002 Test Reports, 16, 105.', 42, 752, 210, 8),
+      item('Cline T., Brook W., 2003 Test Reports, 20, 301.', 299, 72, 220, 8),
+      item(
+        shape === 'foreign text'
+          ? 'These final remarks summarize the observations and describe our next experiment.'
+          : 'Dale M., 2005, Field Review, 8, 32.',
+        299,
+        82,
+        175,
+        8,
+        shape === 'different font' ? 'Other' : 'Body'
+      ),
+      item('© Journal of Methods', 420, 773, 120, 8)
+    ]
+    const { units } = group([page(1, entries)])
+    const right = units.filter((unit) => unit.items.some((key) => key === '1:5' || key === '1:6'))
+    expect(right.length).toBeGreaterThan(0)
+    expect(right.some((unit) => unit.preserve === 'reference')).toBe(shape === 'complete')
+    expect(units.find((unit) => unit.items.includes('1:0'))?.sourceOnly).toBeUndefined()
+  }
+)
+
+test.each([true, false])(
+  'preserves a closed hanging bibliography that turns to the top of the right column (%s)',
+  (complete) => {
+    const bibliography = (names: string[], x: number, y: number): PdfLayoutTextItem[] => {
+      const rows = [
+        `${names[0]}, A. 2013, Field Review, 8, 38`,
+        `${names[1]}, E., Marsh, L. 2008, in Proc. Methods`,
+        'Conference Series, 5, 144',
+        `${names[2]}, F. 2017, Data Journal, 3, 21`,
+        `${names[3]}, T. 2019, in Review of Independent`,
+        'Measurement Techniques, 550'
+      ]
+      return rows.map((text, index) =>
+        item(text, x + (index === 2 || index === 5 ? 10 : 0), y + index * 9, 180, 8)
+      )
+    }
+    const left = bibliography(['Adler', 'Brown', 'Clay', 'Dale'], 42, 665),
+      right = bibliography(['Firth', 'Gale', 'Holt', 'Ives'], 306, 62)
+    if (!complete) right[3].str = 'A separate discussion of the results follows.'
+    const items = [
+      item(
+        'The discussion ends with an independent paragraph above the bibliography.',
+        42,
+        605,
+        235
+      ),
+      item('References', 42, 650, 60, 10, 'Heading'),
+      ...left,
+      ...right,
+      item('Article number, page 1 of 1', 450, 742, 90, 9)
+    ]
+    const { units } = group([page(1, items)])
+    const rightKeys = right.map((_, i) => `1:${2 + left.length + i}`)
+    const owner = (key: string): PdfTranslationLayout['units'][number] | undefined =>
+      units.find((unit) => unit.items.includes(key))
+    expect(rightKeys.every((key) => owner(key)?.preserve === 'reference')).toBe(complete)
+    expect(owner('1:0')?.sourceOnly).toBeUndefined()
+    expect(new Set(units.flatMap((unit) => unit.items)).size).toBe(items.length)
+  }
+)

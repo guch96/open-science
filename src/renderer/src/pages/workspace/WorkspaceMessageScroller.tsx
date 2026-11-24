@@ -1,3 +1,5 @@
+import { ScheduleMessageCards, SessionScheduleBanner } from './schedules/ScheduleMessageCard'
+import { ImageToolPreviewContext } from './image-tool-preview-context'
 import { LiteratureCandidateSessionContext } from './literature-candidate-session-context'
 import { ErrorNotice } from '@/components/error-notice'
 import { cn } from '@/lib/utils'
@@ -115,6 +117,8 @@ import {
 import { parseGeneratePlanDocument } from './generate-plan-activity-projection'
 import { useNotebookRunsById } from './use-notebook-runs-by-id'
 import { useTranscriptWindow } from './use-transcript-window'
+import { SessionHistoryLoadButton } from './SessionHistoryLoadButton'
+import { ensureSessionContentLoaded } from '@/lib/session-persistence/session-history'
 import { useHandoffLifecycleEvents } from './useHandoffLifecycleEvents'
 import {
   createConversationItems,
@@ -128,6 +132,7 @@ import {
 import type { SendEditedMessage } from './workspace-edited-message'
 import { useWorkspaceMessageEditState } from './workspace-message-edit-state-context'
 import { setWorkspacePresentationRevealing } from './workspace-presentation-revealing'
+import { hasTerminalNotebookReceipt, isNotebookExecutionActivity } from './tool-execution-phase'
 import { getNotebookRunIdFromActivity } from './workspace-tool-activity-details'
 import type { ActivityExpansionOverrides } from './workspace-tool-activity-groups'
 
@@ -205,6 +210,7 @@ type SessionScopedNearViewportNotebookRunState = {
 const EMPTY_ACTIVITY_EXPANSION_OVERRIDES: ActivityExpansionOverrides = {}
 const EMPTY_NOTEBOOK_RUN_IDS: ReadonlySet<string> = new Set()
 const EMPTY_ANNOTATIONS: readonly Annotation[] = []
+const EMPTY_FILE_REFERENCES: MessageArtifact[] = []
 const EMPTY_TEXT_ANNOTATIONS: readonly TextAnnotation[] = []
 
 // Extra hold after the paced reveal drains, so a queued message dispatches into a settled
@@ -609,6 +615,28 @@ const WorkspaceMessageScrollerImpl = ({
           onError: onAnnotationError
         }
       : undefined
+  const activityAnnotationPort = useMemo<AnnotationPort | undefined>(
+    () =>
+      currentSessionId && onAddAnnotation && onAnnotationError
+        ? {
+            sessionId: currentSessionId,
+            activeAnnotations: activeTextAnnotations,
+            onAdd: handleAddTextAnnotation,
+            onUpdateNote: onUpdateAnnotationNote,
+            onRemove: onRemoveAnnotation,
+            onError: onAnnotationError
+          }
+        : undefined,
+    [
+      currentSessionId,
+      onAddAnnotation,
+      onAnnotationError,
+      activeTextAnnotations,
+      handleAddTextAnnotation,
+      onUpdateAnnotationNote,
+      onRemoveAnnotation
+    ]
+  )
   const revisionNavigationDisabledReason =
     activeSession &&
     (activeSession.activeRun ||
@@ -641,16 +669,6 @@ const WorkspaceMessageScrollerImpl = ({
   const previousMessageScrollerScrollTopRef = useRef(0)
   const scrollToFirstMessageHideTimeoutRef = useRef<number | undefined>(undefined)
   const [scrollThresholdAllowsFirstMessage, setScrollThresholdAllowsFirstMessage] = useState(false)
-  const handleScrollToFirstMessageButtonRef = useCallback(
-    (node: HTMLButtonElement | null): void => {
-      scrollToFirstMessageButtonRef.current = node
-      if (node) return
-      scrollToFirstMessageHoveredRef.current = false
-      scrollToFirstMessageFocusedRef.current = false
-      setScrollToFirstMessageFocused(false)
-    },
-    [setScrollToFirstMessageFocused]
-  )
   const handleMessageScrollerViewportRef = useCallback((node: HTMLDivElement | null): void => {
     messageScrollerViewportRef.current = node
     setMessageScrollerViewport(node)
@@ -660,9 +678,15 @@ const WorkspaceMessageScrollerImpl = ({
     (frame) => frame.id === conversationGraph.activeFrameId
   )
   const currentPresentationScopeId = currentSessionId
-    ? JSON.stringify([currentSessionId, activeConversationFrame?.activeBranchId ?? 'legacy'])
+    ? JSON.stringify([
+        currentSessionId,
+        activeConversationFrame?.activeBranchId ??
+          activeSession?.historyPage?.messageBranchId ??
+          'legacy'
+      ])
     : undefined
   const { artifactsForMessage } = useWorkspaceArtifactVisibility(activeSession)
+
   const [resolveFileReferences] = useState(createMessageFileReferenceResolver)
   const notebookRoot = notebookReference?.notebookSessionRoot
   const fileReferencesByMessage = useMemo(
@@ -853,7 +877,33 @@ const WorkspaceMessageScrollerImpl = ({
     )
     return [...new Set([...expandedRunIds, ...nearViewportNotebookRunIds])]
   }, [activityExpansionOverrides, nearViewportNotebookRunIds, notebookRunIdByActivityId])
-  const notebookRunsById = useNotebookRunsById(notebookReference, requestedNotebookRunIds)
+  // Only activity groups consume Notebook previews. A text-only transcript can open without
+  // transferring recent Run outputs, including when the Session has standalone Notebook cells.
+  const hasActivityGroup = useMemo(
+    () => conversationItems.some((item) => item.type === 'activity-group'),
+    [conversationItems]
+  )
+  const needsRecentRuns = useMemo(
+    () =>
+      conversationItems.some((item) => {
+        const activities =
+          item.type === 'activity-group'
+            ? item.activities
+            : item.type === 'activity'
+              ? [item.activity]
+              : []
+        return activities.some(
+          (activity) =>
+            isNotebookExecutionActivity(activity) && !hasTerminalNotebookReceipt(activity)
+        )
+      }),
+    [conversationItems]
+  )
+  const { runsById: notebookRunsById, retries: notebookRunRetries } = useNotebookRunsById(
+    hasActivityGroup ? notebookReference : undefined,
+    requestedNotebookRunIds,
+    needsRecentRuns
+  )
   const handleNotebookRunNearViewport = useCallback(
     (runId: string, isNearViewport: boolean): void => {
       if (!currentSessionId) return
@@ -929,7 +979,9 @@ const WorkspaceMessageScrollerImpl = ({
     conversationItems,
     presentationBarrierIndex,
     messageScrollerViewportRef,
-    followingPaused
+    followingPaused,
+    // Imported rows can each mount Markdown, review controls and multiple artifact previews.
+    activeSession?.packageOrigin ? 8 : undefined
   )
   // A newly mounted prompt anchor would pull a reader out of history on send.
   const skipScrollAnchorOnMount =
@@ -968,6 +1020,34 @@ const WorkspaceMessageScrollerImpl = ({
   const fullPresentationBarrierIndex = fullConversationItems.findIndex(
     (item) => item.type === 'message' && presentingMessageIds.has(item.message.id)
   )
+  const partialHistory = activeSession?.contentLoaded === false
+  const [historyLoadFailedSessionId, setHistoryLoadFailedSessionId] = useState<string>()
+  const ensureFullHistory = useCallback(async (): Promise<void> => {
+    if (!partialHistory || !currentProjectId || !currentSessionId) return
+    try {
+      await ensureSessionContentLoaded({ projectId: currentProjectId, sessionId: currentSessionId })
+      setHistoryLoadFailedSessionId((failed) => (failed === currentSessionId ? undefined : failed))
+    } catch {
+      setHistoryLoadFailedSessionId(currentSessionId)
+    }
+  }, [currentProjectId, currentSessionId, partialHistory])
+  const requestedEarlierPage = useRef<{ scopeId?: string; page: ChatSession['historyPage'] }>(
+    undefined
+  )
+  const revealEarlier = transcriptWindow.revealEarlier
+  useLayoutEffect(() => {
+    const previous = requestedEarlierPage.current
+    const next = activeSession?.historyPage
+    if (previous && (next !== previous.page || currentPresentationScopeId !== previous.scopeId)) {
+      requestedEarlierPage.current = undefined
+      if (
+        next &&
+        previous.scopeId === currentPresentationScopeId &&
+        previous.page?.revision === next.revision
+      )
+        revealEarlier()
+    }
+  }, [activeSession?.historyPage, currentPresentationScopeId, revealEarlier])
   const searchFocus = useSearchMessageFocusStore((state) => state.pending)
   const navigationRevision = useNavigationStore((state) => state.userNavigationRevision)
   useEffect(() => {
@@ -981,6 +1061,10 @@ const WorkspaceMessageScrollerImpl = ({
     const index = fullConversationItems.findIndex(
       (item) => item.type === 'message' && item.message.id === searchFocus.messageId
     )
+    if (index < 0 && partialHistory) {
+      void Promise.resolve().then(ensureFullHistory)
+      return
+    }
     if (index < 0 || (fullPresentationBarrierIndex >= 0 && index > fullPresentationBarrierIndex))
       return
     const frame = requestAnimationFrame(() => revealTranscriptItem(searchFocus.messageId))
@@ -992,6 +1076,8 @@ const WorkspaceMessageScrollerImpl = ({
     currentSessionId,
     fullConversationItems,
     fullPresentationBarrierIndex,
+    partialHistory,
+    ensureFullHistory,
     revealTranscriptItem
   ])
   const [annotationScrollTarget, setAnnotationScrollTarget] = useState<{
@@ -1086,10 +1172,12 @@ const WorkspaceMessageScrollerImpl = ({
     undefined
   )
   const showWindowFind = useCallback((): void => {
+    if (partialHistory) void ensureFullHistory()
     const acknowledgedScope = windowFindAcknowledgedScopeRef.current
     if (
       acknowledgedScope &&
       acknowledgedScope.scopeId === currentPresentationScopeId &&
+      !partialHistory &&
       presentationBarrierIndex < 0 &&
       transcriptWindow.entries.length === conversationItems.length
     ) {
@@ -1104,7 +1192,9 @@ const WorkspaceMessageScrollerImpl = ({
     currentPresentationScopeId,
     presentationBarrierIndex,
     revealFullTranscript,
-    transcriptWindow.entries.length
+    transcriptWindow.entries.length,
+    partialHistory,
+    ensureFullHistory
   ])
   useEffect(() => {
     return window.api?.window?.onShowWindowFind?.(showWindowFind)
@@ -1124,6 +1214,7 @@ const WorkspaceMessageScrollerImpl = ({
   useLayoutEffect(() => {
     if (
       !windowFindOpen ||
+      partialHistory ||
       presentationBarrierIndex >= 0 ||
       transcriptWindow.entries.length !== conversationItems.length
     ) {
@@ -1138,6 +1229,7 @@ const WorkspaceMessageScrollerImpl = ({
     currentPresentationScopeId,
     presentationBarrierIndex,
     transcriptWindow.entries.length,
+    partialHistory,
     windowFindOpen
   ])
   // Brand-new conversation (nothing presented, no resume in flight): invite the first prompt with
@@ -1240,6 +1332,13 @@ const WorkspaceMessageScrollerImpl = ({
   useLayoutEffect(() => {
     updateScrollToFirstMessageEligibility()
   }, [currentSessionId, updateScrollToFirstMessageEligibility, visibleMessageIdsKey])
+  useEffect(() => {
+    if (statusAllowsScrollToFirstMessage) return
+    scrollToFirstMessageHoveredRef.current = false
+    scrollToFirstMessageFocusedRef.current = false
+    const frame = window.requestAnimationFrame(() => setScrollToFirstMessageFocused(false))
+    return () => window.cancelAnimationFrame(frame)
+  }, [statusAllowsScrollToFirstMessage])
   useLayoutEffect(() => {
     previousMessageScrollerScrollTopRef.current = messageScrollerViewportRef.current?.scrollTop ?? 0
     hideScrollToFirstMessage()
@@ -1291,6 +1390,9 @@ const WorkspaceMessageScrollerImpl = ({
     () => findDurablePlanOwnerActivityId(activeSession, rawConversationItems),
     [activeSession, rawConversationItems]
   )
+  const latestScheduleFooterId = fullConversationItems.findLast(
+    (item) => item.type === 'turn-completion'
+  )?.id
   // Visible and announced completion share the same turn-level timeline authority.
   const assistantFooterMessageIds = useMemo(() => {
     return new Set(
@@ -1617,20 +1719,23 @@ const WorkspaceMessageScrollerImpl = ({
   }
 
   // Records the user's explicit expansion choice for a single tool-activity detail row.
-  const toggleActivityRow = (activityId: string, nextExpanded: boolean): void => {
-    setActivityExpansionOverrideState((currentState) => {
-      const currentOverrides =
-        currentState.sessionId === currentSessionId ? currentState.overrides : {}
+  const toggleActivityRow = useCallback(
+    (activityId: string, nextExpanded: boolean): void => {
+      setActivityExpansionOverrideState((currentState) => {
+        const currentOverrides =
+          currentState.sessionId === currentSessionId ? currentState.overrides : {}
 
-      return {
-        sessionId: currentSessionId,
-        overrides: {
-          ...currentOverrides,
-          [activityId]: nextExpanded
+        return {
+          sessionId: currentSessionId,
+          overrides: {
+            ...currentOverrides,
+            [activityId]: nextExpanded
+          }
         }
-      }
-    })
-  }
+      })
+    },
+    [currentSessionId]
+  )
 
   // Opens the Session reviewer panel positioned at the finding the user clicked.
   // Only the "Go to transcript" button on a finding fires this; clicking the card itself does not.
@@ -1782,10 +1887,41 @@ const WorkspaceMessageScrollerImpl = ({
               ref={messageScrollerContentRef}
               className={cn(
                 'mx-auto w-full max-w-4xl gap-0 px-4 pb-[56px]',
-                // Native find must scroll against final row heights, not deferred containment sizes.
-                windowFindOpen && '[&>[data-message-id]]:[content-visibility:visible]'
+                // Find and history navigation need final row heights. History remains
+                // bounded by the transcript window; the following tail still defers layout.
+                (windowFindOpen || !transcriptWindow.isFollowingEnd) &&
+                  '[&>[data-message-id]]:[content-visibility:visible]'
               )}
             >
+              {historyLoadFailedSessionId && historyLoadFailedSessionId === currentSessionId ? (
+                <MessageScrollerItem
+                  messageId={`history-error-${currentSessionId}`}
+                  className="min-w-0"
+                >
+                  <ErrorNotice
+                    description={t('Could not load conversation history.')}
+                    primaryButton={{ label: t('Retry'), onClick: () => void ensureFullHistory() }}
+                  />
+                </MessageScrollerItem>
+              ) : null}
+              {activeSession?.historyPage ? (
+                <MessageScrollerItem
+                  messageId={`history-load-${activeSession.id}`}
+                  className="min-w-0"
+                >
+                  <SessionHistoryLoadButton
+                    onRequestEarlier={() => {
+                      requestedEarlierPage.current = {
+                        scopeId: currentPresentationScopeId,
+                        page: activeSession.historyPage
+                      }
+                    }}
+                    viewport={messageScrollerViewport}
+                    key={currentPresentationScopeId}
+                    session={activeSession}
+                  />
+                </MessageScrollerItem>
+              ) : null}
               {reviewLoadError ? (
                 <MessageScrollerItem
                   messageId={`review-load-error-${currentSessionId ?? 'unknown'}`}
@@ -1853,7 +1989,9 @@ const WorkspaceMessageScrollerImpl = ({
                             defaultValue_one: '{{count}} previous message'
                           })}
                           {process.outcome === 'failed' ? (
-                            <span className="text-status-failure-foreground">{t('Failed')}</span>
+                            <span className="text-status-failure-foreground dark:text-status-failure-dark-foreground">
+                              {t('Failed')}
+                            </span>
                           ) : null}
                         </button>
                       </div>
@@ -1951,7 +2089,8 @@ const WorkspaceMessageScrollerImpl = ({
                           }
                         : undefined,
                     artifacts,
-                    fileReferences: fileReferencesByMessage.get(item.message.id) ?? [],
+                    fileReferences:
+                      fileReferencesByMessage.get(item.message.id) ?? EMPTY_FILE_REFERENCES,
                     reviewerCorrectionState: (() => {
                       const response = responseByPromptMessageId.get(item.message.id)
                       if (response?.status === 'complete') return 'completed'
@@ -2060,6 +2199,9 @@ const WorkspaceMessageScrollerImpl = ({
                             bottom-follow back after the final text has appeared. */}
                         <div className="min-h-[60px] px-4 pb-1 md:px-6">
                           <div className="mx-auto w-full max-w-[56rem]">
+                            {item.message.responseToMessageId && (
+                              <ScheduleMessageCards promptId={item.message.responseToMessageId} />
+                            )}
                             <WorkspaceAssistantTurnCompletion
                               message={item.message}
                               // Only Main conversation opts into explicit turn authority; legacy
@@ -2072,6 +2214,13 @@ const WorkspaceMessageScrollerImpl = ({
                               canBranchInNewSession={canBranchInNewSession}
                               onBranchInNewSession={onBranchInNewSession}
                             />
+                            {(item.id === latestScheduleFooterId ||
+                              promptMessage?.attribution?.feature === 'schedule') && (
+                              <SessionScheduleBanner
+                                promptId={item.message.responseToMessageId}
+                                latest={item.id === latestScheduleFooterId}
+                              />
+                            )}
                           </div>
                         </div>
                       </MessageScrollerItem>
@@ -2087,6 +2236,18 @@ const WorkspaceMessageScrollerImpl = ({
                       ) : null}
                       {forkDivider(item.id)}
                     </Fragment>
+                  )
+                }
+
+                if (item.type === 'permission-denial') {
+                  return (
+                    <MessageScrollerItem key={item.id} messageId={item.id} className="min-w-0">
+                      <div className="px-4 pb-1 pt-2 md:px-6">
+                        <p className="mx-auto w-full max-w-[56rem] text-sm text-text-300">
+                          {t('Permission was denied. The blocked actions were not performed.')}
+                        </p>
+                      </div>
+                    </MessageScrollerItem>
                   )
                 }
 
@@ -2252,30 +2413,39 @@ const WorkspaceMessageScrollerImpl = ({
                 }
 
                 return (
-                  <WorkspaceActivityGroup
-                    allowFolderAccess={Boolean(
-                      activeSession &&
-                      activeSession.contentLoaded !== false &&
-                      !activeSession.packageOrigin
-                    )}
+                  <ImageToolPreviewContext.Provider
                     key={item.id}
-                    group={item}
-                    isExpanded={windowFindOpen || expandedActivityGroups.has(item.id)}
-                    onToggleGroup={toggleActivityGroup}
-                    expansionOverrides={activityExpansionOverrides}
-                    onToggleRow={toggleActivityRow}
-                    notebookRunsById={notebookRunsById}
-                    onNotebookRunNearViewport={handleNotebookRunNearViewport}
-                    permission={activeSession?.runtimeContext?.permission}
-                    jobsByActivityId={jobsByActivityId}
-                    onOpenJobDetail={handleOpenJobDetail}
-                    annotationPort={annotationPortFor(activeTextAnnotations)}
-                    revealRequest={
-                      sessionItemRevealRequest?.itemType === 'tool-activity'
-                        ? sessionItemRevealRequest
-                        : undefined
-                    }
-                  />
+                    value={{
+                      projectId: activeSession?.projectId,
+                      sessionId: activeSession?.id
+                    }}
+                  >
+                    <WorkspaceActivityGroup
+                      allowFolderAccess={Boolean(
+                        activeSession &&
+                        activeSession.contentLoaded !== false &&
+                        !activeSession.packageOrigin
+                      )}
+                      group={item}
+                      isExpanded={windowFindOpen || expandedActivityGroups.has(item.id)}
+                      onToggleGroup={toggleActivityGroup}
+                      expansionOverrides={activityExpansionOverrides}
+                      onToggleRow={toggleActivityRow}
+                      notebookRunRetries={notebookRunRetries}
+                      notebookReference={notebookReference}
+                      notebookRunsById={notebookRunsById}
+                      onNotebookRunNearViewport={handleNotebookRunNearViewport}
+                      permission={activeSession?.runtimeContext?.permission}
+                      jobsByActivityId={jobsByActivityId}
+                      onOpenJobDetail={handleOpenJobDetail}
+                      annotationPort={activityAnnotationPort}
+                      revealRequest={
+                        sessionItemRevealRequest?.itemType === 'tool-activity'
+                          ? sessionItemRevealRequest
+                          : undefined
+                      }
+                    />
+                  </ImageToolPreviewContext.Provider>
                 )
               })}
 
@@ -2348,7 +2518,7 @@ const WorkspaceMessageScrollerImpl = ({
 
           {showScrollToFirstMessage ? (
             <MessageScrollerButton
-              ref={handleScrollToFirstMessageButtonRef}
+              ref={scrollToFirstMessageButtonRef}
               direction="start"
               behavior="instant"
               onClick={() => {
@@ -2399,18 +2569,27 @@ const WorkspaceMessageScrollerImpl = ({
               })
             }}
             size="icon-lg"
-            className="z-10 rounded-full border-transparent bg-bg-000 shadow-card hover:bg-bg-200 data-[direction=end]:bottom-3"
+            className="group/scroll-end z-10 rounded-full border-transparent bg-bg-000 shadow-card hover:bg-bg-200 data-[direction=end]:bottom-3"
           >
             {optimisticMessage || agentLoadingPhase !== 'hidden' || presentationRevealing ? (
-              <span aria-hidden="true" className="flex items-center gap-0.5">
-                {[0, 1, 2].map((index) => (
-                  <span
-                    key={index}
-                    className="size-1 rounded-full bg-current motion-safe:animate-[scroll-indicator-wave_1.2s_ease-in-out_infinite]"
-                    style={{ animationDelay: `${index * 120}ms` }}
-                  />
-                ))}
-              </span>
+              <>
+                <span
+                  aria-hidden="true"
+                  className="flex items-center gap-0.5 group-hover/scroll-end:hidden group-focus-visible/scroll-end:hidden"
+                >
+                  {[0, 1, 2].map((index) => (
+                    <span
+                      key={index}
+                      className="size-1 rounded-full bg-current motion-safe:animate-[scroll-indicator-wave_1.2s_ease-in-out_infinite]"
+                      style={{ animationDelay: `${index * 120}ms` }}
+                    />
+                  ))}
+                </span>
+                <ArrowDownIcon
+                  aria-hidden="true"
+                  className="hidden group-hover/scroll-end:block group-focus-visible/scroll-end:block"
+                />
+              </>
             ) : undefined}
           </MessageScrollerButton>
           <div

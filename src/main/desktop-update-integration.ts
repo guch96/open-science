@@ -16,6 +16,7 @@ import type { RuntimeDirectoryLease } from './runtime-ownership'
 import { RuntimeStopError, isRuntimeProcessAlive } from './runtime-stop-confirmation'
 import type { CreateStrategyOptions } from './update/create-strategy'
 import {
+  captureInstallationHelperExit,
   advanceInstallationUpdate,
   advanceInstallationUpdateAsync,
   beginInstallationUpdateAsync,
@@ -32,23 +33,29 @@ import {
 } from './update/installation-protection'
 import type { InstallReadiness } from './update/strategy'
 
-/** A cancelled read must not keep its caller or a subsequent recovery action waiting. */
-async function boundedRead<T>(read: Promise<T>, signal: AbortSignal): Promise<T> {
+/** A cancelled read must reject locally and also cancel the remote host operation when supported. */
+async function boundedRead<T>(
+  read: (signal: AbortSignal) => Promise<T>,
+  signal: AbortSignal
+): Promise<T> {
   signal.throwIfAborted()
+  const timeout = new AbortController()
+  const combined = AbortSignal.any([signal, timeout.signal])
   let timer: ReturnType<typeof setTimeout> | undefined
   let onAbort: (() => void) | undefined
   try {
-    return await Promise.race([
-      read,
-      new Promise<never>((_, reject) => {
-        onAbort = () => reject(signal.reason)
-        signal.addEventListener('abort', onAbort, { once: true })
-        timer = setTimeout(
-          () => reject(new Error('The service readiness check timed out.')),
-          15_000
-        )
-      })
-    ])
+    const operation = read(combined)
+    const cancellation = new Promise<never>((_, reject) => {
+      onAbort = () =>
+        reject(signal.reason ?? new Error('The service readiness check was cancelled.'))
+      signal.addEventListener('abort', onAbort, { once: true })
+      timer = setTimeout(() => {
+        const error = new Error('The service readiness check timed out.')
+        timeout.abort(error)
+        reject(error)
+      }, 15_000)
+    })
+    return await Promise.race([operation, cancellation])
   } finally {
     if (timer) clearTimeout(timer)
     if (onAbort) signal.removeEventListener('abort', onAbort)
@@ -63,7 +70,7 @@ export function createDesktopUpdateIntegration(options: {
   allowedProcessIds(): number[]
   // Only while the backend is running: its owned children must pass admission so the cleanup gate
   // can stop them. Handoff/recovery after stop deliberately receive no such exemption.
-  ownedRuntimeProcessIds?(client: DesktopRuntimeClient): Promise<number[]>
+  ownedRuntimeProcessIds?(client: DesktopRuntimeClient, signal?: AbortSignal): Promise<number[]>
   verifyArtifact(status: UpdateStatus, signal?: AbortSignal): Promise<InstallationManifest>
   // True when the downloaded channel lacks supervised-replacement acceptance. Such installs keep
   // the pre-supervision electron-updater handoff behind the same runtime stop and occupancy checks.
@@ -95,6 +102,7 @@ export function createDesktopUpdateIntegration(options: {
   let pending: Promise<unknown> | undefined
   let cancellation = new AbortController()
   let cancelRequested = false
+  let waitForHelpers: ReturnType<typeof captureInstallationHelperExit> | undefined
   const checkCancellation = (): void => {
     if (cancelRequested)
       throw new UpdateLifecycleError('user-cancelled', 'Installation was cancelled before handoff.')
@@ -107,7 +115,10 @@ export function createDesktopUpdateIntegration(options: {
       return [
         ...options.allowedProcessIds(),
         ...(options.ownedRuntimeProcessIds
-          ? await boundedRead(options.ownedRuntimeProcessIds(client), signal)
+          ? await boundedRead(
+              (readSignal) => options.ownedRuntimeProcessIds!(client, readSignal),
+              signal
+            )
           : [])
       ]
     } catch (cause) {
@@ -602,6 +613,7 @@ export function createDesktopUpdateIntegration(options: {
           checkCancellation()
           await options.flushRenderer?.('final')
           checkCancellation()
+          waitForHelpers = captureInstallationHelperExit(options.location, record.runtime)
           record = advanceInstallationUpdate(options.location, record.operationId, 'stopping')
           publish()
           const lease = await options.client().stopRuntime('update')
@@ -661,6 +673,10 @@ export function createDesktopUpdateIntegration(options: {
         }
         if (!record)
           throw new UpdateLifecycleError('install-failed', 'Installation protection is missing.')
+        await (waitForHelpers ?? captureInstallationHelperExit(options.location, record.runtime))(
+          cancellation.signal
+        )
+        checkCancellation()
         record = await advanceInstallationUpdateAsync(
           options.location,
           record.operationId,
@@ -779,7 +795,10 @@ export function createDesktopUpdateIntegration(options: {
             }
           }
           const client = options.client()
-          const info = await boundedRead(client.refreshControl(), checking)
+          const info = await boundedRead(
+            (readSignal) => client.refreshControl(readSignal),
+            checking
+          )
           checking.throwIfAborted()
           if (info.control !== 'granted')
             return {
@@ -822,7 +841,7 @@ export function createDesktopUpdateIntegration(options: {
             checking
           )
           const current = (await boundedRead(
-            client.invokeHost('desktop:update-inspect'),
+            (readSignal) => client.invokeHost('desktop:update-inspect', [], readSignal),
             checking
           )) as InstallReadiness
           checking.throwIfAborted()

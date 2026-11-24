@@ -3,7 +3,12 @@ import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import { pipeline } from 'node:stream/promises'
 import { randomBytes } from 'node:crypto'
 import type { ServerResponse } from 'node:http'
-import { observeProviderFailure } from './provider-failure-observation'
+import { providerErrorExcerpt } from '@aipoch/providers/errors'
+import {
+  PROVIDER_CONNECTION_FAILED_PREFIX,
+  upstreamHttpErrorPrefix
+} from '../../shared/failure/messages'
+import { observeProviderFailure, safeNetworkErrorCode } from './provider-failure-observation'
 import type {
   ResponsesConnection,
   ResponsesModelTarget,
@@ -82,6 +87,7 @@ const REQUEST_LOCAL_PLAN_TOOL_NAMES = new Set(['generate_plan', 'update_step_sta
 const chatUrl = (value: string): string => appendChatCompletionsPath(value)
 
 export class ResponsesToChatCompletionsBridge {
+  private skillSelectionAbort = new AbortController()
   private readonly host: ProviderLoopbackHttpHost<ResponsesConnection>
   private target: ResponsesToChatCompletionsBridgeTarget
   private readonly adapter: ReturnType<typeof createResponsesAdapter>
@@ -121,6 +127,11 @@ export class ResponsesToChatCompletionsBridge {
       onUnauthorized: (response) =>
         json(response, 401, { error: { message: 'Invalid Responses bridge token' } }),
       onError: (error, response) => {
+        if (error instanceof RangeError && error.message === 'Maximum call stack size exceeded') {
+          log.error('Responses bridge stack overflow', {
+            error: { name: error.name, message: error.message, stack: error.stack }
+          })
+        }
         if (response.headersSent) {
           response.destroy()
           return
@@ -155,12 +166,17 @@ export class ResponsesToChatCompletionsBridge {
           ...(this.target.vendorId ? { vendorId: this.target.vendorId } : {}),
           ...(this.target.reasoningEffortTransport
             ? { reasoningEffortTransport: this.target.reasoningEffortTransport }
+            : {}),
+          ...(this.target.reasoningSupported !== undefined
+            ? { reasoningSupported: this.target.reasoningSupported }
             : {})
         },
         fetchImpl: this.fetchImpl,
         timeoutMs: this.options.skillSelectorTimeoutMs ?? 15_000,
         maxResponseBytes: this.options.maxResponseBytes ?? DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
-        ...(signal ? { signal } : {}),
+        signal: signal
+          ? AbortSignal.any([signal, this.skillSelectionAbort.signal])
+          : this.skillSelectionAbort.signal,
         ...(observeUsage ? { observeUsage } : {})
       })
     } catch (error) {
@@ -179,6 +195,7 @@ export class ResponsesToChatCompletionsBridge {
       this.target.model !== target.model ||
       this.target.vendorId !== target.vendorId ||
       this.target.reasoningEffortTransport !== target.reasoningEffortTransport ||
+      this.target.reasoningSupported !== target.reasoningSupported ||
       this.target.key !== target.key
     this.target = target
     if (changed) {
@@ -253,6 +270,9 @@ export class ResponsesToChatCompletionsBridge {
   }
 
   async close(): Promise<void> {
+    // Standalone Skill selection bypasses the loopback host's request ownership.
+    this.skillSelectionAbort.abort()
+    this.skillSelectionAbort = new AbortController()
     this.adapter.clear()
     this.deterministicErrors.clear()
     this.reviewerSessionKeys.clear()
@@ -474,7 +494,38 @@ export class ResponsesToChatCompletionsBridge {
       headers,
       body: chatRequestBody,
       signal: request.signal
+    }).catch((error: unknown) => {
+      const errorCode = safeNetworkErrorCode(error)
+      const fetchFailed =
+        error instanceof TypeError &&
+        error.message === 'fetch failed' &&
+        !(error.cause instanceof Error && error.cause.message === 'bad port')
+      if (request.signal.aborted || (!errorCode && !fetchFailed)) throw error
+      response.setHeader('x-open-science-provider-failure', 'connection')
+      log.warn('bridge upstream connection failed', {
+        model: chatRequest.model,
+        phase: 'fetch',
+        durationMs: Math.max(0, Date.now() - startedAt),
+        ...(errorCode ? { errorCode } : {})
+      })
+      throw new ResponsesProtocolError(PROVIDER_CONNECTION_FAILED_PREFIX, 502, 'upstream_error')
     })
+    const logUpstreamFailure = (
+      phase: 'upstream-http' | 'response',
+      message: string,
+      reason?: string
+    ): void => {
+      const excerpt = providerErrorExcerpt(message)
+      const requestId = upstream.headers.get('x-request-id')
+      log.warn('bridge upstream error', {
+        model: chatRequest.model,
+        phase,
+        ...(excerpt ? { error: { message: excerpt } } : {}),
+        status: upstream.status,
+        ...(reason ? { reason } : {}),
+        ...(requestId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId) ? { requestId } : {})
+      })
+    }
     if (!upstream.ok) {
       const errorBody = await readBoundedProviderErrorBody(upstream, { signal: request.signal })
       await observeProviderFailure(
@@ -484,26 +535,33 @@ export class ResponsesToChatCompletionsBridge {
         errorBody.complete ? errorBody.body.toString('utf8') : undefined
       )
       const message = errorBody.complete
-        ? upstreamErrorMessage(errorBody.body.toString('utf8'), upstream.status)
+        ? upstreamErrorMessage(
+            errorBody.body.toString('utf8'),
+            upstream.status,
+            target.key ? [target.key] : []
+          )
         : `Provider request failed with status ${upstream.status}`
       this.deterministicErrors.remember(replayKey, upstream.status, {
         message,
         upstreamStatus: upstream.status
       })
-      log.warn('bridge upstream error', {
-        upstreamModel: chatRequest.model,
-        status: upstream.status
-      })
+      logUpstreamFailure('upstream-http', message)
       json(response, providerErrorClientStatus(upstream.status), {
         error: {
           type: 'upstream_error',
-          message,
+          // Codex keeps only the message after retrying 5xx responses. Preserve its source.
+          message:
+            upstream.status >= 500 ? upstreamHttpErrorPrefix(upstream.status) + message : message,
           status: upstream.status
         }
       })
       return
     }
-    const converted = await turn.convert(upstream)
+    const converted = await turn.convert(upstream).catch((error: unknown) => {
+      if (error instanceof ResponsesProtocolError)
+        logUpstreamFailure('response', error.message, error.type)
+      throw error
+    })
     response.writeHead(converted.status, Object.fromEntries(converted.headers))
     if (converted.body)
       await pipeline(Readable.fromWeb(converted.body as NodeReadableStream<Uint8Array>), response)

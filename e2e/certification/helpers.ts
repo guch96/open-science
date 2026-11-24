@@ -68,7 +68,8 @@ const openProjectSession = async (
 ): Promise<void> => {
   const project = page
     .getByRole('region', { name: 'Projects' })
-    .getByRole('button', { name: projectName, exact: true })
+    .getByRole('button')
+    .filter({ has: page.getByText(projectName, { exact: true }) })
   await expect(project).toBeVisible({ timeout: 60_000 })
   await project.click()
   const promptPrefix = prompt.slice(0, 36)
@@ -82,4 +83,30 @@ const openProjectSession = async (
   await session.click()
 }
 
-export { createProject, openProjectSession, openRecentSession, sendPrompt }
+const sendReviewedPrompt = async (
+  page: Page,
+  prompt: string,
+  reply: string,
+  commands: string[],
+  timeout: number
+): Promise<void> => {
+  await Promise.all([
+    sendPrompt(page, prompt, reply, timeout),
+    (async () => {
+      const review = page.getByRole('group', {
+        name: 'Permission request: Review potentially destructive code',
+        exact: true
+      })
+      let previousCode: string | undefined
+      for (const command of commands) {
+        const code = review.getByTestId('tool-code-block')
+        await expect(code).toContainText(command, { timeout })
+        if (previousCode) await expect(code).not.toHaveText(previousCode, { timeout })
+        previousCode = await code.innerText()
+        await review.getByRole('button', { name: 'Allow', exact: true }).click()
+      }
+    })()
+  ])
+}
+
+export { createProject, openProjectSession, openRecentSession, sendPrompt, sendReviewedPrompt }

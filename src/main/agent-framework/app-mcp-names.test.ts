@@ -47,12 +47,27 @@ describe('resolveCanonicalMcpToolIdentity', () => {
     ).toBe(`Call ${prefix}list_authorized_directories when needed.`)
   })
 
-  it('keeps the app MCP inventory aligned with the remembered-permission catalog', () => {
+  it('keeps app MCP tools aligned with their remembered or per-call approval policies', () => {
+    const perCallTools = [
+      'open-science-images/edit_image',
+      'open-science-images/generate_image',
+      'open-science-schedule/close_schedule',
+      'open-science-schedule/create_schedule',
+      'open-science-schedule/list_schedules',
+      'open-science-schedule/manage_current_schedule',
+      'open-science-schedule/update_schedule'
+    ]
     expect(PRE_REGISTERED_PERMISSION_IDENTITIES.mcp_tool.toSorted()).toEqual(
       appMcpToolIdentities()
+        .filter((identity) => !perCallTools.includes(identity))
         .map((identity) => `mcp:${identity}`)
         .toSorted()
     )
+    expect(
+      appMcpToolIdentities()
+        .filter((identity) => /^(open-science-images|open-science-schedule)\//.test(identity))
+        .toSorted()
+    ).toEqual(perCallTools)
   })
 
   it('documents preparation, generation, recovery, and approval in shared guidance', () => {

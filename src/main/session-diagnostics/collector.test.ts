@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, symlink } from 'node:fs/promises'
+import { stat, mkdtemp, mkdir, writeFile, readFile, rm, readdir, symlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
@@ -9,6 +9,7 @@ import * as fsPromises from 'node:fs/promises'
 import { RUNTIME_SCHEMA_TABLE_DDLS } from '../database/generated/runtime-schema'
 import * as diagnosticProjection from './projection'
 import { runSessionDiagnosticWorker } from './collector'
+import { SessionJournalStore, sessionJournalPath } from '../session-persistence/journal'
 import type { SessionDiagnosticWorkerInput } from '../../shared/session-diagnostics'
 
 vi.mock('node:fs/promises', async (importOriginal) => ({
@@ -45,6 +46,99 @@ async function fixture(): Promise<SessionDiagnosticWorkerInput> {
 const sessionPath = (input: SessionDiagnosticWorkerInput): string =>
   join(input.configRoot, 'sessions/project/session.json')
 describe('session diagnostics isolated collector', () => {
+  it('projects the latest journal state without exporting sidecars or modifying the source', async () => {
+    const input = await fixture()
+    const path = sessionPath(input)
+    const journal = new SessionJournalStore({ maxBytes: 8 * 1024 * 1024 })
+    await journal.write(path, {
+      expectedRevision: 0,
+
+      document: {
+        id: 'session',
+        projectId: 'project',
+        revision: 1,
+        title: 'Before',
+        inputTokens: 12,
+        apiKey: 'private-secret'
+      }
+    })
+    await journal.write(path, {
+      expectedRevision: 1,
+
+      document: {
+        id: 'session',
+        projectId: 'project',
+        revision: 2,
+        title: 'After',
+        inputTokens: 24,
+        apiKey: 'private-secret'
+      }
+    })
+    const names = await readdir(dirname(path))
+    const before = await Promise.all(
+      names.map((name) => readFile(join(dirname(path), name), 'utf8'))
+    )
+    const result = await runSessionDiagnosticWorker({ ...input, selectedItems: ['session'] })
+    expect(result.kind).toBe('archive')
+    const exported = await readFile(join(input.directory!, 'content/session.json'), 'utf8')
+    expect(JSON.parse(exported).session).toMatchObject({ revision: 2, inputTokens: 24 })
+    expect(exported).not.toContain('private-secret')
+    expect(await readdir(dirname(path))).toEqual(names)
+    expect(
+      await Promise.all(names.map((name) => readFile(join(dirname(path), name), 'utf8')))
+    ).toEqual(before)
+    expect(
+      (await readdir(join(input.directory!, 'content'))).some(
+        (name) => name.endsWith('.checkpoint') || name.endsWith('.jsonl')
+      )
+    ).toBe(false)
+  })
+
+  it('exports a small current Session from a journal larger than the snapshot limit', async () => {
+    const input = await fixture()
+    const path = sessionPath(input)
+    const journal = new SessionJournalStore({ maxBytes: 8 * 1024 * 1024 })
+    for (let revision = 1; revision <= 3; revision++) {
+      await journal.write(path, {
+        expectedRevision: revision - 1,
+        document: {
+          id: 'session',
+          projectId: 'project',
+          revision,
+          title: revision === 3 ? 'Current' : String(revision).repeat(4 * 1024 * 1024)
+        }
+      })
+    }
+    expect((await stat(sessionJournalPath(path))).size).toBeGreaterThan(8 * 1024 * 1024)
+    await runSessionDiagnosticWorker({ ...input, selectedItems: ['session'] })
+    const exported = JSON.parse(
+      await readFile(join(input.directory!, 'content/session.json'), 'utf8')
+    )
+    expect(exported.session.revision).toBe(3)
+  })
+
+  it('does not follow a journal primary symlink during diagnostic collection', async () => {
+    const input = await fixture()
+    const path = sessionPath(input)
+    await new SessionJournalStore({ maxBytes: 8 * 1024 * 1024 }).write(path, {
+      expectedRevision: 0,
+
+      document: { id: 'session', revision: 1 }
+    })
+    const checkpoint = sessionJournalPath(path)
+    const external = join(input.directory!, 'external-secret')
+    await writeFile(external, await readFile(checkpoint))
+    await rm(checkpoint)
+    await symlink(external, checkpoint)
+    await runSessionDiagnosticWorker({ ...input, selectedItems: ['session'] })
+    expect(await readdir(join(input.directory!, 'content'))).not.toContain('session.json')
+    const diagnosticManifest = JSON.parse(
+      await readFile(join(input.directory!, 'content/manifest.json'), 'utf8')
+    )
+    expect(JSON.stringify(diagnosticManifest)).toContain('failed')
+    expect(await readFile(external, 'utf8')).toContain('session')
+  })
+
   it.each([
     { id: 'log:main.log', output: 'logs/main.log' },
     { id: 'desktop-log:main.log', output: 'logs/desktop/main.log' }
@@ -216,14 +310,95 @@ describe('session diagnostics isolated collector', () => {
       'session.json'
     ])
   })
+  it('marks a Notebook snapshot partial when a checkpoint replaces the manifest after reading', async () => {
+    const input = await fixture()
+    const root = join(input.dataRoot, 'notebooks/project/session')
+    const path = join(root, 'run.json'),
+      hot = join(root, '.pending-runs')
+    await mkdir(hot, { recursive: true })
+    const base = { projectId: 'project', sessionId: 'session', runs: [{ runId: 'old' }] }
+    const run = { runId: 'latest' }
+    await writeFile(path, JSON.stringify(base))
+    await writeFile(
+      join(hot, '1.json'),
+      JSON.stringify({
+        projectId: 'project',
+        sessionId: 'session',
+        frameId: null,
+        slot: 1,
+        updatedAt: 2,
+        run
+      })
+    )
+    const original = fsPromises.lstat
+    let merged = false
+    vi.spyOn(fsPromises, 'lstat').mockImplementation(
+      async (...args: Parameters<typeof original>) => {
+        if (args[0] === hot && !merged) {
+          merged = true
+          await writeFile(path + '.new', JSON.stringify({ ...base, runs: [...base.runs, run] }))
+          await fsPromises.rename(path + '.new', path)
+          await rm(hot, { recursive: true })
+        }
+        return original(...args)
+      }
+    )
+    const result = await runSessionDiagnosticWorker({ ...input, selectedItems: ['notebook'] })
+    expect(merged).toBe(true)
+    expect(result).toMatchObject({ kind: 'archive', partial: true })
+    await expect(stat(join(input.directory!, 'content/notebook/run.json'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+  })
+
   it('exports fixed Notebook root and frame histories plus a stored-settings environment projection', async () => {
     const input = await fixture()
     const notebookRoot = join(input.dataRoot, 'notebooks/project/session')
     await mkdir(join(notebookRoot, 'frames/frame-1'), { recursive: true })
+    const environmentManifest = {
+      schemaVersion: 1,
+      captureKind: 'completed-run',
+      capturedAt: '2026-11-20T00:00:00.000Z',
+      installedInventory: {
+        capturedAt: '2026-11-20T00:00:00.000Z',
+        source: 'full-scan',
+        validation: 'full-scan'
+      },
+      kernelKind: 'python',
+      environmentName: 'default-python',
+      runtimeSource: 'managed',
+      inventorySources: ['kernel-native'],
+      packages: [{ name: 'numpy', version: '2.0.0', versionStatus: 'known', ecosystem: 'python' }],
+      complete: true,
+      captureStatus: 'complete'
+    }
+    const serializedEnvironmentManifest = `${JSON.stringify(environmentManifest, null, 2)}\n`
+    const environmentManifestChecksum = createHash('sha256')
+      .update(serializedEnvironmentManifest)
+      .digest('hex')
+    await mkdir(join(input.dataRoot, 'runtime/provenance/environment-manifests'), {
+      recursive: true
+    })
+    await writeFile(
+      join(
+        input.dataRoot,
+        'runtime/provenance/environment-manifests',
+        `${environmentManifestChecksum}.json`
+      ),
+      serializedEnvironmentManifest
+    )
     const document = (runId: string): Record<string, unknown> => ({
       projectId: 'project',
       sessionId: 'session',
-      runs: [{ runId, script: 'SECRET_SCRIPT', text: { stdout: 'SECRET_STDOUT' } }]
+      runs: [
+        ...Array.from({ length: 100 }, (_, index) => ({ runId: `older-${index}` })),
+        {
+          runId,
+          script: 'SECRET_SCRIPT',
+          text: { stdout: 'SECRET_STDOUT' },
+          environmentCapture: { state: 'available', manifestChecksum: environmentManifestChecksum }
+        }
+      ]
     })
     await writeFile(join(notebookRoot, 'run.json'), JSON.stringify(document('root-run')))
     await writeFile(
@@ -254,12 +429,57 @@ describe('session diagnostics isolated collector', () => {
     const environment = JSON.parse(
       await readFile(join(input.directory!, 'content/environment.json'), 'utf8')
     )
-    expect(rootRun.runs[0].runId).toBe('root-run')
-    expect(frameRun.runs[0].runId).toBe('frame-run')
+    expect(rootRun.runCounts).toEqual({ source: 101, retained: 100, omitted: 1 })
+    expect(rootRun.runs.at(-1).runId).toBe('root-run')
+    expect(rootRun.runs.at(-1).environmentManifestChecksum).toBe(environmentManifestChecksum)
+    expect(frameRun.runs.at(-1).runId).toBe('frame-run')
+    expect(frameRun.runs.at(-1).environmentManifestChecksum).toBe(environmentManifestChecksum)
     expect(environment.storedDefaults.frameworkId).toBe('codex')
+    expect(
+      await readFile(
+        join(
+          input.directory!,
+          'content/notebook/environment-manifests',
+          `${environmentManifestChecksum}.json`
+        ),
+        'utf8'
+      )
+    ).toBe(serializedEnvironmentManifest)
     const exported = JSON.stringify([rootRun, frameRun, environment])
     for (const secret of ['SECRET_SCRIPT', 'SECRET_STDOUT', 'SECRET_KEY'])
       expect(exported).not.toContain(secret)
+  })
+  it('exports a valid inline environment manifest when its sidecar is unavailable', async () => {
+    const input = await fixture()
+    const notebookRoot = join(input.dataRoot, 'notebooks/project/session')
+    await mkdir(notebookRoot, { recursive: true })
+    const manifest = {
+      schemaVersion: 1,
+      captureKind: 'completed-run',
+      packages: []
+    }
+    const contents = `${JSON.stringify(manifest, null, 2)}\n`
+    const checksum = createHash('sha256').update(contents).digest('hex')
+    await writeFile(
+      join(notebookRoot, 'run.json'),
+      JSON.stringify({
+        projectId: 'project',
+        sessionId: 'session',
+        runs: [
+          { runId: 'run-1', environmentManifestChecksum: checksum, environmentManifest: manifest }
+        ]
+      })
+    )
+
+    const result = await runSessionDiagnosticWorker({ ...input, selectedItems: ['notebook'] })
+
+    expect(result).toMatchObject({ kind: 'archive', partial: false })
+    await expect(
+      readFile(
+        join(input.directory!, 'content/notebook/environment-manifests', `${checksum}.json`),
+        'utf8'
+      )
+    ).resolves.toBe(contents)
   })
   it('exports opted-in scripts only in selected Notebook runs and records coverage', async () => {
     const input = await fixture()
@@ -312,6 +532,134 @@ describe('session diagnostics isolated collector', () => {
     expect(await readFile(join(input.directory!, 'content/session.json'), 'utf8')).not.toContain(
       'SECRET_SESSION'
     )
+  })
+  it('marks Notebook diagnostics partial when a referenced environment sidecar is unavailable', async () => {
+    const input = await fixture()
+    const checksum = 'a'.repeat(64)
+    const notebookRoot = join(input.dataRoot, 'notebooks/project/session')
+    await mkdir(notebookRoot, { recursive: true })
+    await writeFile(
+      join(notebookRoot, 'run.json'),
+      JSON.stringify({
+        projectId: 'project',
+        sessionId: 'session',
+        runs: [
+          {
+            runId: 'run-1',
+            environmentManifestChecksum: checksum
+          }
+        ]
+      })
+    )
+
+    const result = await runSessionDiagnosticWorker({ ...input, selectedItems: ['notebook'] })
+
+    expect(result).toMatchObject({ kind: 'archive', partial: true })
+    expect(result.kind === 'archive' ? result.report : '').toContain(
+      'Notebook environment manifest unavailable'
+    )
+    expect(
+      await readFile(
+        join(
+          input.directory!,
+          'content/notebook/environment-manifests',
+          `${checksum}.json.metadata.json`
+        ),
+        'utf8'
+      )
+    ).toContain('source-unavailable-or-integrity-failure')
+  })
+  it('hydrates retained Notebook run records before exporting environment sidecars', async () => {
+    const input = await fixture()
+    const notebookRoot = join(input.dataRoot, 'notebooks/project/session')
+    const manifest = {
+      schemaVersion: 1,
+      captureKind: 'completed-run',
+      capturedAt: '2026-11-20T00:00:00.000Z',
+      installedInventory: {
+        capturedAt: '2026-11-20T00:00:00.000Z',
+        source: 'full-scan',
+        validation: 'full-scan'
+      },
+      kernelKind: 'python',
+      environmentName: 'default-python',
+      runtimeSource: 'managed',
+      inventorySources: ['kernel-native'],
+      packages: [],
+      complete: true,
+      captureStatus: 'complete'
+    }
+    const manifestContents = `${JSON.stringify(manifest, null, 2)}\n`
+    const manifestChecksum = createHash('sha256').update(manifestContents).digest('hex')
+    await mkdir(join(input.dataRoot, 'runtime/provenance/environment-manifests'), {
+      recursive: true
+    })
+    await writeFile(
+      join(input.dataRoot, 'runtime/provenance/environment-manifests', `${manifestChecksum}.json`),
+      manifestContents
+    )
+    const run = { runId: 'run-1', environmentManifestChecksum: manifestChecksum }
+    const runContents = JSON.stringify(run)
+    const runChecksum = createHash('sha256').update(runContents).digest('hex')
+    await mkdir(join(notebookRoot, '.run-records'), { recursive: true })
+    await writeFile(join(notebookRoot, '.run-records', `${runChecksum}.json`), runContents)
+    await mkdir(notebookRoot, { recursive: true })
+    await writeFile(
+      join(notebookRoot, 'run.json'),
+      JSON.stringify({
+        projectId: 'project',
+        sessionId: 'session',
+        runs: [
+          {
+            storage: 'file',
+            runId: run.runId,
+            sha256: runChecksum,
+            bytes: Buffer.byteLength(runContents)
+          }
+        ]
+      })
+    )
+
+    const pendingBody = JSON.stringify({ ...run, runId: 'pending-large' })
+    const pendingHash = createHash('sha256').update(pendingBody).digest('hex')
+    await writeFile(join(notebookRoot, '.run-records', pendingHash + '.json'), pendingBody)
+    await mkdir(join(notebookRoot, '.pending-runs'))
+    await writeFile(
+      join(notebookRoot, '.pending-runs', '1.json'),
+      JSON.stringify({
+        projectId: 'project',
+        sessionId: 'session',
+        frameId: null,
+        slot: 1,
+        updatedAt: 2,
+        run: {
+          storage: 'file',
+          runId: 'pending-large',
+          sha256: pendingHash,
+          bytes: Buffer.byteLength(pendingBody)
+        }
+      })
+    )
+
+    const result = await runSessionDiagnosticWorker({ ...input, selectedItems: ['notebook'] })
+
+    expect(result).toMatchObject({ kind: 'archive', partial: false })
+    const exported = JSON.parse(
+      await readFile(join(input.directory!, 'content/notebook/run.json'), 'utf8')
+    )
+    expect(exported.runs).toHaveLength(2)
+    expect(exported.runs[1].environmentManifestChecksum).toBe(manifestChecksum)
+    expect(exported.runs[0].environmentManifestChecksum).toBe(manifestChecksum)
+    await expect(
+      readFile(
+        join(
+          input.directory!,
+          'content/notebook/environment-manifests',
+          `${manifestChecksum}.json`
+        ),
+        'utf8'
+      )
+    ).resolves.toBe(manifestContents)
   })
   it('counts only delivered Notebook code when one selected file cannot be written', async () => {
     const input = await fixture()

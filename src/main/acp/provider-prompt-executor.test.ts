@@ -27,6 +27,7 @@ import {
   type SessionPlanDeliverySessions
 } from './session-plan-delivery-owner'
 import { composeAcpRuntimePlanWorkflow } from './runtime-plan-composition'
+import { AcpSessionInteractionOwner } from './session-interaction-owner'
 
 type NextUpdate = Awaited<ReturnType<ActiveSession['nextUpdate']>>
 
@@ -138,6 +139,125 @@ const setup = (
 }
 
 describe('AcpProviderPromptExecutor', () => {
+  it('reads tracing permission after preflight so a saved opt-out applies to the pending prompt', async () => {
+    const fixture = setup([stop({ stopReason: 'end_turn' })])
+    const preflight = deferred<'active'>()
+    const entered = deferred<void>()
+    let enabled = true
+    const execution = fixture.executor.execute({
+      ...fixture.input,
+      frameworkId: 'open-science-agent',
+      beforeDispatch: () => {
+        entered.resolve()
+        return preflight.promise
+      },
+      authorizeHarnessTracing: async () => enabled
+    })
+    await entered.promise
+    enabled = false
+    preflight.resolve('active')
+
+    await expect(execution).resolves.toMatchObject({ kind: 'stopped' })
+    expect(fixture.session.prompt).toHaveBeenCalledWith('prompt')
+  })
+
+  it.each(['deadline', 'abort'])('handles a stalled tracing lookup on %s', async (ending) => {
+    const fixture = setup([stop({ stopReason: 'end_turn' })])
+    const controller = new AbortController()
+    const entered = deferred<void>()
+    const never = deferred<boolean>()
+    const onDispatchAttempt = vi.fn()
+    const execution = fixture.executor.execute({
+      ...fixture.input,
+      frameworkId: 'open-science-agent',
+      signal: controller.signal,
+      authorizeHarnessTracing: () => {
+        entered.resolve()
+        return never.promise
+      },
+      onDispatchAttempt
+    })
+    await entered.promise
+    if (ending === 'abort') controller.abort()
+
+    if (ending === 'abort') {
+      await expect(execution).resolves.toEqual({ kind: 'not-dispatched' })
+      expect(onDispatchAttempt).not.toHaveBeenCalled()
+      expect(fixture.session.prompt).not.toHaveBeenCalled()
+    } else {
+      await expect(execution).resolves.toMatchObject({ kind: 'stopped' })
+      expect(onDispatchAttempt).toHaveBeenCalledOnce()
+      expect(fixture.session.prompt).toHaveBeenCalledWith('prompt')
+    }
+  })
+
+  it('dispatches without tracing if Stop fails during the tracing lookup', async () => {
+    const fixture = setup([stop({ stopReason: 'end_turn' })])
+    const interactions = new AcpSessionInteractionOwner()
+    const sessionId = fixture.session.sessionId
+    const scope = interactions.claim({ sessionId, kind: 'prompt' })
+    const entered = deferred<void>()
+    const lookup = deferred<boolean>()
+    const notify = deferred<void>()
+    const cancellationCheckpoint = vi.fn(() => interactions.cancellationCheckpoint(scope))
+    const execution = fixture.executor.execute({
+      ...fixture.input,
+      frameworkId: 'open-science-agent',
+      signal: scope.signal,
+      cancellationCheckpoint,
+      isUserStopped: () => interactions.isCancellationAccepted(scope, 'user'),
+      isCurrent: () => interactions.current(sessionId) === scope,
+      authorizeHarnessTracing: () => {
+        entered.resolve()
+        return lookup.promise
+      }
+    })
+    await entered.promise
+    const cancellation = interactions.cancelPrompt({
+      sessionId,
+      notify: () => notify.promise,
+      userInitiated: true,
+      onAccepted: vi.fn(),
+      onTimeout: vi.fn()
+    })
+    const rejectedStop = expect(cancellation).rejects.toThrow('Stop was rejected')
+    await vi.waitFor(() => expect(cancellationCheckpoint).toHaveBeenCalledOnce())
+    expect(fixture.session.prompt).not.toHaveBeenCalled()
+    notify.reject(new Error('Stop was rejected'))
+    await rejectedStop
+
+    await expect(execution).resolves.toMatchObject({ kind: 'stopped' })
+    expect(fixture.session.prompt).toHaveBeenCalledWith('prompt')
+    interactions.release(scope)
+  })
+
+  it.each([false, true])(
+    'preserves CodeBuddy upstream errors and ordinary refusals (userStopped=%s)',
+    async (userStopped) => {
+      const fixture = setup([
+        stop({
+          stopReason: 'refusal',
+          _meta: { 'codebuddy.ai/errorMessage': 'Network error: 502 private vendor detail' }
+        }),
+        stop({ stopReason: 'refusal' })
+      ])
+      const input = {
+        ...fixture.input,
+        frameworkId: 'codebuddy' as const,
+        isUserStopped: () => userStopped
+      }
+      await expect(fixture.executor.execute(input)).rejects.toMatchObject({
+        message: 'CodeBuddy request failed (HTTP 502).',
+        status: 502
+      })
+      expect(fixture.captureStop).not.toHaveBeenCalled()
+      await expect(fixture.executor.execute(input)).resolves.toMatchObject({
+        kind: 'stopped',
+        response: { stopReason: 'refusal' }
+      })
+    }
+  )
+
   it('counts Pi model calls once per message while keeping only the latest input as context', async () => {
     const usage = (id: string, input: number): NextUpdate => {
       const update = {
@@ -285,93 +405,108 @@ describe('AcpProviderPromptExecutor', () => {
     await probe.cancel()
   })
 
-  it('captures one OpenCode generation API for both usage snapshots', async () => {
-    const api = { baseUrl: 'https://usage.example/v1', authorization: 'Bearer generation-1' }
-    const openCodeUsageApi = vi.fn(() => api)
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify([
-            {
-              info: {
-                id: 'assistant-1',
-                role: 'assistant',
-                tokens: { input: 4, output: 2, cache: { read: 1, write: 0 } }
-              }
-            }
-          ]),
-          { status: 200 }
+  it.each([
+    ['stop', 'end_turn', true, 'end_turn'],
+    ['length', 'end_turn', true, 'max_tokens'],
+    ['length', 'cancelled', true, 'cancelled'],
+    ['length', 'end_turn', false, 'end_turn']
+  ] as const)(
+    'captures one OpenCode API for model finish %s, ACP stop %s and recovery %s',
+    async (finish, stopReason, recoverOutputTruncation, expectedStop) => {
+      const api = { baseUrl: 'https://usage.example/v1', authorization: 'Bearer generation-1' }
+      const openCodeUsageApi = vi.fn(() => api)
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify([{ info: { id: 'old', role: 'assistant', finish: 'length' } }])
+          )
         )
-      )
-    const response: PromptResponse = { stopReason: 'end_turn' }
-    const session = {
-      sessionId: 'provider-1',
-      prompt: vi.fn(async () => undefined),
-      nextUpdate: vi.fn(async () => stop(response))
-    } as unknown as ProviderPromptExecutionInput['session']
-    const executor = new AcpProviderPromptExecutor({
-      backendGeneration: {
-        openCodeUsageApi,
-        current: {
-          adapter: { nativeMcpEnabled: true, bridgeMcpAliasesEnabled: false }
-        }
-      },
-      opencodeUsageFetch: fetchImpl
-    })
-
-    const outcome = await executor.execute({
-      session,
-      content: 'prompt',
-      cwd: '/workspace',
-      frameworkId: 'opencode',
-      isCurrent: () => true,
-      beforeDispatch: async () => 'active',
-      captureStop: () => true,
-      onAccepted: () => undefined,
-      routeNotification: () => undefined
-    })
-
-    expect(openCodeUsageApi).toHaveBeenCalledOnce()
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
-    expect(fetchImpl.mock.calls.map(([, init]) => init?.headers)).toEqual([
-      { authorization: 'Bearer generation-1' },
-      { authorization: 'Bearer generation-1' }
-    ])
-    expect(outcome).toMatchObject({
-      kind: 'stopped',
-      facts: {
-        turnUsage: {
-          inputTokens: 4,
-          cacheTokens: 1,
-          cachedReadTokens: 1,
-          cachedWriteTokens: 0,
-          outputTokens: 2
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify([
+              {
+                info: {
+                  id: 'assistant-1',
+                  role: 'assistant',
+                  finish,
+                  tokens: { input: 4, output: 2, cache: { read: 1, write: 0 } }
+                }
+              }
+            ]),
+            { status: 200 }
+          )
+        )
+      const response: PromptResponse = { stopReason }
+      const session = {
+        sessionId: 'provider-1',
+        prompt: vi.fn(async () => undefined),
+        nextUpdate: vi.fn(async () => stop(response))
+      } as unknown as ProviderPromptExecutionInput['session']
+      const executor = new AcpProviderPromptExecutor({
+        backendGeneration: {
+          openCodeUsageApi,
+          current: {
+            adapter: { nativeMcpEnabled: true, bridgeMcpAliasesEnabled: false }
+          }
         },
-        modelTurnCount: 1,
-        modelCalls: [
-          {
-            sourceInvocationId: 'assistant-1',
+        opencodeUsageFetch: fetchImpl,
+        recoverOutputTruncation
+      })
+
+      const outcome = await executor.execute({
+        session,
+        content: 'prompt',
+        cwd: '/workspace',
+        frameworkId: 'opencode',
+        isCurrent: () => true,
+        beforeDispatch: async () => 'active',
+        captureStop: () => true,
+        onAccepted: () => undefined,
+        routeNotification: () => undefined
+      })
+
+      expect(openCodeUsageApi).toHaveBeenCalledOnce()
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      expect(fetchImpl.mock.calls.map(([, init]) => init?.headers)).toEqual([
+        { authorization: 'Bearer generation-1' },
+        { authorization: 'Bearer generation-1' }
+      ])
+      expect(outcome).toMatchObject({
+        kind: 'stopped',
+        response: { stopReason: expectedStop },
+        facts: {
+          turnUsage: {
             inputTokens: 4,
             cacheTokens: 1,
             cachedReadTokens: 1,
             cachedWriteTokens: 0,
-            outputTokens: 2,
-            contextUsedTokens: 5
+            outputTokens: 2
+          },
+          modelTurnCount: 1,
+          modelCalls: [
+            {
+              sourceInvocationId: 'assistant-1',
+              inputTokens: 4,
+              cacheTokens: 1,
+              cachedReadTokens: 1,
+              cachedWriteTokens: 0,
+              outputTokens: 2,
+              contextUsedTokens: 5
+            }
+          ],
+          contextUsedTokens: 5,
+          lastModelStepUsage: {
+            inputTokens: 4,
+            cacheTokens: 1,
+            cachedReadTokens: 1,
+            cachedWriteTokens: 0,
+            outputTokens: 2
           }
-        ],
-        contextUsedTokens: 5,
-        lastModelStepUsage: {
-          inputTokens: 4,
-          cacheTokens: 1,
-          cachedReadTokens: 1,
-          cachedWriteTokens: 0,
-          outputTokens: 2
         }
-      }
-    })
-  })
+      })
+    }
+  )
 
   it.each([true, false])(
     'keeps compaction usage unknown without inventing a partial total (ACP aggregate: %s)',

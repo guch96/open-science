@@ -87,6 +87,7 @@ const NotificationRecovery = ({
             }
           : undefined
       }
+      className={surface === 'toast' ? 'shadow-notice' : undefined}
     />
   )
   if (surface === 'toast' && dismissedRevision === notificationRevision) return null
@@ -97,7 +98,7 @@ const NotificationRecovery = ({
         data-bottom-notice={surface === 'toast' ? true : undefined}
         className={
           surface === 'toast'
-            ? 'pointer-events-auto fixed bottom-4 right-4 z-toast max-h-[80dvh] w-80 max-w-[calc(100vw-2rem)] overflow-y-auto'
+            ? 'pointer-events-auto fixed bottom-4 right-4 z-toast w-80 max-w-[calc(100vw-2rem)]'
             : 'my-1 min-w-0'
         }
       >
@@ -115,7 +116,7 @@ const NotificationRecovery = ({
           data-notification-bell-id={id}
           aria-label={t('Messages unavailable')}
           className={cn(
-            'inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-status-warning-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+            'inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-status-warning-foreground dark:text-status-warning-dark-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
             className
           )}
         >

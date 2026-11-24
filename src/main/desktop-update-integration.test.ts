@@ -7,6 +7,8 @@ import { UpdateLifecycleError, type UpdateStatus } from '../shared/update'
 import type { InstallationUpdateRecord } from './update/installation-protection'
 const state = vi.hoisted(() => ({
   record: undefined as InstallationUpdateRecord | undefined,
+  waitForHelpers: vi.fn(async () => {}),
+  captureHelpers: vi.fn(),
   begin: vi.fn(),
   reboot: vi.fn(),
   advance: vi.fn(),
@@ -21,6 +23,10 @@ vi.mock('./update/installation-reboot-recovery', () => ({
   recoverInstallationAfterSystemRestart: state.reboot
 }))
 vi.mock('./update/installation-protection', () => ({
+  captureInstallationHelperExit: (...args: unknown[]) => {
+    state.captureHelpers(...args)
+    return state.waitForHelpers
+  },
   inspectInstallationUpdate: () => state.record,
   inspectInstallationAvailability: state.availability,
   installationRootForEntry: () => tmpdir(),
@@ -208,6 +214,22 @@ describe('Desktop installation orchestration', () => {
     await hooks.beforeInstallHandoff!(status)
     expect(state.record?.phase).toBe('handoff')
   })
+  it('captures helpers before stop and joins their exit before handoff', async () => {
+    const exited = Promise.withResolvers<void>()
+    state.waitForHelpers.mockReturnValueOnce(exited.promise)
+    const { hooks, stop, onHandoff } = setup()
+    await hooks.prepareInstall!(status, {})
+    await hooks.installGate!({})
+    expect(state.captureHelpers.mock.invocationCallOrder[0]).toBeLessThan(
+      stop.mock.invocationCallOrder[0]
+    )
+    const handoff = hooks.beforeInstallHandoff!(status)
+    await vi.waitFor(() => expect(state.waitForHelpers).toHaveBeenCalledOnce())
+    expect(onHandoff).not.toHaveBeenCalled()
+    exited.resolve()
+    await handoff
+    expect(onHandoff).toHaveBeenCalledOnce()
+  })
   it('cancel after clean stop verifies the old installation and restarts before reporting success', async () => {
     const { hooks, restart, invoke } = setup()
     await hooks.prepareInstall!(status, {})
@@ -302,7 +324,7 @@ describe('Desktop installation orchestration', () => {
     expect(await hooks.recheckInstall!()).toMatchObject({ reason: 'active-work', canForce: true })
     expect(refresh).toHaveBeenCalledOnce()
     expect(state.availability).toHaveBeenCalledOnce()
-    expect(invoke).toHaveBeenCalledWith('desktop:update-inspect')
+    expect(invoke).toHaveBeenCalledWith('desktop:update-inspect', [], expect.any(AbortSignal))
     expect(invoke).not.toHaveBeenCalledWith('desktop:update-gate', expect.anything())
     invoke.mockResolvedValueOnce({ blockedBy: [], completed: true, reaped: false })
     expect(await hooks.recheckInstall!()).toMatchObject({
@@ -331,7 +353,9 @@ describe('Desktop installation orchestration', () => {
     const { hooks, invoke } = setup()
     invoke.mockImplementationOnce(() => new Promise(() => {}))
     const checked = hooks.recheckInstall!().catch((error) => error)
-    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop:update-inspect'))
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('desktop:update-inspect', [], expect.any(AbortSignal))
+    )
     expect((await hooks.cancelInstall!()).outcome).toBe('cancelled')
     expect(await checked).toBeInstanceOf(Error)
   })

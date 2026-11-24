@@ -51,7 +51,10 @@ it('upgrades an existing database without copying or changing Bookmarks', async 
         '0054_slurm_job_reliability',
         '0055_session_discussion_parent',
         '0056_compute_kubernetes_workspace',
-        '0057_project_optimization_prompt'
+        '0057_project_optimization_prompt',
+        '0058_session_schedules',
+        '0059_session_history',
+        '0060_image_models'
       ]
     })
     expect(await client.$queryRaw`SELECT * FROM "Bookmark"`).toEqual(before)
@@ -184,7 +187,10 @@ it.each(['upload-version', 'artifact-version'] as const)(
           '0054_slurm_job_reliability',
           '0055_session_discussion_parent',
           '0056_compute_kubernetes_workspace',
-          '0057_project_optimization_prompt'
+          '0057_project_optimization_prompt',
+          '0058_session_schedules',
+          '0059_session_history',
+          '0060_image_models'
         ]
       })
       const rows = await client.pdfAnnotation.findMany({ orderBy: { id: 'asc' } })

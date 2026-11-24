@@ -1,3 +1,7 @@
+import {
+  bindLaunchLogReader,
+  restartWithLaunchLogReader
+} from '../../packages/open-science/launch-log.mjs'
 import { ResourceRecorder, installResourceRecorder } from './resource-diagnostics/recorder'
 import { ResourceLogStore } from './resource-diagnostics/store'
 import { resourceActivity } from './resource-diagnostics/activity'
@@ -7,10 +11,14 @@ import {
   closeMainAgentProcessOwnership
 } from './acp/main-agent-process-ownership'
 import { DelegatedProcessOwnership } from './delegation/process-ownership'
-import { inspectRuntimeWindowsProcessIds } from './process-tree-windows'
+import {
+  captureRuntimeWindowsProcessCleanup,
+  inspectRuntimeWindowsProcessIds
+} from './process-tree-windows'
 import {
   createLocalServiceLifetime,
   LOCAL_SERVICE_STOP_BUDGET_MS,
+  LOCAL_SERVICE_STOP_ESCALATION_MS,
   serviceStopDeadline
 } from './local-service-lifetime'
 import { installNodeFatalErrors } from './node-fatal-errors'
@@ -155,6 +163,13 @@ async function main(): Promise<void> {
     generation,
     pid: process.pid
   })
+  const launchLogControl = await bindLaunchLogReader().catch((error: unknown) => {
+    createLogger('node-runtime').warn(
+      'Launch log ownership unavailable; update admission remains protected',
+      diagnosticErrorFields(error)
+    )
+    return undefined
+  })
   const ownership = new RuntimeDirectoryOwnership()
   ownership.acquireSync(configRoot)
   configureRuntimeDirectoryOwnership(ownership)
@@ -233,12 +248,51 @@ async function main(): Promise<void> {
     if (stopRequested) throw new Error('Node runtime startup was cancelled by a shutdown request.')
   }
   let disconnectDatabase: (() => Promise<void>) | undefined
-  const stop = (deadlineAt = serviceStopDeadline()): Promise<void> => {
+  const stop = (deadlineAt = serviceStopDeadline(), forUpdate = false): Promise<void> => {
     stopRequested = true
     runtime?.applicationCommands.beginStopping()
     startupCancellation.abort()
     return (stopping ??= withRuntimeShutdownLifetime(async () => {
       lifetime?.close()
+      let failed = false
+      let cleanupTimer: ReturnType<typeof setTimeout> | undefined
+      let cleanup: ((final?: boolean) => Promise<void>) | undefined
+      if (forUpdate) {
+        try {
+          const reap = captureRuntimeWindowsProcessCleanup()
+          const cleanupDeadline = deadlineAt - LOCAL_SERVICE_STOP_ESCALATION_MS
+          let reaping: Promise<void> | undefined
+          cleanup = async (final = false) => {
+            if (reaping) {
+              await reaping
+              if (!final) return
+            }
+            reaping = reap(Math.min(cleanupDeadline, Date.now() + 4_000))
+              .catch((error) => {
+                failed = true
+                createLogger('node-runtime').error(
+                  'update process cleanup failed',
+                  diagnosticErrorFields(error)
+                )
+              })
+              .finally(() => {
+                reaping = undefined
+              })
+            await reaping
+          }
+          // A stuck disposer must not strand children when the Desktop escalates service stop.
+          cleanupTimer = setTimeout(
+            () => void cleanup!(),
+            Math.max(0, cleanupDeadline - Date.now() - 4_000)
+          )
+        } catch (error) {
+          failed = true
+          createLogger('node-runtime').error(
+            'update process ownership capture failed',
+            diagnosticErrorFields(error)
+          )
+        }
+      }
       // One process-wide deadline covers startup cancellation, preparation, every disposer and
       // the exit record. A failed drain is diagnostic; it cannot leave Node alive indefinitely.
       const deadline = setTimeout(
@@ -255,7 +309,6 @@ async function main(): Promise<void> {
         Math.max(1, deadlineAt - Date.now())
       )
       await startupFinished
-      let failed = false
       try {
         const outcome = preparationOutcome ?? (await runtime?.prepareForQuit())
         if (outcome && outcome !== 'completed') failed = true
@@ -275,6 +328,10 @@ async function main(): Promise<void> {
         () => runtime?.dispose(),
         () => closeMainAgentProcessOwnership(),
         () => disconnectDatabase?.(),
+        async () => {
+          clearTimeout(cleanupTimer)
+          await cleanup?.(true)
+        },
         () => network.close(),
         () => flushLogs()
       ]) {
@@ -333,12 +390,7 @@ async function main(): Promise<void> {
       const exitCode = failed || credentialFailure ? 1 : (startupExitCode ?? 0)
       process.exitCode = exitCode
       if (restartRequested && !desktopWillRestart && exitCode === 0) {
-        const { spawn } = await import('node:child_process')
-        const child = spawn(process.execPath, process.argv.slice(1), {
-          detached: true,
-          stdio: 'inherit',
-          env: process.env
-        })
+        const child = restartWithLaunchLogReader(launchLogControl)
         child.once('error', (error) => {
           createLogger('node-runtime').error('restart failed', diagnosticErrorFields(error))
           process.exitCode = 1
@@ -355,9 +407,9 @@ async function main(): Promise<void> {
     explicitStart: !process.argv.includes('--desktop'),
     deferFirstConnectionTimeout: true,
     onStoppingAdmission: () => runtime?.applicationCommands.beginStopping(),
-    stop: (_reason, deadlineAt) => {
+    stop: (reason, deadlineAt) => {
       // Cancellation must be visible before an already-resolving startup await resumes.
-      void stop(deadlineAt).catch((error) => {
+      void stop(deadlineAt, reason === 'update').catch((error) => {
         throw error
       })
     },
@@ -489,9 +541,31 @@ async function main(): Promise<void> {
     const { prepareApplicationLocations } = await import('./storage/initialize-location')
     abortStartupIfStopping()
     const { settingsStore, repository } = await prepareApplicationLocations(configRoot)
+    const launchingDesktop = process.argv.includes('--desktop')
+    const existingSettings = await settingsStore.readExisting()
     abortStartupIfStopping()
-    const startupSettings = await repository.getSettings()
+    const startupSettings = existingSettings ?? (await repository.getSettings())
     abortStartupIfStopping()
+    let desktopKiloDefaults: Promise<void> | undefined
+    const initializeDesktopKiloDefaults = (): Promise<void> =>
+      (desktopKiloDefaults ??= (async () => {
+        // A desktop client can attach to a running CLI service. Check for settings saved
+        // since that service started.
+        const current =
+          !existingSettings && !launchingDesktop ? await repository.getSettings() : undefined
+        const upgrading =
+          existingSettings !== undefined ||
+          current?.onboardingCompletedAt !== undefined ||
+          Boolean(current?.providers.length)
+        if (runtime) await runtime.initializeDesktopKiloDefaults(upgrading)
+        else await repository.initializeDesktopKiloDefaults(upgrading)
+      })().catch((error) => {
+        desktopKiloDefaults = undefined
+        createLogger('settings').warn(
+          'Could not initialize desktop Kilo defaults.',
+          diagnosticErrorFields(error)
+        )
+      }))
     const localeOwner = new LocalePreferenceOwner(
       [Intl.DateTimeFormat().resolvedOptions().locale],
       repository,
@@ -521,6 +595,11 @@ async function main(): Promise<void> {
         node: process.versions.node
       }
     })
+    // Module evaluation only needs the runtime metadata and composition definitions. Start it while
+    // database verification runs so a slow SQLite open or migration does not serialize all startup
+    // work behind the core runtime import.
+    const coreRuntimeImport = import('./core-runtime')
+    void coreRuntimeImport.catch(() => undefined)
     const earlyChannels = [
       'locale:initialize',
       'locale:set-preference',
@@ -530,7 +609,13 @@ async function main(): Promise<void> {
     const startupCommands: ApplicationCommandByNameDispatcher = {
       commandNames: () => runtime?.applicationCommands.desktop.commandNames() ?? earlyChannels,
       invoke: (name, invocation) => {
-        if (runtime) return runtime.applicationCommands.desktop.invoke(name, invocation)
+        if (runtime) {
+          const commands = runtime.applicationCommands.desktop
+          if (name === 'settings:get-settings') {
+            return initializeDesktopKiloDefaults().then(() => commands.invoke(name, invocation))
+          }
+          return commands.invoke(name, invocation)
+        }
         requireDesktopCaller(invocation.callerContext)
         switch (name) {
           case 'locale:initialize':
@@ -630,8 +715,10 @@ async function main(): Promise<void> {
         invoke: async (channel, invocation) => {
           if (channel === 'locale:snapshot') return localeOwner.snapshot()
           if (!runtime) throw new Error('The runtime is still starting.')
-          if (channel === 'desktop:update-inspect') return runtime.inspectDesktopUpdate()
-          if (channel === 'desktop:update-owned-processes') return inspectRuntimeWindowsProcessIds()
+          if (channel === 'desktop:update-inspect')
+            return runtime.inspectDesktopUpdate(invocation.callerLease.signal)
+          if (channel === 'desktop:update-owned-processes')
+            return inspectRuntimeWindowsProcessIds(invocation.callerLease.signal)
           if (channel === 'desktop:update-gate')
             return runtime.prepareDesktopUpdate(
               z
@@ -691,7 +778,7 @@ async function main(): Promise<void> {
             ].includes(channel)
           )
             throw new Error('Unknown desktop host command.')
-          return runtime.applicationCommands.desktop.invoke(channel, invocation)
+          return startupCommands.invoke(channel, invocation)
         }
       },
       permissionApprovalPresence: {
@@ -755,16 +842,24 @@ async function main(): Promise<void> {
     if (state.phase === 'blocked' && !process.argv.includes('--desktop'))
       throw Object.assign(new Error(state.error.message), state.error)
     await waitForVerifiedDatabaseStartup(databaseStartup, startupCancellation.signal)
+    if (launchingDesktop) await initializeDesktopKiloDefaults()
 
     abortStartupIfStopping()
     startupReporter.phase('runtime')
-    const { createCoreRuntime } = await import('./core-runtime')
+    const { createCoreRuntime } = await coreRuntimeImport
     abortStartupIfStopping()
     configureDesktopFileInteraction(
-      createRemoteDesktopFileInteraction(async (request, callerId) => {
+      createRemoteDesktopFileInteraction(async (request, callerId, signal) => {
         if (!desktop) throw new DesktopCapabilityUnavailable(request.operation)
+        // Film generation owns this background review even if the initiating document reloads.
+        if (request.operation === 'research-video-check')
+          return desktop.requestNative(request, undefined, signal)
         const caller = currentDesktopCaller()
-        return desktop.requestNative(request, callerId ?? caller?.clientId, caller?.signal)
+        return desktop.requestNative(
+          request,
+          callerId ?? caller?.clientId,
+          signal ?? caller?.signal
+        )
       })
     )
     configureDesktopShellInteraction(

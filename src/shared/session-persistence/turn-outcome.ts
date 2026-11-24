@@ -1,3 +1,5 @@
+import { providerErrorExcerpt } from '@aipoch/providers/errors'
+import { readHarnessErrorDiagnostics } from '../failure/contract'
 import type {
   ClassifiedFailure,
   FailureCategory,
@@ -33,6 +35,9 @@ export const readPersistedFailure = (value: Record<string, unknown>): Classified
     const category = failure.category as FailureCategory
     const diagnostics: { -readonly [K in keyof FailureDiagnostics]: FailureDiagnostics[K] } = {}
     const source = failure.diagnostics
+    const protocol = source.protocol
+    const harness =
+      protocol === 'chat-completions' || protocol === 'responses' || protocol === 'messages'
     if (
       typeof source.status === 'number' &&
       Number.isInteger(source.status) &&
@@ -40,10 +45,27 @@ export const readPersistedFailure = (value: Record<string, unknown>): Classified
       source.status <= 599
     )
       diagnostics.status = source.status
-    for (const key of ['code', 'provider', 'model', 'requestId', 'raw'] as const)
+    for (const key of ['provider', 'model'] as const)
       if (typeof source[key] === 'string') diagnostics[key] = source[key]
+    if (harness) {
+      Object.assign(diagnostics, readHarnessErrorDiagnostics(source), { protocol })
+    } else {
+      for (const key of ['code', 'requestId', 'raw', 'adapterCode', 'phase'] as const)
+        if (typeof source[key] === 'string') diagnostics[key] = source[key]
+    }
+    const excerpt =
+      !harness && (category === 'service' || category === 'configuration')
+        ? providerErrorExcerpt(failure.responseMessage)
+        : undefined
+    if (excerpt && diagnostics.raw) diagnostics.raw = excerpt
     return {
       category,
+      ...(!harness &&
+      (category === 'service' || category === 'configuration') &&
+      typeof failure.responseMessage === 'string' &&
+      failure.responseMessage.trim()
+        ? { responseMessage: excerpt ?? failure.responseMessage }
+        : {}),
       ...(typeof failure.reason === 'string' &&
       failure.reason.startsWith(`${category}/`) &&
       failure.reason.length > category.length + 1

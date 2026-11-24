@@ -24,7 +24,8 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
 import type { PersistedChatSession } from '../../shared/session-persistence'
-import { CODEX_SUBSCRIPTION_PROVIDER_ID, type AgentFrameworkId } from '../../shared/settings'
+import type { AgentFrameworkId } from '../../shared/settings'
+import { CODEX_SUBSCRIPTION_PROVIDER_ID } from '../../shared/settings-runtime'
 import {
   claudeCodeFramework,
   codeBuddyFramework,
@@ -574,6 +575,39 @@ describe('production delegated framework runtime bridge', () => {
       await expect(readFile(join(runtimeHome, 'codebuddy', 'models.json'), 'utf8')).resolves.toBe(
         '{"models":[]}\n'
       )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('starts a subscription Attempt with its own configuration and the admitted regional credentials', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'delegated-codebuddy-subscription-'))
+    try {
+      const source = join(root, 'source')
+      await mkdir(source)
+      await writeFile(join(source, 'settings.json'), '{}')
+      await writeFile(join(source, 'main-session'), 'private')
+      const input = await codeBuddyFramework.prepareDelegatedSpawn!(
+        {
+          ...backend('codebuddy'),
+          modelRoute: 'codebuddy-subscription',
+          args: ['--system-prompt-file', join(source, 'system-prompt.md')],
+          persistentSystemPrompt: 'admitted instructions',
+          env: {
+            CODEBUDDY_CONFIG_DIR: source,
+            CODEBUDDY_INTERNET_ENVIRONMENT: 'internal',
+            USERPROFILE: root,
+            HOME: root
+          }
+        },
+        join(root, 'attempt')
+      )
+      const config = input.env.CODEBUDDY_CONFIG_DIR!
+      expect(input.env.HOME).toBe(root)
+      expect(config).toBe(join(root, 'attempt', 'codebuddy', 'internal'))
+      expect(input.args).toEqual(['--system-prompt-file', join(config, 'system-prompt.md')])
+      expect(await readFile(input.args[1]!, 'utf8')).toBe('admitted instructions')
+      await expect(stat(join(config, 'main-session'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
       await rm(root, { recursive: true, force: true })
     }

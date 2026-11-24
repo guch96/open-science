@@ -79,6 +79,16 @@ afterEach(async () => {
 })
 
 describe('runtime Session lookup', () => {
+  it('uses the persisted locator before startup hydration', async () => {
+    const { repository, findSessions } = await createLookup(false)
+    const loadAll = vi
+      .spyOn(repository, 'loadAll')
+      .mockRejectedValue(new Error('Runtime lookup must not hydrate the Session catalog.'))
+
+    await expect(findSessions('current')).resolves.toMatchObject([{ id: 'current' }])
+    expect(loadAll).not.toHaveBeenCalled()
+  })
+
   it('shares concurrent reads but releases success and failure before delivering settlement', async () => {
     const loadSession = vi.fn().mockResolvedValue(session('current'))
     const repository = {
@@ -148,6 +158,15 @@ describe('runtime Session lookup', () => {
         unrelatedReadStarted = () => resolve('blocked on unrelated Session')
       })
       const repository = new SessionRepository(root, {
+        journalDependencies: {
+          readChunks: async function* (path) {
+            if (holdUnrelatedReads && basename(path) === 'unrelated.jsonl') {
+              unrelatedReadStarted()
+              await held
+            }
+            yield await readFile(path)
+          }
+        },
         readSessionFile: async (path) => {
           if (holdUnrelatedReads && basename(path) === 'unrelated.json') {
             unrelatedReadStarted()
@@ -225,7 +244,7 @@ describe('runtime Session lookup', () => {
     'does not return stale contents for a %s Session',
     async (state) => {
       const { root, findSessions } = await createLookup()
-      const file = join(root, 'sessions', 'project-1', 'current.json')
+      const file = join(root, 'sessions', 'project-1', 'current.jsonl')
       if (state === 'missing') await rm(file)
       else await writeFile(file, 'invalid JSON')
       await expect(findSessions('current')).resolves.toEqual([])
@@ -236,8 +255,8 @@ describe('runtime Session lookup', () => {
     const { root, findSessions } = await createLookup()
     await mkdir(join(root, 'sessions', 'project-2'))
     await writeFile(
-      join(root, 'sessions', 'project-2', 'current.json'),
-      await readFile(join(root, 'sessions', 'project-1', 'current.json'))
+      join(root, 'sessions', 'project-2', 'current.jsonl'),
+      await readFile(join(root, 'sessions', 'project-1', 'current.jsonl'))
     )
     await expect(findSessions('current')).rejects.toThrow('already owned by another Project')
   })

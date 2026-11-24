@@ -4,6 +4,8 @@ export type ElicitationOption = {
   value: string
   label: string
   description?: string
+  pros?: string
+  cons?: string
 }
 
 export type ElicitationField = {
@@ -48,6 +50,7 @@ export const normalizeAgentUserChoiceAnswers = (
 
 export type AgentTurnProvenanceContext = {
   promptMessageId: string
+  taskRunId?: string
   // A suppressed application continuation may use a synthetic prompt identity while retaining a
   // durable conversation message as the authorization origin for control-plane calls.
   originMessageId?: string
@@ -79,6 +82,20 @@ export type ElicitationProjection = {
   // Recovery belongs to this question, not the Session's latest operation error. Main alone
   // grants retry permission after checking both the cause and delivery acceptance.
   continuationRecovery?: { error: string; retryable?: true }
+  // Local Task routing and answer receipt. Excluded from Session packages and Forks.
+  taskRequestId?: string
+  taskRunId?: string
+  taskResponse?: TaskQuestionReceipt
+}
+
+export type TaskQuestionSource = 'user_relay' | 'known_context'
+
+export type TaskQuestionReceipt = {
+  source: TaskQuestionSource
+  action: 'accept' | 'decline'
+  reviewedRevision: number
+  checksum: string
+  continuationId?: string
 }
 
 export type PendingElicitationRequest = {
@@ -118,6 +135,8 @@ export type ElicitationResponse = {
 export type AgentUserChoiceOption = {
   label: string
   description?: string
+  pros?: string
+  cons?: string
 }
 
 export type AgentUserChoicePrompt = {
@@ -303,6 +322,10 @@ const boundedString = (value: unknown, max: number): string | undefined => {
   return text && value.length <= max ? text : undefined
 }
 
+// New trade-off annotations match the model schema's trim-before-limit ordering.
+const boundedTrimmedString = (value: unknown, max: number): string | undefined =>
+  typeof value === 'string' ? boundedString(value.trim(), max) : undefined
+
 // Model-facing contract repeated in rejection errors so a provider can self-correct instead of
 // retrying the same malformed call. Unique option labels stay unexpressible in JSON Schema.
 export const AGENT_USER_CHOICE_REQUEST_CONTRACT =
@@ -351,8 +374,29 @@ export const sanitizeAgentUserChoiceRequest = (
         option.description === undefined
           ? undefined
           : boundedString(option.description, MAX_ELICITATION_MESSAGE_CHARS)
-      if (!label || (option.description !== undefined && !description)) return []
-      return [{ label, ...(description ? { description } : {}) }]
+      const pros =
+        option.pros === undefined
+          ? undefined
+          : boundedTrimmedString(option.pros, MAX_ELICITATION_MESSAGE_CHARS)
+      const cons =
+        option.cons === undefined
+          ? undefined
+          : boundedTrimmedString(option.cons, MAX_ELICITATION_MESSAGE_CHARS)
+      if (
+        !label ||
+        (option.description !== undefined && !description) ||
+        (option.pros !== undefined && !pros) ||
+        (option.cons !== undefined && !cons)
+      )
+        return []
+      return [
+        {
+          label,
+          ...(description ? { description } : {}),
+          ...(pros ? { pros } : {}),
+          ...(cons ? { cons } : {})
+        }
+      ]
     })
     if (
       options.length !== candidate.options.length ||
@@ -404,7 +448,15 @@ const sanitizeOption = (value: unknown): ElicitationOption | undefined => {
   if (!optionValue || !label) return undefined
 
   const description = cappedString(value.description, MAX_ELICITATION_MESSAGE_CHARS)
-  return { value: optionValue, label, ...(description ? { description } : {}) }
+  const pros = cappedString(value.pros, MAX_ELICITATION_MESSAGE_CHARS)
+  const cons = cappedString(value.cons, MAX_ELICITATION_MESSAGE_CHARS)
+  return {
+    value: optionValue,
+    label,
+    ...(description ? { description } : {}),
+    ...(pros ? { pros } : {}),
+    ...(cons ? { cons } : {})
+  }
 }
 
 const withSanitizedDefault = (
@@ -628,6 +680,7 @@ const sanitizeAgentTurnProvenanceContext = (
   if (!promptMessageId) return undefined
 
   const optionalIds = [
+    'taskRunId',
     'originMessageId',
     'rootFrameId',
     'agentFrameId',
@@ -659,6 +712,7 @@ const sanitizeAgentTurnProvenanceContext = (
 
   return {
     promptMessageId,
+    ...(ids.taskRunId ? { taskRunId: ids.taskRunId } : {}),
     ...(ids.originMessageId ? { originMessageId: ids.originMessageId } : {}),
     ...(ids.rootFrameId ? { rootFrameId: ids.rootFrameId } : {}),
     ...(ids.agentFrameId ? { agentFrameId: ids.agentFrameId } : {}),
@@ -758,12 +812,40 @@ export const sanitizeElicitationProjection = (
   const recoveryError = isRecord(value.continuationRecovery)
     ? cappedString(value.continuationRecovery.error, MAX_ELICITATION_MESSAGE_CHARS)
     : undefined
+  const taskRequestId = boundedString(value.taskRequestId, MAX_ELICITATION_LABEL_CHARS)
+  const taskRunId = boundedString(value.taskRunId, MAX_ELICITATION_LABEL_CHARS)
+  const receipt = isRecord(value.taskResponse) ? value.taskResponse : undefined
+  const recordedAction = state === 'answered' ? 'accept' : 'decline'
+  const taskResponse: TaskQuestionReceipt | undefined =
+    (state === 'answered' || state === 'declined') &&
+    receipt &&
+    (receipt.source === 'user_relay' || receipt.source === 'known_context') &&
+    receipt.action === recordedAction &&
+    typeof receipt.reviewedRevision === 'number' &&
+    Number.isSafeInteger(receipt.reviewedRevision) &&
+    receipt.reviewedRevision >= 0 &&
+    typeof receipt.checksum === 'string' &&
+    /^[a-f0-9]{64}$/.test(receipt.checksum)
+      ? {
+          source: receipt.source,
+          action: recordedAction,
+          reviewedRevision: receipt.reviewedRevision,
+          checksum: receipt.checksum,
+          ...(typeof receipt.continuationId === 'string' &&
+          /^askuser_[a-f0-9]{64}$/.test(receipt.continuationId)
+            ? { continuationId: receipt.continuationId }
+            : {})
+        }
+      : undefined
 
   return {
     message,
     fields,
     state,
     ...(durable ? { durable } : {}),
+    ...(taskRequestId ? { taskRequestId } : {}),
+    ...(taskRequestId && taskRunId ? { taskRunId } : {}),
+    ...(taskResponse && (taskRequestId || durable) ? { taskResponse } : {}),
     ...(state === 'pending' && draftAnswers && draftAnswers.length > 0
       ? { draftAnswers: normalizeAgentUserChoiceAnswers(fields, draftAnswers) }
       : {}),

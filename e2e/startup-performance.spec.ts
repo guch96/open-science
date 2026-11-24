@@ -27,9 +27,7 @@ test('records first renderer readiness before the fixture reload', async ({ app 
   }
 })
 
-test('hydrates historical Sessions only once during startup composition', async ({
-  app
-}, testInfo) => {
+test('keeps idle Session history out of startup detail recovery', async ({ app }, testInfo) => {
   const page = await app.completeOnboarding()
   const cwd = await app.createTestDirectory('startup-history')
   const count = Number(process.env.OPEN_SCIENCE_STARTUP_HISTORY_COUNT ?? 80)
@@ -65,6 +63,7 @@ test('hydrates historical Sessions only once during startup composition', async 
     { cwd, count }
   )
   for (const mode of ['normal', 'crash'] as const) {
+    const restartAt = Date.now()
     if (mode === 'normal') await app.restart()
     else await app.restartAfterCrash()
     const logPath = await app.captureMainLog(`startup-history-${mode}.log`)
@@ -78,25 +77,28 @@ test('hydrates historical Sessions only once during startup composition', async 
           return []
         }
       })
-    const startup = records
-      .filter((record) => record.data?.operation === 'application-startup')
-      .at(-1)
-    expect(startup).toBeDefined()
-    const run = records.filter((record) => record.runId === startup.runId)
-    const hydrations = run.filter(
+    const compositions = records.filter(
       (record) =>
-        record.data?.operation === 'session-hydration' &&
-        record.data?.mode === 'reconcile' &&
-        record.msg === 'operation completed'
+        record.data?.operation === 'application-composition' &&
+        record.msg === 'operation started' &&
+        Date.parse(record.t) >= restartAt
     )
-    expect(hydrations).toHaveLength(1)
-    expect(hydrations[0].data.sessionCount).toBeGreaterThanOrEqual(count)
+    expect(compositions).toHaveLength(1)
+    const run = records.filter((record) => record.runId === compositions[0].runId)
+    const catalogs = run.filter((record) => record.msg === 'startup Session catalog hydrated')
+    expect(catalogs).toHaveLength(0)
+    const summaryCount = await app.page.evaluate(
+      async () => (await window.api.sessions.list()).sessions.length
+    )
+    expect(summaryCount).toBeGreaterThanOrEqual(count)
     await testInfo.attach(`startup-history-${mode}-phases`, {
       body: JSON.stringify(
-        run.filter((record) =>
-          ['application-startup', 'application-composition', 'session-hydration'].includes(
-            record.data?.operation
-          )
+        run.filter(
+          (record) =>
+            record.msg === 'startup Session catalog hydrated' ||
+            ['application-startup', 'application-composition', 'session-hydration'].includes(
+              record.data?.operation
+            )
         ),
         null,
         2

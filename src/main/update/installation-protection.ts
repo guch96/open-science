@@ -1,5 +1,7 @@
+import { processBirthIdentity } from './windows-update-handoff'
+import { setTimeout as delay } from 'node:timers/promises'
 import { systemBootIdentity } from '../system-boot-identity'
-import { cancelDebSystemdGate, type DebSystemdGate } from './deb-systemd-gate'
+import { windowsProcessIsAlive } from '../windows-process-query'
 import { z } from 'zod'
 import { createHash, randomUUID } from 'node:crypto'
 import { installationFs } from './installation-filesystem'
@@ -55,7 +57,7 @@ export type InstallationUpdateRecord = {
   targetManifest?: InstallationManifest
   stoppedClean?: boolean
   runtimeExited?: boolean
-  preparedDebGate?: DebSystemdGate
+  preparedDebGate?: import('./deb-systemd-gate').DebSystemdGate
   executor?: {
     channel: 'supervised-mac' | 'supervised-appimage' | 'supervised-deb'
     directory: string
@@ -360,6 +362,51 @@ function occupants(directory: string): InstallationRuntime[] {
   }
   return live
 }
+/** Snapshot live helpers before stopping their owner. Only observe those identities here;
+ * the final native handoff scan retains its independent, platform-specific budget. */
+export function captureInstallationHelperExit(
+  location: InstallationLocation,
+  runtime: InstallationRuntime
+): (signal?: AbortSignal) => Promise<void> {
+  const helpers = coordinated(location, (directory) =>
+    occupants(directory)
+      .filter((candidate) => isOwnedInstallationHelper(candidate, runtime))
+      .map(({ pid }) => ({ pid, birth: processBirthIdentity(pid) }))
+  )
+  return async (signal) => {
+    signal?.throwIfAborted()
+    if (!helpers.length) return
+    const timeout = AbortSignal.timeout(5000)
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
+    try {
+      while (
+        helpers.some(({ pid, birth }) => {
+          // Keep this OS observation below desktop composition; no service-stop dependency.
+          try {
+            process.kill(pid, 0)
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+          }
+          const current = processBirthIdentity(pid)
+          // Unreadable identity is not proof of exit. A reused PID is not our old helper.
+          return !birth || !current || current === birth
+        })
+      ) {
+        await delay(50, undefined, { signal: combined })
+      }
+      combined.throwIfAborted()
+    } catch (error) {
+      signal?.throwIfAborted()
+      if (timeout.aborted)
+        throw new UpdateLifecycleError(
+          'installation-busy',
+          'Services still hold this installation.'
+        )
+      throw error
+    }
+  }
+}
+
 export function captureInstallationManifest(
   installationRoot: string,
   version: string
@@ -427,15 +474,27 @@ export function installationRecoveryStatus(record: InstallationUpdateRecord): Up
     canRecover: true
   }
 }
+function hasExitedWindowsProcess(pid: number): boolean {
+  if (process.platform !== 'win32') return false
+  try {
+    return !windowsProcessIsAlive(pid)
+  } catch {
+    // An unreadable or reused PID is not proof that the installation is free.
+    return false
+  }
+}
 function createInstallationBusyError(
   otherRuntimePids: readonly number[],
   foreignProcessPids: readonly number[],
   processNames?: ReadonlyMap<number, string>
-): UpdateLifecycleError {
+): UpdateLifecycleError | undefined {
+  const names = processNames ?? inspectProcessNames([...otherRuntimePids, ...foreignProcessPids])
+  // The scanner and diagnostic lookup can outlive a holder. Recheck at the rejection boundary.
+  foreignProcessPids = foreignProcessPids.filter((pid) => !hasExitedWindowsProcess(pid))
+  if (!otherRuntimePids.length && !foreignProcessPids.length) return undefined
   const detail =
     foreignProcessPids.length && !otherRuntimePids.length ? 'foreign-process' : 'other-runtime'
   const blockingPids = [...otherRuntimePids, ...foreignProcessPids]
-  const names = processNames ?? inspectProcessNames(blockingPids)
   const message =
     detail === 'foreign-process'
       ? 'Another process is using installation files.'
@@ -455,7 +514,7 @@ async function createInstallationBusyErrorAsync(
   otherRuntimePids: readonly number[],
   foreignProcessPids: readonly number[],
   signal?: AbortSignal
-): Promise<UpdateLifecycleError> {
+): Promise<UpdateLifecycleError | undefined> {
   const processNames = await inspectProcessNamesAsync(
     [...otherRuntimePids, ...foreignProcessPids],
     signal
@@ -470,7 +529,7 @@ export function beginInstallationUpdate(
     runtime: InstallationRuntime
     targetManifest?: InstallationManifest
     currentManifest?: InstallationManifest
-    preparedDebGate?: DebSystemdGate
+    preparedDebGate?: import('./deb-systemd-gate').DebSystemdGate
     inspectProcesses?: (root: string) => number[]
     allowedProcessIds?: number[]
   }
@@ -503,10 +562,11 @@ export function beginInstallationUpdate(
           runtime.configRoot !== options.runtime.configRoot)
     )
     if (others.length || foreignProcesses.length) {
-      throw createInstallationBusyError(
+      const error = createInstallationBusyError(
         others.map(({ pid }) => pid),
         foreignProcesses
       )
+      if (error) throw error
     }
     const record: InstallationUpdateRecord = {
       schema: 1,
@@ -663,8 +723,14 @@ export async function captureInstallationManifestAsync(
     for await (const chunk of createReadStream(root, { signal })) hash.update(chunk)
     return { version, files: { '@image': hash.digest('hex') } }
   }
+  const regularFiles: Array<{ relativePath: string; path: string }> = []
+  const symlinks: Array<{ relativePath: string; target: string }> = []
   async function walk(directory: string): Promise<void> {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+    // Code-unit order: the manifest must not depend on the process locale.
+    const entries = (await readdir(directory, { withFileTypes: true })).sort((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0
+    )
+    for (const entry of entries) {
       signal?.throwIfAborted()
       const path = join(directory, entry.name)
       if (entry.isDirectory()) {
@@ -680,21 +746,51 @@ export async function captureInstallationManifestAsync(
       )
         throw new Error('Unsupported installation link or file.')
       if (entry.isSymbolicLink()) {
-        files[relative(root, path)] = `symlink:${await readlink(path)}`
+        symlinks.push({ relativePath: relative(root, path), target: await readlink(path) })
         continue
       }
-      const hash = createHash('sha256')
-      for await (const chunk of createReadStream(path, { signal })) hash.update(chunk)
-      files[relative(root, path)] = hash.digest('hex')
+      regularFiles.push({ relativePath: relative(root, path), path })
     }
   }
   await walk(root)
+  const hashingAbort = new AbortController()
+  const hashingSignal = signal
+    ? AbortSignal.any([signal, hashingAbort.signal])
+    : hashingAbort.signal
+  const hashes = new Array<string>(regularFiles.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = next++
+      if (index >= regularFiles.length) return
+      hashingSignal.throwIfAborted()
+      const hash = createHash('sha256')
+      for await (const chunk of createReadStream(regularFiles[index].path, {
+        signal: hashingSignal
+      }))
+        hash.update(chunk)
+      hashes[index] = hash.digest('hex')
+    }
+  }
+  const workers = Array.from({ length: Math.min(8, Math.max(1, regularFiles.length)) }, () =>
+    worker()
+  )
+  try {
+    await Promise.all(workers)
+  } catch (error) {
+    hashingAbort.abort(error)
+    // Return only after sibling streams released their handles; a caller may delete the tree next.
+    await Promise.allSettled(workers)
+    throw error
+  }
+  for (const [index, entry] of regularFiles.entries()) files[entry.relativePath] = hashes[index]
+  for (const entry of symlinks) files[entry.relativePath] = `symlink:${entry.target}`
   if (!Object.keys(files).length) throw new Error('Installation is empty.')
   return { version, files }
 }
 export async function beginInstallationUpdateAsync(
   options: Omit<Parameters<typeof beginInstallationUpdate>[0], 'allowedProcessIds'> & {
-    allowedProcessIds?: number[] | (() => number[] | Promise<number[]>)
+    allowedProcessIds?: number[] | ((signal?: AbortSignal) => number[] | Promise<number[]>)
   },
   signal?: AbortSignal
 ): Promise<InstallationUpdateRecord> {
@@ -710,7 +806,7 @@ export async function beginInstallationUpdateAsync(
   signal?.throwIfAborted()
   const allowedProcessIds =
     typeof options.allowedProcessIds === 'function'
-      ? await options.allowedProcessIds()
+      ? await options.allowedProcessIds(signal)
       : options.allowedProcessIds
   signal?.throwIfAborted()
   try {
@@ -855,8 +951,10 @@ export async function finishInstallationRecoveryAsync(
       'install-failed',
       'The installer has already received this operation.'
     )
-  if (record.preparedDebGate && record.phase !== 'handoff')
+  if (record.preparedDebGate && record.phase !== 'handoff') {
+    const { cancelDebSystemdGate } = await import('./deb-systemd-gate.js')
     await cancelDebSystemdGate(record.preparedDebGate)
+  }
   const expected = intent === 'cancel' ? record.oldManifest : record.targetManifest
   if (
     !expected ||
@@ -908,28 +1006,33 @@ export async function advanceInstallationUpdateAsync(
       if (!record || record.operationId !== operationId)
         throw new UpdateLifecycleError('install-failed', 'The installation operation has changed.')
       const processNames = await inspectProcessNamesAsync(foreignProcesses, options.signal)
-      throw new UpdateLifecycleError(
-        'installation-busy',
-        'Another process is using this installation.',
-        {
-          // Occupancy refused the transition; retain the persisted phase and stop evidence.
-          ...installationRecoveryStatus(record),
-          canRetryInstall: false,
-          detail: 'foreign-process',
-          blockingProcesses: foreignProcesses.map((pid) => ({ pid, name: processNames.get(pid) }))
-        }
-      )
+      const blockingProcesses = foreignProcesses
+        .filter((pid) => !hasExitedWindowsProcess(pid))
+        .map((pid) => ({ pid, name: processNames.get(pid) }))
+      if (blockingProcesses.length)
+        throw new UpdateLifecycleError(
+          'installation-busy',
+          'Another process is using this installation.',
+          {
+            // Occupancy refused the transition; retain the persisted phase and stop evidence.
+            ...installationRecoveryStatus(record),
+            canRetryInstall: false,
+            detail: 'foreign-process',
+            blockingProcesses
+          }
+        )
     }
   }
   options.signal?.throwIfAborted()
   return advanceInstallationUpdate(location, operationId, phase, stoppedClean)
 }
 
-/** Read-only occupancy preflight; it neither acquires update admission nor stops any service. */
+/** Inspect occupancy and optionally commit a synchronous replacement while startup admission is locked. */
 export async function inspectInstallationAvailability(
   options: InstallationLocation & {
     runtime?: InstallationRuntime
-    allowedProcessIds?: number[] | (() => number[] | Promise<number[]>)
+    allowedProcessIds?: number[] | ((signal?: AbortSignal) => number[] | Promise<number[]>)
+    replaceIfIdle?: () => void
     inspectProcesses?: typeof inspectInstallationProcessesAsync
   },
   signal?: AbortSignal
@@ -960,7 +1063,7 @@ export async function inspectInstallationAvailability(
   signal?.throwIfAborted()
   const allowedProcessIds =
     typeof options.allowedProcessIds === 'function'
-      ? await options.allowedProcessIds()
+      ? await options.allowedProcessIds(signal)
       : options.allowedProcessIds
   signal?.throwIfAborted()
   let conflict: { otherRuntimePids: number[]; foreignProcessPids: number[] } | undefined
@@ -1011,14 +1114,20 @@ export async function inspectInstallationAvailability(
         otherRuntimePids: others.map(({ pid }) => pid),
         foreignProcessPids: foreignProcesses
       }
+    } else if (options.replaceIfIdle) {
+      signal?.throwIfAborted()
+      if (readRecord(directory)) throw new Error('An installation operation is already active.')
+      options.replaceIfIdle()
     }
   })
-  if (conflict)
-    throw await createInstallationBusyErrorAsync(
+  if (conflict) {
+    const error = await createInstallationBusyErrorAsync(
       conflict.otherRuntimePids,
       conflict.foreignProcessPids,
       signal
     )
+    if (error) throw error
+  }
 }
 
 export function bindInstallationExecutor(

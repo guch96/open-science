@@ -159,7 +159,8 @@ const createMessage = (): ChatSession['messages'][number] => ({
 const renderSidebar = async (
   sessions: ChatSession[],
   mobileMode = false,
-  credentialPendingSessionIds?: ReadonlySet<string>
+  credentialPendingSessionIds?: ReadonlySet<string>,
+  activeFilmSessionIds?: ReadonlySet<string>
 ): Promise<string> => {
   const { WorkspaceSidebar } = await import('./WorkspaceSidebar')
 
@@ -168,6 +169,7 @@ const renderSidebar = async (
       projectName="Example project"
       sessions={sessions}
       credentialPendingSessionIds={credentialPendingSessionIds}
+      activeFilmSessionIds={activeFilmSessionIds}
       activeSessionId={sessions[0]?.id}
       canCreateConversation
       canMutateConversations
@@ -851,8 +853,25 @@ describe('WorkspaceSidebar accessible render', () => {
     const { WorkspaceSidebar } = await import('./WorkspaceSidebar')
     const sessions = [
       createSession({ id: 'session-a', title: 'Active session', status: 'idle' }),
-      createSession({ id: 'session-b', title: 'Context target', status: 'idle' })
+      createSession({
+        id: 'session-b',
+        title: 'Context target',
+        status: 'idle',
+        contentLoaded: false
+      })
     ]
+    const firstRead = deferred<Record<string, never>>()
+    const status = vi.fn(() => firstRead.promise)
+    const start = vi.fn()
+    const loadOne = vi.fn(async () => ({
+      ...sessions[1],
+      conversationGraph: createDelegatedQuestionSession().conversationGraph
+    }))
+    vi.stubGlobal('api', {
+      ...window.api,
+      sessions: { ...window.api?.sessions, loadOne },
+      researchVideo: { status, start }
+    })
     const onOpenSession = vi.fn()
     const onRenameSession = vi.fn()
     const onTogglePin = vi.fn()
@@ -926,6 +945,7 @@ describe('WorkspaceSidebar accessible render', () => {
         'view-replay',
         'download-artifacts',
         'view-notebook',
+        'research-explanation',
         'archive',
         'delete'
       ])
@@ -935,7 +955,38 @@ describe('WorkspaceSidebar accessible render', () => {
       expect(document.body.querySelector('[data-slot="session-hover-preview"]')).toBeNull()
       expect(onOpenSession).not.toHaveBeenCalled()
 
-      const edit = menu?.querySelector<HTMLElement>('[data-action-id="edit"]')
+      const film = menu?.querySelector<HTMLElement>('[data-action-id="research-explanation"]')
+      expect(film?.nextElementSibling?.textContent).toBe('Export')
+      expect(status).not.toHaveBeenCalled()
+      await act(async () => {
+        await clickRadixMenuItem(film)
+      })
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')
+      expect(dialog?.querySelector('footer [role="status"]')?.textContent).toBe('Loading…')
+      expect(dialog?.textContent).toContain('Generating a film uses your token quota')
+      expect(dialog?.textContent).not.toContain('Start generation')
+      await act(async () => firstRead.resolve({}))
+      expect(dialog?.querySelector('footer [role="status"]')).toBeNull()
+      expect(dialog?.querySelector('footer')?.textContent).toContain('Start generation')
+      const scope = { projectId: sessions[1].projectId, sessionId: sessions[1].id }
+      expect(loadOne).toHaveBeenCalledExactlyOnceWith(scope)
+      expect(status).toHaveBeenCalledWith({
+        ...scope,
+        branchId: 'root-branch',
+        checkReadiness: true
+      })
+      expect(start).not.toHaveBeenCalled()
+      expect(onOpenSession).not.toHaveBeenCalled()
+      await act(async () =>
+        dialog?.querySelector<HTMLButtonElement>('[aria-label="Close"]')?.click()
+      )
+      await vi.waitFor(() => expect(document.activeElement).toBe(targetButton))
+      expect(document.querySelector('[role="dialog"]')).toBeNull()
+
+      await act(async () =>
+        targetRow.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+      )
+      const edit = document.querySelector<HTMLElement>('[data-action-id="edit"]')
       if (!edit) throw new Error('Edit action did not render')
       await clickRadixMenuItem(edit)
       expect(onRenameSession).toHaveBeenCalledWith(sessions[1])
@@ -956,6 +1007,7 @@ describe('WorkspaceSidebar accessible render', () => {
         'view-replay',
         'download-artifacts',
         'view-notebook',
+        'research-explanation',
         'archive',
         'delete'
       ])
@@ -966,6 +1018,7 @@ describe('WorkspaceSidebar accessible render', () => {
     } finally {
       act(() => root.unmount())
       container.remove()
+      vi.unstubAllGlobals()
     }
   })
 
@@ -1028,6 +1081,7 @@ describe('WorkspaceSidebar accessible render', () => {
         'discuss',
         'view-replay',
         'view-notebook',
+        'research-explanation',
         'archive',
         'delete'
       ])
@@ -2092,7 +2146,7 @@ describe('WorkspaceSidebar accessible render', () => {
     }
   })
 
-  it('keeps keyboard focus on project results after expanding the menu', async () => {
+  it('continues at the first newly shown project after expanding the menu', async () => {
     const otherProjects = Array.from({ length: 7 }, (_, index) => ({
       id: `project-${index + 1}`,
       name: `Project ${index + 1}`,
@@ -2114,7 +2168,7 @@ describe('WorkspaceSidebar accessible render', () => {
 
       expect(document.body.querySelectorAll('[data-project-id]')).toHaveLength(7)
       expect(document.activeElement).toBe(
-        document.body.querySelector<HTMLElement>('[data-project-id]')
+        document.body.querySelector<HTMLElement>('[data-project-id="project-6"]')
       )
     } finally {
       mounted.cleanup()
@@ -2601,13 +2655,14 @@ describe('WorkspaceSidebar accessible render', () => {
     expect(onDeleteSession).toHaveBeenCalledWith(sessions[0])
   })
 
-  it('renders Customize, Files, Compute, Literature, and Marketplace after New and wires their entries', async () => {
+  it('renders Customize, Files, Compute, Schedule, Literature, and Marketplace after New and wires their entries', async () => {
     const { WorkspaceSidebarView } = await import('./WorkspaceSidebar')
     const onOpenFiles = vi.fn()
     const onOpenLiterature = vi.fn()
     const onOpenMarketplace = vi.fn()
     const onOpenSettings = vi.fn()
     const onOpenCompute = vi.fn()
+    const onOpenSchedule = vi.fn()
     const tree = WorkspaceSidebarView({
       now: Date.now(),
       projectName: 'Example project',
@@ -2626,6 +2681,7 @@ describe('WorkspaceSidebar accessible render', () => {
       isLibraryOpen: true,
       isComputeOpen: false,
       onOpenCompute,
+      onOpenSchedule,
       onOpenSession: vi.fn(),
       onRenameSession: vi.fn(),
       canDownloadArtifacts: true,
@@ -2647,10 +2703,11 @@ describe('WorkspaceSidebar accessible render', () => {
     const literatureButton = buttons.find((button) => getTextContent(button).trim() === 'Library')
     const computeButton = buttons.find((button) => getTextContent(button).trim() === 'Compute')
 
+    const scheduleButton = buttons.find((button) => getTextContent(button).trim() === 'Schedule')
     const marketplaceButton = buttons.find(
       (button) => getTextContent(button).trim() === 'Resource center'
     )
-    expect(buttons[newButtonIndex + 5]).toBe(marketplaceButton)
+    expect(buttons[newButtonIndex + 6]).toBe(marketplaceButton)
     expect(marketplaceButton?.props['aria-controls']).toBe('right-panel')
     expect(marketplaceButton?.props['aria-pressed']).toBe(true)
     expect(marketplaceButton?.props.title).toBe('Resource center')
@@ -2664,7 +2721,10 @@ describe('WorkspaceSidebar accessible render', () => {
     expect(buttons[newButtonIndex + 1]).toBe(customizeButton)
     expect(buttons[newButtonIndex + 2]).toBe(filesButton)
     expect(buttons[newButtonIndex + 3]).toBe(computeButton)
-    expect(buttons[newButtonIndex + 4]).toBe(literatureButton)
+    expect(buttons[newButtonIndex + 4]).toBe(scheduleButton)
+    expect(buttons[newButtonIndex + 5]).toBe(literatureButton)
+    ;(scheduleButton?.props.onClick as () => void)()
+    expect(onOpenSchedule).toHaveBeenCalledOnce()
     expect(collectElements(customizeButton).some((element) => element.type === Toolbox)).toBe(true)
     expect(filesButton?.props['aria-controls']).toBe('right-panel')
     expect(filesButton?.props['aria-pressed']).toBe(true)
@@ -2900,6 +2960,269 @@ describe('WorkspaceSidebar accessible render', () => {
     await sidebar.selectSession('recent')
     expect(recents?.open).toBe(true)
     sidebar.cleanup()
+  })
+
+  it('keeps an older idle conversation in Active while its research film is generating', async () => {
+    const session = createSession({
+      id: 'film-session',
+      title: 'Old film conversation',
+      status: 'idle',
+      updatedAt: 1
+    })
+
+    const generating = await renderSidebar([session], false, undefined, new Set([session.id]))
+    expect(generating).toContain('>Active<')
+    expect(generating.indexOf('Old film conversation')).toBeGreaterThan(
+      generating.indexOf('>Active<')
+    )
+    expect(generating).toContain('aria-label="Research film in progress"')
+
+    const settled = await renderSidebar([session], false, undefined, new Set())
+    expect(settled).not.toContain('>Active<')
+    expect(settled).not.toContain('aria-label="Research film in progress"')
+    expect(settled.indexOf('Old film conversation')).toBeGreaterThan(settled.indexOf('>Recents<'))
+  })
+
+  it('rests the film mark in the session actions slot and yields it whenever the actions show', async () => {
+    const session = createSession({
+      id: 'film-slot',
+      title: 'Film slot conversation',
+      status: 'idle',
+      updatedAt: 1
+    })
+    const container = document.createElement('div')
+    container.innerHTML = await renderSidebar([session], false, undefined, new Set([session.id]))
+    const row = container.querySelector('[data-session-id="film-slot"]')
+    const mark = row?.querySelector<HTMLElement>('[aria-label="Research film in progress"]')
+    const actions = row?.querySelector<HTMLButtonElement>(
+      '[aria-label="Open actions for Film slot conversation"]'
+    )
+
+    // The flow slot stays reserved so a long title truncates identically in every state.
+    expect(mark?.getAttribute('class')).toContain('mr-7')
+    expect(mark?.classList).toContain('translate-x-7')
+    expect(mark?.getAttribute('title')).toBe('Research film in progress')
+    expect(mark?.classList).toContain('group-hover:translate-x-0')
+    expect(mark?.classList).toContain('group-has-[:focus-visible]:translate-x-0')
+    expect(mark?.classList).not.toContain('group-focus-within:translate-x-0')
+    expect(mark?.classList).toContain('group-has-[[data-state=open]]:translate-x-0')
+
+    // The mark slides out before the actions fade in and returns only after they fade out.
+    expect(mark?.classList).toContain('transition-transform')
+    expect(mark?.classList).toContain('delay-200')
+    expect(mark?.classList).toContain('group-hover:delay-0')
+    expect(mark?.classList).toContain('group-has-[:focus-visible]:delay-0')
+    expect(actions?.classList).toContain('group-hover:delay-100')
+    expect(actions?.classList).toContain('group-has-[:focus-visible]:delay-100')
+
+    // Pointer hits stay disabled while the resting film mark owns the slot and sync with reveal.
+    expect(actions?.classList).toContain('pointer-events-none')
+    expect(actions?.classList).toContain('transition-[opacity,pointer-events]')
+    expect(actions?.classList).toContain('[transition-behavior:allow-discrete]')
+    expect(actions?.classList).toContain('[transition-duration:200ms,0ms]')
+    expect(actions?.classList).toContain('group-hover:duration-200')
+    expect(actions?.classList).toContain('group-hover:pointer-events-auto')
+    expect(actions?.classList).toContain('group-has-[:focus-visible]:pointer-events-auto')
+    expect(actions?.classList).toContain('focus-visible:pointer-events-auto')
+    expect(actions?.classList).toContain('data-[state=open]:pointer-events-auto')
+
+    // Reduced motion swaps both instantly, which is what keeps them from overlapping.
+    expect(mark?.classList).toContain('motion-reduce:transition-none')
+    expect(actions?.classList).toContain('motion-reduce:transition-none')
+
+    // Mouse focus on the row must not pin the action button open; keyboard focus-visible does.
+    expect(actions?.classList).toContain('opacity-0')
+    expect(actions?.classList).not.toContain('opacity-100')
+    expect(actions?.classList).not.toContain('group-focus-within:opacity-100')
+    expect(actions?.classList).toContain('group-hover:opacity-100')
+    expect(actions?.classList).toContain('group-has-[:focus-visible]:opacity-100')
+    expect(actions?.classList).toContain('focus-visible:opacity-100')
+    expect(actions?.classList).toContain('data-[state=open]:opacity-100')
+  })
+
+  it('keeps the film mark beside the always-visible mobile actions', async () => {
+    const session = createSession({
+      id: 'film-mobile',
+      title: 'Film mobile conversation',
+      status: 'idle',
+      updatedAt: 1
+    })
+    const container = document.createElement('div')
+    container.innerHTML = await renderSidebar([session], true, undefined, new Set([session.id]))
+    const row = container.querySelector('[data-session-id="film-mobile"]')
+    const mark = row?.querySelector<HTMLElement>('[aria-label="Research film in progress"]')
+    const actions = row?.querySelector<HTMLButtonElement>(
+      '[aria-label="Open actions for Film mobile conversation"]'
+    )
+
+    expect(mark?.getAttribute('aria-label')).toBe('Research film in progress')
+    expect(mark?.getAttribute('class')).not.toContain('translate-x-7')
+    expect(mark?.getAttribute('class')).not.toContain('group-hover:')
+    expect(mark?.getAttribute('class')).not.toContain('transition-transform')
+    expect(actions?.classList).toContain('opacity-100')
+    expect(actions?.getAttribute('class')).not.toContain('delay-100')
+  })
+
+  it('leaves rows without a sharing film mark on the existing action reveal', async () => {
+    const plain = createSession({ id: 'plain', title: 'Plain conversation', updatedAt: 1 })
+    const imported = createSession({
+      id: 'import-film',
+      title: 'Imported film conversation',
+      status: 'idle',
+      contentLoaded: false,
+      updatedAt: 1
+    })
+    const container = document.createElement('div')
+    container.innerHTML = await renderSidebar(
+      [plain, imported],
+      false,
+      undefined,
+      new Set([imported.id])
+    )
+
+    const plainActions = container.querySelector(
+      '[aria-label="Open actions for Plain conversation"]'
+    )
+    expect(plainActions?.getAttribute('class')).not.toContain('delay-100')
+    expect(plainActions?.getAttribute('class')).not.toContain('motion-reduce:transition-none')
+    expect(
+      container.querySelector('[data-session-id="plain"] [aria-label="Research film in progress"]')
+    ).toBeNull()
+
+    // An imported row keeps its read-only lock at the row end, so the mark does not move.
+    const importedRow = container.querySelector('[data-session-id="import-film"]')
+    const importedMark = importedRow?.querySelector('[aria-label="Research film in progress"]')
+    expect(importedMark?.getAttribute('class')).toContain('mr-7')
+    expect(importedMark?.getAttribute('class')).not.toContain('translate-x-7')
+    expect(importedMark?.getAttribute('class')).not.toContain('group-hover:')
+    expect(
+      importedRow
+        ?.querySelector('[aria-label="Open actions for Imported film conversation"]')
+        ?.getAttribute('class')
+    ).not.toContain('delay-100')
+  })
+
+  it.each([
+    { platform: 'darwin', key: 'Meta', eventInit: { metaKey: true }, hint: '⌘1' },
+    { platform: 'linux', key: 'Control', eventInit: { ctrlKey: true }, hint: 'Ctrl+1' }
+  ])(
+    'moves the shortcut pill beside the film mark instead of over it on $platform',
+    async ({ platform, key, eventInit, hint }) => {
+      const originalApi = window.api
+      window.api = { ...originalApi, platform } as never
+      const session = createSession({
+        id: 'film-shortcut',
+        title: 'Film shortcut conversation',
+        status: 'idle',
+        updatedAt: 1
+      })
+      const { WorkspaceSidebar } = await import('./WorkspaceSidebar')
+      const container = document.createElement('div')
+      const root = createRoot(container)
+
+      try {
+        await act(async () => {
+          root.render(
+            <WorkspaceSidebar
+              projectName="Example project"
+              sessions={[session]}
+              activeFilmSessionIds={new Set([session.id])}
+              activeSessionId={undefined}
+              canCreateConversation
+              canMutateConversations
+              canDeleteConversations
+              onGoHome={vi.fn()}
+              onNewConversation={vi.fn()}
+              isFilesOpen={false}
+              onOpenFiles={vi.fn()}
+              onOpenSession={vi.fn()}
+              onRenameSession={vi.fn()}
+              canDownloadArtifacts
+              onDownloadArtifacts={vi.fn()}
+              onViewNotebook={vi.fn()}
+              onExportSession={vi.fn()}
+              onTogglePin={vi.fn()}
+              onDeleteSession={vi.fn()}
+              onOpenSettings={vi.fn()}
+              onOpenProjectSettings={vi.fn()}
+              onNewProject={vi.fn()}
+              canDownloadProjectArtifacts
+              onDownloadProjectArtifacts={vi.fn()}
+            />
+          )
+        })
+        const row = (): Element | null =>
+          container.querySelector('[data-session-id="film-shortcut"]')
+        const mark = (): HTMLElement | null =>
+          row()?.querySelector<HTMLElement>('[aria-label="Research film in progress"]') ?? null
+        const pill = (): HTMLElement | null => row()?.querySelector<HTMLElement>('kbd') ?? null
+        const actions = (): HTMLButtonElement | null =>
+          row()?.querySelector<HTMLButtonElement>(
+            '[aria-label="Open actions for Film shortcut conversation"]'
+          ) ?? null
+
+        // No pill: the mark holds the actions slot.
+        expect(pill()).toBeNull()
+        expect(mark()?.classList).toContain('translate-x-7')
+
+        await act(async () => {
+          window.dispatchEvent(new KeyboardEvent('keydown', { key, ...eventInit, bubbles: true }))
+        })
+        // The pill owns the row end in flex flow, so the mark drops `mr-7` and both get
+        // independent space without overlapping (even for wider `Ctrl+1` hints).
+        expect(pill()?.textContent).toBe(hint)
+        expect(pill()?.classList).toContain('relative')
+        expect(pill()?.classList).toContain('shrink-0')
+        expect(pill()?.classList).toContain('-mr-1')
+        expect(pill()?.classList).not.toContain('absolute')
+        expect(mark()?.getAttribute('class')).not.toContain('mr-7')
+        expect(mark()?.getAttribute('class')).not.toContain('translate-x-7')
+        expect(mark()?.getAttribute('class')).not.toContain('transition-transform')
+        expect(actions()?.classList).toContain('invisible')
+
+        await act(async () => {
+          window.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }))
+        })
+        expect(pill()).toBeNull()
+        expect(mark()?.classList).toContain('mr-7')
+        expect(mark()?.classList).toContain('translate-x-7')
+        expect(actions()?.classList).not.toContain('invisible')
+      } finally {
+        act(() => root.unmount())
+        window.api = originalApi
+      }
+    }
+  )
+
+  it('keeps pinned and imported precedence while a research film is generating', async () => {
+    const pinned = createSession({
+      id: 'pinned-film',
+      title: 'Pinned film conversation',
+      status: 'idle',
+      pinned: true,
+      updatedAt: 1
+    })
+    const imported = createSession({
+      id: 'import-film',
+      title: 'Imported film conversation',
+      status: 'idle',
+      contentLoaded: false,
+      updatedAt: 1
+    })
+
+    const html = await renderSidebar(
+      [pinned, imported],
+      false,
+      undefined,
+      new Set([pinned.id, imported.id])
+    )
+
+    expect(html).toContain('>Pinned<')
+    expect(html).toContain('>Imported research<')
+    expect(html).not.toContain('>Active<')
+    expect(html.indexOf('Pinned film conversation')).toBeLessThan(
+      html.indexOf('>Imported research<')
+    )
   })
 
   it('presents an in-memory credential request as an active Session needing input', async () => {
@@ -3139,6 +3462,8 @@ describe('WorkspaceSidebar accessible render', () => {
           )
         })
         expect(container.querySelectorAll('kbd')).toHaveLength(9)
+        const actions = container.querySelector('[aria-label="Open actions for Pinned target"]')
+        expect(actions?.classList.contains('invisible')).toBe(true)
         expect(container.textContent).toContain(hint)
 
         const openEvent = new KeyboardEvent('keydown', {
@@ -3155,6 +3480,7 @@ describe('WorkspaceSidebar accessible render', () => {
           window.dispatchEvent(new KeyboardEvent('keyup', { key: modifierKey, bubbles: true }))
         })
         expect(container.querySelector('kbd')).toBeNull()
+        expect(actions?.classList.contains('invisible')).toBe(false)
 
         onOpenSession.mockClear()
         dialog = document.createElement('div')

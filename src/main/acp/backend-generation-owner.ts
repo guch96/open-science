@@ -14,6 +14,7 @@ type AcpBackendGenerationAttemptIdentity = Readonly<{
 export type AcpBackendGenerationView = Readonly<{
   framework: AgentFramework
   providerId?: string
+  providerName?: string
   backendId?: string
   modelRoute?: AgentModelRoute
   providerContinuityToken?: string
@@ -33,6 +34,7 @@ export type AcpBackendGenerationView = Readonly<{
     supportsImageInput: boolean
   }>
   adapter: Readonly<{
+    codeBuddySharedSite?: ResolvedAgentBackend['codeBuddySharedSite']
     claudeConfigDir?: string
     codexHome?: string
     nativeMcpEnabled: boolean
@@ -82,6 +84,7 @@ const generationView = (backend: ResolvedAgentBackend): AcpBackendGenerationView
 
   return Object.freeze({
     framework: backend.framework,
+    ...(backend.providerName ? { providerName: backend.providerName } : {}),
     ...(backend.providerId ? { providerId: backend.providerId } : {}),
     ...(backend.backendId ? { backendId: backend.backendId } : {}),
     ...(backend.modelRoute ? { modelRoute: backend.modelRoute } : {}),
@@ -108,6 +111,7 @@ const generationView = (backend: ResolvedAgentBackend): AcpBackendGenerationView
       supportsImageInput: backend.supportsImageInput === true
     }),
     adapter: Object.freeze({
+      ...(backend.codeBuddySharedSite && { codeBuddySharedSite: backend.codeBuddySharedSite }),
       ...(claudeConfigDir ? { claudeConfigDir } : {}),
       ...(codexHome ? { codexHome } : {}),
       nativeMcpEnabled: backend.framework.id !== 'codex' || !bridgeMcpAliasesEnabled,
@@ -167,6 +171,7 @@ export class AcpBackendGenerationOwner {
     this.currentView = Object.freeze({
       ...this.currentView,
       providerId: target.providerId,
+      providerName: target.providerName,
       backendId: target.backendId,
       modelRoute: target.route,
       session: Object.freeze(session),

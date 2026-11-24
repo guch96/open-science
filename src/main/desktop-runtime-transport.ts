@@ -1,3 +1,4 @@
+import { researchVideoExportTimeout } from '@aipoch/research-film/contracts'
 import { processBirthIdentity } from './process-birth-identity'
 import {
   serviceStopDeadline,
@@ -13,7 +14,10 @@ import { runtimePayloadTransfers } from './runtime-payload-transfers'
 import { randomUUID } from 'node:crypto'
 import { WebSocket } from 'ws'
 import { z } from 'zod'
-import { toApplicationCommandErrorEnvelope } from '../shared/application-command-contract'
+import {
+  isSessionReadChannel,
+  toApplicationCommandErrorEnvelope
+} from '../shared/application-command-contract'
 import type { ArtifactReproducibilityCheckState } from '../shared/artifact-reproducibility'
 import type { OfficePreviewRuntimeState } from '../shared/office-preview'
 import type { MarketplaceDownloadProgress } from '../shared/specialist-marketplace'
@@ -94,6 +98,12 @@ const requestSchema = z.discriminatedUnion('kind', [
     id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     channel: z.string().min(1).max(256)
   }),
+  z
+    .object({
+      kind: z.literal('cancel'),
+      id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+    })
+    .strict(),
   webRpcRequestSchema.extend({
     kind: z.literal('invoke'),
     id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -290,6 +300,7 @@ export async function startDesktopRuntimeTransport(options: {
           number,
           { clientId?: string; resolve(value: unknown): void; reject(error: Error): void }
         >()
+        const hostOperations = new Map<number, AbortController>()
         const invokeNative = async (
           request: DesktopNativeOperation,
           clientId?: string,
@@ -314,20 +325,23 @@ export async function startDesktopRuntimeTransport(options: {
             const result = await new Promise<unknown>((resolve, reject) => {
               native.set(id, { clientId, resolve, reject })
               signal?.addEventListener('abort', abort, { once: true })
-              timer = setTimeout(
-                abort,
-                request.operation === 'research-video-mp4'
-                  ? 3_601_000
-                  : request.operation === 'conversation-pdf'
-                    ? request.timeoutMs + 1000
-                    : request.operation === 'reviewer-render'
-                      ? 121_000
-                      : request.operation.startsWith('notification-') ||
-                          request.operation === 'office-frame' ||
-                          request.operation === 'process-memory'
-                        ? 5_000
-                        : 300_000
-              )
+              // Film review can queue behind several exports. Its native owner times each
+              // active inspection; caller cancellation and disconnect also cancel queued work.
+              if (request.operation !== 'research-video-check')
+                timer = setTimeout(
+                  abort,
+                  request.operation === 'research-video-mp4'
+                    ? researchVideoExportTimeout(request.resolution ?? '720p', 3600) + 120_000
+                    : request.operation === 'conversation-pdf'
+                      ? request.timeoutMs + 1000
+                      : request.operation === 'reviewer-render'
+                        ? 121_000
+                        : request.operation.startsWith('notification-') ||
+                            request.operation === 'office-frame' ||
+                            request.operation === 'process-memory'
+                          ? 5_000
+                          : 300_000
+                )
               send(socket, stringifyRpcJson({ kind: 'native-request', id, clientId, request }))
             })
             signal?.throwIfAborted()
@@ -375,6 +389,11 @@ export async function startDesktopRuntimeTransport(options: {
               new DesktopRuntimeDisconnectedError('Desktop disconnected during a native operation.')
             )
           native.clear()
+          for (const operation of hostOperations.values())
+            operation.abort(
+              new DesktopRuntimeDisconnectedError('Desktop disconnected during a host operation.')
+            )
+          hostOperations.clear()
           for (const release of approvalPresence.values()) release()
           approvalPresence.clear()
           callers.clear()
@@ -402,6 +421,10 @@ export async function startDesktopRuntimeTransport(options: {
           } catch {
             socket.close(1008, 'Invalid desktop request.')
             cleanup()
+            return
+          }
+          if (message.kind === 'cancel') {
+            hostOperations.get(message.id)?.abort(new Error('Desktop host operation cancelled.'))
             return
           }
           if (message.kind === 'bootstrap') {
@@ -454,7 +477,11 @@ export async function startDesktopRuntimeTransport(options: {
                   host: '127.0.0.1',
                   credentialStore: 'os'
                 },
-                rpcCapabilities: [RUNTIME_PAYLOAD_CAPABILITY, 'resource-activity-v1'],
+                rpcCapabilities: [
+                  RUNTIME_PAYLOAD_CAPABILITY,
+                  'resource-activity-v1',
+                  'host-cancel-v1'
+                ],
                 pid: process.pid,
                 ...(options.startup ? { startup: options.startup.getState() } : {}),
                 rpcProtocolVersion: WEB_RPC_PROTOCOL_VERSION,
@@ -561,7 +588,10 @@ export async function startDesktopRuntimeTransport(options: {
                 protocolVersion: WEB_RPC_PROTOCOL_VERSION,
                 ok: false,
                 error: {
-                  code: 'command-failed',
+                  code:
+                    'channel' in request && isSessionReadChannel(request.channel)
+                      ? 'response-too-large'
+                      : 'command-failed',
                   message: 'Desktop runtime response exceeds the transport byte budget.'
                 }
               })
@@ -808,6 +838,8 @@ export async function startDesktopRuntimeTransport(options: {
           if (request.kind === 'host-invoke' || request.kind === 'session-event-read') {
             pending.add(request.id)
             const owner = requiresControl ? controller : undefined
+            const operationController = new AbortController()
+            hostOperations.set(request.id, operationController)
             const operation = (async () => {
               try {
                 const eventRead = request.kind === 'session-event-read'
@@ -818,7 +850,8 @@ export async function startDesktopRuntimeTransport(options: {
                   eventRead ? 'sessions:load-one' : request.channel,
                   hostCaller,
                   request.args,
-                  request
+                  request,
+                  operationController.signal
                 )
                 respond({
                   protocolVersion: WEB_RPC_PROTOCOL_VERSION,
@@ -833,6 +866,7 @@ export async function startDesktopRuntimeTransport(options: {
                 })
               } finally {
                 pending.delete(request.id)
+                hostOperations.delete(request.id)
               }
             })()
             owner?.operations.add(operation)

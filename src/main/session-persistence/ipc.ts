@@ -1,3 +1,9 @@
+import {
+  loadSessionHistoryPageRequestSchema,
+  sessionReadIpcResult,
+  type LoadSessionHistoryPageRequest,
+  type SessionHistoryPage
+} from '../../shared/session-history'
 import { desktopShellInteraction } from '../desktop-interaction'
 import type { RuntimeWriterOwner } from './runtime-writer'
 import type { AcpRuntimeEvent } from '../../shared/acp'
@@ -51,6 +57,9 @@ type SessionPersistenceBackend = {
   list?: () => Promise<ListSessionSummariesResult>
   loadUsage?: () => Promise<SessionUsageProjection>
   loadOne: (request: LoadSessionRequest) => Promise<PersistedChatSession | undefined>
+  loadHistoryPage?: (
+    request: LoadSessionHistoryPageRequest
+  ) => Promise<SessionHistoryPage | undefined>
   saveSession: (
     session: PersistedChatSession,
     options?: SaveSessionOptions,
@@ -74,6 +83,9 @@ type SessionPersistenceHandlers = {
   list: () => Promise<ListSessionSummariesResult>
   loadUsage: () => Promise<SessionUsageProjection>
   loadOne: (request: LoadSessionRequest) => Promise<PersistedChatSession | undefined>
+  loadHistoryPage: (
+    request: LoadSessionHistoryPageRequest
+  ) => Promise<SessionHistoryPage | undefined>
   saveSession: (
     session: PersistedChatSession,
     options?: SaveSessionOptions,
@@ -218,6 +230,9 @@ const createSessionPersistenceHandlersWithAttributionAuthority = (
       return repository.loadUsage()
     },
     loadOne: (request) => repository.loadOne(request),
+    loadHistoryPage: (request) =>
+      repository.loadHistoryPage?.(loadSessionHistoryPageRequestSchema.parse(request)) ??
+      Promise.resolve(undefined),
     saveSession: async (session, options, authority) => {
       const durable = await repository.loadOne({
         projectId: session.projectId,
@@ -373,7 +388,10 @@ const registerSessionPersistenceIpcHandlers = (
     withDataRootWrite(() => handlers.searchMessages(request))
   )
   ipcMainHandle('sessions:load-one', (_event, request: LoadSessionRequest) =>
-    withDataRootWrite(() => handlers.loadOne(request))
+    sessionReadIpcResult(() => withDataRootWrite(() => handlers.loadOne(request)))
+  )
+  ipcMainHandle('sessions:load-history-page', (_event, request: LoadSessionHistoryPageRequest) =>
+    sessionReadIpcResult(() => withDataRootWrite(() => handlers.loadHistoryPage(request)))
   )
   ipcMainHandle('sessions:list-runtime-terminal-failures', () =>
     handlers.listRuntimeTerminalFailures()

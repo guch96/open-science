@@ -1,7 +1,7 @@
 import { animate } from 'motion'
 import { PanelLeft, PanelRight } from 'lucide-react'
 import { FocusScope } from '@radix-ui/react-focus-scope'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { PanelImperativeHandle, PanelSize } from 'react-resizable-panels'
 
@@ -49,6 +49,51 @@ const captureResizeHandle = (event: React.PointerEvent<HTMLDivElement>): void =>
   event.currentTarget.setPointerCapture(event.pointerId)
 }
 
+const useNotebookOutputDragWidth = (
+  separatorRef: React.RefObject<HTMLDivElement | null>,
+  enabled: boolean
+): void => {
+  useEffect(() => {
+    const separator = separatorRef.current
+    if (!separator || !enabled) return
+
+    let frozen: HTMLElement[] = []
+    const release = (): void => {
+      for (const output of frozen) output.style.removeProperty('--notebook-output-drag-width')
+      frozen = []
+    }
+    const sync = (): void => {
+      if (separator.dataset.separator !== 'active') {
+        release()
+        return
+      }
+
+      // Read all widths before writing any. The resize library also starts drags in the
+      // separator's extended hit area, so follow its actual active state.
+      const outputs = separator.parentElement?.querySelectorAll<HTMLElement>(
+        '#right-panel details[open] .notebook-large-text-output'
+      )
+      if (!outputs || frozen.length) return
+      const widths = Array.from(outputs, (output) => output.getBoundingClientRect().width)
+      outputs.forEach((output, index) => {
+        if (widths[index] <= 0) return
+        output.style.setProperty('--notebook-output-drag-width', `${widths[index]}px`)
+        frozen.push(output)
+      })
+    }
+    const observer = new MutationObserver(sync)
+    observer.observe(separator, { attributes: true, attributeFilter: ['data-separator'] })
+    window.addEventListener('blur', release)
+    window.addEventListener('pointercancel', release, true)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('blur', release)
+      window.removeEventListener('pointercancel', release, true)
+      release()
+    }
+  }, [enabled, separatorRef])
+}
+
 const OPEN_DIALOG_SELECTOR =
   '[role="dialog"]:not([data-state="closed"]), [role="alertdialog"]:not([data-state="closed"])'
 
@@ -75,6 +120,7 @@ type AnimatedResizablePanelOptions = {
 }
 
 type AnimatedResizablePanel = {
+  animationTarget: number | null
   panelRef: React.RefObject<PanelImperativeHandle | null>
   separatorRef: React.RefObject<HTMLDivElement | null>
   minSize: string
@@ -100,7 +146,7 @@ const useAnimatedResizablePanel = ({
   const animationRevisionRef = useRef(0)
   const lastOpenSizeRef = useRef(defaultOpenSize)
   const hasSyncedInitialSizeRef = useRef(false)
-  const [isMinSizeRelaxed, setIsMinSizeRelaxed] = useState(false)
+  const [animationTarget, setAnimationTarget] = useState<number | null>(null)
 
   const animatePanelSize = useCallback(
     (
@@ -139,12 +185,12 @@ const useAnimatedResizablePanel = ({
           if (direction === 'opening') lastOpenSizeRef.current = targetSize
           animationDirectionRef.current = null
           animationRef.current = null
-          setIsMinSizeRelaxed(false)
+          setAnimationTarget(null)
           return
         }
 
         animationDirectionRef.current = direction
-        setIsMinSizeRelaxed(true)
+        setAnimationTarget(targetSize)
         animationFrameRef.current = window.requestAnimationFrame(() => {
           if (animationRevisionRef.current !== revision) return
           animationFrameRef.current = null
@@ -161,7 +207,7 @@ const useAnimatedResizablePanel = ({
               if (didResize && direction === 'opening') lastOpenSizeRef.current = targetSize
               animationDirectionRef.current = null
               animationRef.current = null
-              setIsMinSizeRelaxed(false)
+              setAnimationTarget(null)
             }
           })
         })
@@ -258,7 +304,8 @@ const useAnimatedResizablePanel = ({
   return {
     panelRef,
     separatorRef,
-    minSize: isMinSizeRelaxed ? PANEL_COLLAPSED_SIZE_CSS : `${minOpenSize}%`,
+    animationTarget,
+    minSize: animationTarget !== null ? PANEL_COLLAPSED_SIZE_CSS : `${minOpenSize}%`,
     onResize
   }
 }
@@ -268,7 +315,7 @@ type WorkspacePanelLayout = {
   mobileSidebar: {
     isOpen: boolean
     open: () => void
-    close: () => void
+    close: () => HTMLElement | null
   }
   sidebar: AnimatedResizablePanel & {
     state: ResizablePanelState
@@ -298,7 +345,8 @@ type PreviewPanelLayoutPort = {
 // Presents one layout contract to WorkspacePage across desktop and mobile surfaces.
 const useWorkspacePanelLayout = (
   previewPort: PreviewPanelLayoutPort,
-  mobileSidebarDialogRef: React.RefObject<HTMLDivElement | null>
+  mobileSidebarDialogRef: React.RefObject<HTMLDivElement | null>,
+  sidebarOpenRequest?: number
 ): WorkspacePanelLayout => {
   const { t } = useTranslation()
   const [sidebarState, setSidebarState] = useState<ResizablePanelState>('open')
@@ -322,11 +370,26 @@ const useWorkspacePanelLayout = (
     rememberMobileSidebarReturnFocus()
     setIsMobileSidebarOpen(true)
   }, [rememberMobileSidebarReturnFocus])
-  const closeMobileSidebar = useCallback((): void => setIsMobileSidebarOpen(false), [])
+  const closeMobileSidebar = useCallback((): HTMLElement | null => {
+    setIsMobileSidebarOpen(false)
+    return mobileSidebarReturnFocusRef.current
+  }, [])
   const toggleMobileSidebar = useCallback((): void => {
     if (!isMobileSidebarOpen) rememberMobileSidebarReturnFocus()
     setIsMobileSidebarOpen(!isMobileSidebarOpen)
   }, [isMobileSidebarOpen, rememberMobileSidebarReturnFocus])
+  const seenSidebarRequest = useRef<number | undefined>(undefined)
+  const openSidebarForNavigation = useEffectEvent(() => {
+    if (isMobile) {
+      if (!isMobileSidebarOpen) openMobileSidebar()
+    } else setSidebarState('open')
+  })
+  useLayoutEffect(() => {
+    if (sidebarOpenRequest === undefined || sidebarOpenRequest === seenSidebarRequest.current)
+      return
+    seenSidebarRequest.current = sidebarOpenRequest
+    openSidebarForNavigation()
+  }, [sidebarOpenRequest])
   const toggleSidebar = useCallback(
     (): void => setSidebarState((state) => (state === 'collapsed' ? 'open' : 'collapsed')),
     []
@@ -342,6 +405,7 @@ const useWorkspacePanelLayout = (
 
   const sidebar = useAnimatedResizablePanel({
     panelState: sidebarState,
+    requestVersion: sidebarOpenRequest,
     defaultOpenSize: SIDEBAR_PANEL_DEFAULT_SIZE,
     minOpenSize: SIDEBAR_PANEL_MIN_OPEN_SIZE,
     onPanelStateChange: setSidebarState,
@@ -361,6 +425,24 @@ const useWorkspacePanelLayout = (
     onPanelStateChange: previewPort.syncState,
     collapseFocusTargetRef: previewToggleRef
   })
+
+  useLayoutEffect(() => {
+    if (isMobile || !preview.animationTarget) return
+    const group = preview.separatorRef.current?.parentElement
+    const panel = group?.querySelector<HTMLElement>(':scope > #right-panel-resizable')
+    if (!group || !panel) return
+    // Separators take space outside the percentage-based panel allocation.
+    const available = Array.from(group.querySelectorAll(':scope > [data-panel]')).reduce(
+      (sum, child) => sum + child.getBoundingClientRect().width,
+      0
+    )
+    const width = (available * preview.animationTarget) / 100
+    if (!width) return
+    panel.style.setProperty('--notebook-opening-extra-width', `calc(${width}px - 100cqw)`)
+    return () => {
+      panel.style.removeProperty('--notebook-opening-extra-width')
+    }
+  }, [isMobile, preview.animationTarget, preview.separatorRef])
 
   useEffect(() => {
     sidebarStateRef.current = sidebarState
@@ -539,6 +621,7 @@ const useWorkspacePanelLayout = (
 }
 
 type WorkspacePanelLayoutProps = {
+  sidebarOpenRequest?: number
   hasPreviewItems: boolean
   isPreviewPresentationActive?: boolean
   restoredPlanResponder?: RestoredPlanResponder
@@ -552,7 +635,10 @@ type WorkspacePanelLayoutProps = {
     }
     sidebarToggleRef: React.RefObject<HTMLButtonElement | null>
   }) => React.ReactNode
-  renderMobileSidebar: (options: { isOpen: boolean; close: () => void }) => React.ReactNode
+  renderMobileSidebar: (options: {
+    isOpen: boolean
+    close: () => HTMLElement | null
+  }) => React.ReactNode
   renderConversation: (options: {
     isPreviewPanelCollapsed: boolean
     togglePreviewPanel: () => void
@@ -562,6 +648,7 @@ type WorkspacePanelLayoutProps = {
 
 // Adapts the controller to the desktop split view and mobile drawer/sheet without owning page data.
 const WorkspacePanelLayout = ({
+  sidebarOpenRequest,
   hasPreviewItems,
   isPreviewPresentationActive = true,
   restoredPlanResponder,
@@ -576,8 +663,11 @@ const WorkspacePanelLayout = ({
   const mobileSidebarDialogRef = useRef<HTMLDivElement | null>(null)
   const { isMobile, mobileSidebar, sidebar, preview } = useWorkspacePanelLayout(
     previewPort,
-    mobileSidebarDialogRef
+    mobileSidebarDialogRef,
+    sidebarOpenRequest
   )
+
+  useNotebookOutputDragWidth(preview.separatorRef, !isMobile && preview.state === 'open')
 
   return (
     <>

@@ -214,6 +214,34 @@ describe('electron renderer contract adapter', () => {
     expect(parseLiteratureDeletionError(result)).toEqual(diagnostic)
   })
 
+  it.each(['sessions.loadOne', 'sessions.loadHistoryPage'])(
+    'preserves the read failure across the Electron bridge for %s',
+    async (name) => {
+      const port = createPort()
+      const error = { code: 'response-too-large', message: 'Response exceeds the limit.' }
+      port.invoke.mockResolvedValue({ ok: false, error })
+      await expect(
+        createElectronRendererContractAdapter(port).invoke(name, { projectId: 'p', sessionId: 's' })
+      ).rejects.toEqual(error)
+    }
+  )
+
+  it('preserves package import contention across the Electron context bridge', async () => {
+    const error = toApplicationCommandErrorEnvelope(
+      new ApplicationCommandError(
+        'session-package-busy',
+        'A Session package operation is already in progress.'
+      )
+    )
+    const port = createPort()
+    port.invoke.mockResolvedValue({ ok: false, error })
+    const adapter = createElectronRendererContractAdapter(port)
+
+    await expect(
+      adapter.invoke('sessions.importPackage', {}, { useCase: 'research' })
+    ).rejects.toEqual(error)
+  })
+
   it('rejects lifecycle-managed contracts from generic send and subscribe paths', () => {
     const port = createPort()
     const adapter = createElectronRendererContractAdapter(port)
@@ -530,4 +558,15 @@ it('passes a catalog slug to main without treating it as a dropped File', async 
   )
   expect(port.getPathForFile).not.toHaveBeenCalled()
   expect(port.invoke).toHaveBeenCalledWith('sessions:import-package', {}, { useCase: 'research' })
+})
+
+it('preserves schedule error codes as plain rejections through contextBridge', async () => {
+  const port = createPort()
+  const error = { code: 'schedule-limit-reached', message: 'Run limit reached.' }
+  port.invoke.mockResolvedValue({ ok: false, error })
+  const rejected = await createElectronRendererContractAdapter(port)
+    .invoke('schedules.edit', {})
+    .catch((error) => error)
+  expect(rejected).toEqual(error)
+  expect(rejected).not.toBeInstanceOf(Error)
 })

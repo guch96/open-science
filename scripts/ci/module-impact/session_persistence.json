@@ -94,7 +94,23 @@
     "src/main/session-persistence/turn-outcome-authority.test.ts",
     "src/main/session-persistence/flush-protocol.ts",
     "src/main/session-persistence/conversation-pdf-electron.ts",
-    "src/main/session-persistence/deferred-recovery.ts"
+    "src/main/session-persistence/history-legacy-formats.integration.test.ts",
+    "src/main/session-persistence/history-projection.test.ts",
+    "src/main/session-persistence/history-projection.ts",
+    "src/main/session-persistence/history-repository.integration.test.ts",
+    "src/main/session-persistence/official-science-runtime-storage.benchmark.test.ts",
+    "src/main/session-persistence/official-science-storage.benchmark.test.ts",
+    "src/main/session-persistence/projection-incremental.test.ts",
+    "src/main/session-persistence/realistic-session-storage.benchmark.test.ts",
+    "src/main/session-persistence/repository-journal-compatibility.test.ts",
+    "src/main/session-persistence/repository-pending-import.test.ts",
+    "src/main/session-persistence/runtime-business-records.integration.test.ts",
+    "src/main/session-persistence/runtime-session-file.test.ts",
+    "src/main/session-persistence/runtime-session-file.ts",
+    "src/main/session-persistence/runtime-session-mutation.ts",
+    "src/main/session-persistence/session-storage-benchmark.test.ts",
+    "src/main/session-persistence/deferred-recovery.ts",
+    "src/main/session-persistence/web-evidence.integration.test.ts"
   ],
   "interfacePaths": [
     "src/main/session-persistence/coordinator.ts",
@@ -124,6 +140,8 @@
     "src/main/session-persistence/runtime-writer.ts",
     "src/main/session-persistence/flush-protocol.ts",
     "src/main/session-persistence/conversation-pdf-electron.ts",
+    "src/main/session-persistence/runtime-session-file.ts",
+    "src/main/session-persistence/runtime-session-mutation.ts",
     "src/main/session-persistence/deferred-recovery.ts"
   ],
   "consumerModules": ["project_lifecycle"],
@@ -171,7 +189,20 @@
       "src/main/session-persistence/terminal-live-projection.test.ts",
       "src/main/session-persistence/turn-outcome-reconciliation.test.ts",
       "src/main/session-persistence/attention-projection.test.ts",
-      "src/main/session-persistence/turn-outcome-authority.test.ts"
+      "src/main/session-persistence/turn-outcome-authority.test.ts",
+      "src/main/session-persistence/history-legacy-formats.integration.test.ts",
+      "src/main/session-persistence/history-projection.test.ts",
+      "src/main/session-persistence/history-repository.integration.test.ts",
+      "src/main/session-persistence/official-science-runtime-storage.benchmark.test.ts",
+      "src/main/session-persistence/official-science-storage.benchmark.test.ts",
+      "src/main/session-persistence/projection-incremental.test.ts",
+      "src/main/session-persistence/realistic-session-storage.benchmark.test.ts",
+      "src/main/session-persistence/repository-journal-compatibility.test.ts",
+      "src/main/session-persistence/repository-pending-import.test.ts",
+      "src/main/session-persistence/runtime-business-records.integration.test.ts",
+      "src/main/session-persistence/runtime-session-file.test.ts",
+      "src/main/session-persistence/session-storage-benchmark.test.ts",
+      "src/main/session-persistence/web-evidence.integration.test.ts"
     ],
     "contract": [
       "src/shared/session-persistence.test.ts",
@@ -626,7 +657,8 @@
       "src/main/desktop-runtime-transport-diagnostics.test.ts",
       "src/main/desktop-runtime-session-size.integration.test.ts",
       "src/main/notebook-payload.integration.test.ts",
-      "src/main/web-service/session-payload.integration.test.ts"
+      "src/main/web-service/session-payload.integration.test.ts",
+      "src/main/composition/session-package-lifecycle.integration.test.ts"
     ]
   },
   "capabilityOverlays": ["windows_sensitive", "e2e_regressions", "e2e_delegation"],

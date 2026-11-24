@@ -4,19 +4,19 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
 import { createI18nTestStub } from '../../../../../test/i18n-test-stub'
-import { createComputeOutputPreviewKey, type JobSummary } from '../../../../shared/compute'
-import type { NotebookProjectActivity } from '../../../../shared/notebook'
-import {
-  createProjectComputePreviewItem,
-  createInitialPreviewWorkbenchState,
-  usePreviewWorkbenchStore
-} from '@/stores/preview-workbench-store'
+import type { JobSummary } from '../../../../shared/compute'
+import { WEB_CALLER_LOCATION_ATTRIBUTE } from '../../../../shared/web-caller-location'
+import type { NotebookProjectResources } from '../../../../shared/notebook-resources'
 import { useNavigationStore } from '@/stores/navigation-store'
 import { useSessionStore, type ChatSession } from '@/stores/session-store'
 import { ProjectComputeInbox } from './ProjectComputeInbox'
-import { PreviewPanelSurface } from './PreviewPanel'
 
 vi.mock('react-i18next', () => createI18nTestStub())
+vi.mock('./ComputeProcessMonitor', () => ({
+  ComputeProcessMonitor: ({ isActive }: { isActive?: boolean }) => (
+    <div data-testid="process-monitor" data-active={isActive} />
+  )
+}))
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const session = (id: string, title: string): ChatSession => ({
@@ -52,10 +52,37 @@ const computeJob = (overrides: Partial<JobSummary> = {}): JobSummary => ({
   ...overrides
 })
 
+const notebookResources = (label = 'research'): NotebookProjectResources => ({
+  groups: [
+    {
+      projectId: 'project-1',
+      sessionId: 'session-current',
+      revision: 'original',
+      resources: [
+        {
+          id: 'python-original',
+          group: 'kernel',
+          kind: 'python',
+          environment: label,
+          phase: 'running',
+          memory: { metric: 'rss', coverage: 'unknown', sampledAt: Date.now() }
+        }
+      ]
+    }
+  ],
+  pendingDecisions: [],
+  releases: []
+})
+const emptyResources = (): NotebookProjectResources => ({
+  groups: [],
+  pendingDecisions: [],
+  releases: []
+})
+
 describe('Project Compute inbox', () => {
   let root: Root | undefined
 
-  type Snapshot = NotebookProjectActivity | JobSummary[]
+  type Snapshot = NotebookProjectResources | JobSummary[]
   type Listener = (event: { projectId: string; project_id: string }) => void
   const refreshHarness = async (
     source: 'notebook' | 'jobs'
@@ -68,23 +95,10 @@ describe('Project Compute inbox', () => {
     unsubscribe: Mock
   }> => {
     vi.useFakeTimers()
+    if (source === 'notebook')
+      document.documentElement.setAttribute(WEB_CALLER_LOCATION_ATTRIBUTE, 'remote')
     const snapshot = (label: string): Snapshot =>
-      source === 'jobs'
-        ? [computeJob({ intent: label })]
-        : {
-            kernels: [
-              {
-                projectId: 'project-1',
-                sessionId: 'session-current',
-                processKey: 'python:research',
-                kind: 'python',
-                environment: label,
-                status: 'running',
-                lastActivityAt: Date.now()
-              }
-            ],
-            backgroundRuns: []
-          }
+      source === 'jobs' ? [computeJob({ intent: label })] : notebookResources(label)
     const read = vi.fn<() => Promise<Snapshot>>().mockResolvedValue(snapshot('initial result'))
     const listeners: Array<(event: { projectId: string; project_id: string }) => void> = []
     const unsubscribe = vi.fn()
@@ -95,10 +109,9 @@ describe('Project Compute inbox', () => {
     Object.assign(window, {
       api: {
         notebook: {
-          getProjectActivity:
-            source === 'notebook'
-              ? read
-              : vi.fn().mockResolvedValue({ kernels: [], backgroundRuns: [] }),
+          getProjectActivity: vi.fn().mockResolvedValue({ kernels: [], backgroundRuns: [] }),
+          getProjectResources:
+            source === 'notebook' ? read : vi.fn().mockResolvedValue(emptyResources()),
           onChanged: source === 'notebook' ? subscribe : () => () => undefined
         },
         compute: {
@@ -130,6 +143,7 @@ describe('Project Compute inbox', () => {
   afterEach(() => {
     act(() => root?.unmount())
     document.body.innerHTML = ''
+    document.documentElement.removeAttribute(WEB_CALLER_LOCATION_ATTRIBUTE)
     vi.unstubAllGlobals()
     vi.useRealTimers()
   })
@@ -172,7 +186,7 @@ describe('Project Compute inbox', () => {
       h.read.mockRejectedValue(new Error('offline'))
       await act(async () => h.emit())
       await act(async () => vi.advanceTimersByTimeAsync(60_000))
-      expect(h.read).toHaveBeenCalledTimes(5)
+      expect(h.read).toHaveBeenCalledTimes(source === 'notebook' ? 16 : 5)
       h.read.mockResolvedValue(h.snapshot('reconnected result'))
       await act(async () => h.emit())
       expect(h.container.textContent).toContain('reconnected result')
@@ -211,7 +225,7 @@ describe('Project Compute inbox', () => {
     })
   })
 
-  it('shows only the latest Kernel per Session with its matching active background Run', async () => {
+  it('shows every environment with all managed background Runs in its Session', async () => {
     const getProjectActivity = vi.fn().mockResolvedValue({
       kernels: [
         {
@@ -278,6 +292,25 @@ describe('Project Compute inbox', () => {
         api: {
           notebook: {
             getProjectActivity,
+            getProjectResources: vi.fn().mockResolvedValue({
+              ...notebookResources(),
+              groups: [
+                {
+                  ...notebookResources().groups[0],
+                  resources: [
+                    ...notebookResources().groups[0].resources,
+                    {
+                      id: 'r-original',
+                      group: 'kernel',
+                      kind: 'r',
+                      environment: 'previous',
+                      phase: 'idle',
+                      memory: { metric: 'rss', coverage: 'unknown', sampledAt: Date.now() }
+                    }
+                  ]
+                }
+              ]
+            }),
             onChanged: vi.fn(() => () => undefined)
           },
           compute: { jobsList, onJobUpdated: vi.fn(() => () => undefined) }
@@ -291,100 +324,121 @@ describe('Project Compute inbox', () => {
     await act(async () => root?.render(<ProjectComputeInbox />))
     await vi.waitFor(() => expect(container.textContent).toContain('Donor-level QC'))
 
-    expect(container.textContent).toContain('Active kernels')
+    expect(container.textContent).toContain('Notebook resources')
     expect(container.textContent).toContain('Current analysis')
     expect(container.textContent).toContain('Python · research')
     expect(container.textContent).toContain('Running')
     expect(container.textContent).toContain('Background')
-    expect(container.textContent).not.toContain('R · previous')
-    expect(container.textContent).not.toContain('Earlier donor QC')
-    expect(container.textContent).not.toContain('Previous export')
+    expect(container.textContent).toContain('R · previous')
+    expect(container.textContent).toContain('Earlier donor QC')
+    expect(container.textContent).toContain('Previous export')
     expect(container.textContent).not.toContain('Unattached task')
     expect(container.textContent).not.toContain('Background tasks')
     expect(getProjectActivity).toHaveBeenCalledWith({ projectId: 'project-1' })
   })
 
-  it('opens another Session’s archived text and downloads an unsupported file from the Compute tab', async () => {
-    const h = await refreshHarness('jobs')
-    vi.useRealTimers()
-    const path = 'hpc/job-1/featured/results.bin'
-    const textPath = 'hpc/job-2/featured/report.txt'
-    h.read.mockResolvedValue([
-      computeJob({ harvested_at: Date.now(), featured_files: [path] }),
-      computeJob({ job_id: 'job-2', harvested_at: Date.now(), featured_files: [textPath] })
-    ])
-    const content = 'Archived result from the other Session'
-    const acquire = vi
-      .fn()
-      .mockResolvedValue({ id: 'output', size: content.length, url: 'https://preview.test/output' })
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(content, { status: 206 }))
-    )
-    const save = vi.fn().mockResolvedValue({ saved: true })
-    Object.assign(window.api, {
-      saveManagedFile: save,
-      previewResources: { acquire, release: vi.fn().mockResolvedValue(undefined) },
-      getRuntimeVersions: () => ({ electron: '39.8.10' })
-    })
-    usePreviewWorkbenchStore.setState(createInitialPreviewWorkbenchState())
-    usePreviewWorkbenchStore.getState().activateProject('project-1')
-    usePreviewWorkbenchStore.getState().upsertAndActivateItem(createProjectComputePreviewItem())
-    await act(async () => root?.render(<PreviewPanelSurface />))
-    const output = [...h.container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'results.bin'
-    )
-    expect(output).toBeDefined()
-    await act(async () => output!.click())
-    const key = createComputeOutputPreviewKey({
-      projectId: 'project-1',
-      sessionId: 'session-attention',
-      jobId: 'job-1',
-      path
-    })
-    const workbench = usePreviewWorkbenchStore.getState()
-    expect(workbench.items.find((item) => item.id === workbench.activeItemId)).toMatchObject({
-      projectId: 'project-1',
-      sessionId: 'session-attention',
-      path: key,
-      source: 'compute-output'
-    })
-    expect(useSessionStore.getState().selectedSessionId).toBe('session-current')
-    expect(h.container.textContent).toContain("This file type isn't supported for preview")
-    expect(h.container.querySelector('[aria-label^="Edit "]')).toBeNull()
-    const download = h.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Download results.bin"]'
-    )
-    expect(download).not.toBeNull()
-    await act(async () => download!.click())
-    expect(save).toHaveBeenCalledWith({
-      source: 'compute-output',
-      path: key,
-      suggestedName: 'results.bin'
-    })
-    const computeTab = [...h.container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
-      (tab) => tab.textContent === 'Compute'
-    )
-    await act(async () => computeTab!.click())
-    const textFile = [...h.container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'report.txt'
-    )
-    await act(async () => textFile!.click())
-    expect(h.container.textContent).toContain(content)
-    expect(h.container.querySelector('[aria-label="Edit report.txt"]')).toBeNull()
-    expect(acquire).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        projectId: 'project-1',
-        sessionId: 'session-attention',
-        source: 'compute-output',
-        path: createComputeOutputPreviewKey({
+  it('preserves remote kernel activity without mounting local process controls', async () => {
+    document.documentElement.setAttribute(WEB_CALLER_LOCATION_ATTRIBUTE, 'remote')
+    const getProjectActivity = vi.fn().mockResolvedValue({
+      kernels: [
+        {
           projectId: 'project-1',
-          sessionId: 'session-attention',
-          jobId: 'job-2',
-          path: textPath
-        })
+          sessionId: 'session-current',
+          processKey: 'python:research',
+          kind: 'python',
+          environment: 'research',
+          status: 'running',
+          lastActivityAt: Date.now()
+        }
+      ],
+      backgroundRuns: []
+    })
+    const jobsList = vi.fn().mockResolvedValue([])
+    const openSession = vi.fn()
+    useNavigationStore.setState({ openSession })
+    vi.stubGlobal(
+      'window',
+      Object.assign(window, {
+        api: {
+          sessions: { list: vi.fn().mockResolvedValue({ sessions: [] }) },
+          notebook: {
+            getProjectActivity,
+            getProjectResources: vi.fn().mockResolvedValue(emptyResources()),
+            onChanged: vi.fn(() => () => undefined)
+          },
+          compute: { jobsList, onJobUpdated: vi.fn(() => () => undefined) }
+        }
       })
     )
+    const container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+
+    await act(async () => root?.render(<ProjectComputeInbox />))
+    await vi.waitFor(() => expect(container.textContent).toContain('Active kernels'))
+
+    expect(container.querySelector('[data-testid="process-monitor"]')).toBeNull()
+    expect(container.textContent).toContain('Current analysis')
+    expect(container.textContent).toContain('Python · research')
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Go to Session"]')
+    expect(button).toBeTruthy()
+    act(() => button?.click())
+    expect(openSession).toHaveBeenCalledWith('project-1', 'session-current', 'user')
+  })
+
+  it('forwards retained preview activity to the local process monitor', async () => {
+    const jobsList = vi.fn().mockResolvedValue([])
+    vi.stubGlobal(
+      'window',
+      Object.assign(window, {
+        api: {
+          sessions: { list: vi.fn().mockResolvedValue({ sessions: [] }) },
+          notebook: {
+            getProjectActivity: vi.fn().mockResolvedValue({ kernels: [], backgroundRuns: [] }),
+            getProjectResources: vi.fn().mockResolvedValue(emptyResources()),
+            onChanged: vi.fn(() => () => undefined)
+          },
+          compute: { jobsList, onJobUpdated: vi.fn(() => () => undefined) }
+        }
+      })
+    )
+    const container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+
+    await act(async () => root?.render(<ProjectComputeInbox isActive={false} />))
+    expect(
+      container.querySelector('[data-testid="process-monitor"]')?.getAttribute('data-active')
+    ).toBe('false')
+    await act(async () => root?.render(<ProjectComputeInbox isActive />))
+    expect(
+      container.querySelector('[data-testid="process-monitor"]')?.getAttribute('data-active')
+    ).toBe('true')
+  })
+
+  it('does not show archived output files in the Compute tab', async () => {
+    const h = await refreshHarness('jobs')
+    h.read.mockResolvedValueOnce([
+      computeJob({
+        harvested_at: Date.now(),
+        featured_files: ['hpc/job-1/featured/result.csv'],
+        hidden_files: ['hpc/job-1/hidden/run.log']
+      }),
+      computeJob({
+        job_id: 'job-2',
+        intent: 'Second job',
+        harvested_at: Date.now(),
+        featured_files: ['hpc/job-2/featured/single.txt']
+      })
+    ])
+    await act(async () => h.emit())
+
+    expect(h.container.textContent).toContain('Fit remote model')
+    expect(h.container.textContent).toContain('Second job')
+    expect(h.container.textContent).not.toContain('result.csv')
+    expect(h.container.textContent).not.toContain('run.log')
+    expect(h.container.textContent).not.toContain('single.txt')
+    expect(h.container.textContent).not.toContain('Outputs')
   })
 
   it('distinguishes identically named targets in compact and expanded layouts', async () => {
@@ -411,7 +465,7 @@ describe('Project Compute inbox', () => {
     const buttons = [...h.container.querySelectorAll('button')].map((button) =>
       button.textContent?.trim()
     )
-    expect(buttons.filter((name) => name === 'report.csv')).toHaveLength(1)
+    expect(buttons).not.toContain('report.csv')
     expect(buttons).not.toContain('unpublished.csv')
     const labels = ['Ray Jobs · Research', 'Modal Sandboxes · Research', 'Legacy']
     const details = h.container.querySelectorAll('details')
@@ -449,7 +503,11 @@ describe('Project Compute inbox', () => {
       'window',
       Object.assign(window, {
         api: {
-          notebook: { getProjectActivity, onChanged: vi.fn(() => () => undefined) },
+          notebook: {
+            getProjectActivity,
+            getProjectResources: vi.fn().mockResolvedValue(notebookResources()),
+            onChanged: vi.fn(() => () => undefined)
+          },
           compute: { jobsList, onJobUpdated: vi.fn(() => () => undefined) }
         }
       })
@@ -463,14 +521,17 @@ describe('Project Compute inbox', () => {
 
     expect(
       Array.from(container.querySelectorAll('[role="columnheader"]'), (cell) => cell.textContent)
-    ).toEqual(['Session', 'Kernel', 'Status', 'Task', 'Session', 'Target', 'Status', 'Updated'])
+    ).toEqual(['Task', 'Session', 'Target', 'Status', 'Updated'])
     const navigationButtons = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button[aria-label="Go to Session"]')
     )
     expect(navigationButtons).toHaveLength(2)
     expect(navigationButtons.every((button) => button.title === 'Go to Session')).toBe(true)
     expect(navigationButtons.every((button) => button.textContent === '')).toBe(true)
-    const jobDetails = container.querySelector('details')
+    const jobDetails = container
+      .querySelector('[role="columnheader"]')
+      ?.closest('section')
+      ?.querySelector('details')
     expect(jobDetails?.open).toBe(false)
     act(() => jobDetails?.querySelector('summary')?.click())
     expect(jobDetails?.open).toBe(true)
@@ -496,6 +557,7 @@ describe('Project Compute inbox', () => {
         api: {
           notebook: {
             getProjectActivity: vi.fn().mockResolvedValue({ kernels: [], backgroundRuns: [] }),
+            getProjectResources: vi.fn().mockResolvedValue(emptyResources()),
             onChanged: vi.fn(() => () => undefined)
           },
           compute: { jobsList, onJobUpdated: vi.fn(() => () => undefined) }
@@ -544,6 +606,7 @@ describe('Project Compute inbox', () => {
         api: {
           notebook: {
             getProjectActivity: vi.fn().mockResolvedValue({ kernels: [], backgroundRuns: [] }),
+            getProjectResources: vi.fn().mockResolvedValue(emptyResources()),
             onChanged: vi.fn(() => () => undefined)
           },
           compute: {
@@ -613,7 +676,11 @@ describe('Project Compute inbox', () => {
       'window',
       Object.assign(window, {
         api: {
-          notebook: { getProjectActivity, onChanged: onNotebookChanged },
+          notebook: {
+            getProjectActivity,
+            getProjectResources: vi.fn().mockResolvedValue(emptyResources()),
+            onChanged: onNotebookChanged
+          },
           compute: { jobsList, onJobUpdated }
         }
       })

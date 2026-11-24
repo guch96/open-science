@@ -1,3 +1,4 @@
+import { CODEBUDDY_VERSION } from '../../src/main/settings/codebuddy-install'
 import {
   observeFixtureService,
   cleanupObservedFixtureService,
@@ -14,6 +15,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   writeFile
 } from 'node:fs/promises'
@@ -37,11 +39,9 @@ import {
   type ElectronContentTraceArtifact
 } from '../../scripts/performance/electron-content-trace'
 import { terminateProcessTree } from '../../src/main/process-tree'
-import {
-  readProcessTable,
-  readProcessTree,
-  selectProcessTree
-} from '../../scripts/performance/process-snapshot'
+import { listWindowsProcesses, windowsProcessIsAlive } from '../../src/main/windows-process-query'
+import { terminateWindowsProcessesByIdentity } from '../../src/main/process-tree-windows'
+import { processBirthIdentity } from '../../src/main/process-birth-identity'
 import { createProjectDbClient } from '../../src/main/projects/prisma-client'
 import { NotebookRunRepository } from '../../src/main/notebook/repository'
 import { createRootNotebookLane } from '../../src/main/notebook/lane-identity'
@@ -55,23 +55,59 @@ import type { UpdateStatus } from '../../src/shared/update'
 import { prepareBrandStorageFixture } from './brand-storage-data'
 import { captureNativeQuitDialog } from './native-quit-dialog'
 import type { PackageOperationSnapshot } from '../../src/shared/session-package'
+import { sessionJournalPath } from '../../src/main/session-persistence/journal'
 import { createSessionFile, type PersistedChatSession } from '../../src/shared/session-persistence'
 
 const APP_ROOT = resolve(process.cwd())
 const FAKE_AGENT_PATH = resolve(APP_ROOT, 'e2e', 'fixtures', 'fake-opencode.mjs')
 const FAKE_REMOTEIT_PATH = resolve(APP_ROOT, 'e2e', 'fixtures', 'fake-remoteit.cjs')
 const FAKE_PROVIDER_NAME = 'Electron E2E provider'
+const WINDOWS_PROCESS_BIRTH_PREFIX = 'windows-creation-time:'
+
+const windowsProcessBirth = (pid: number): string | undefined => {
+  const identity = processBirthIdentity(pid)
+  return identity?.startsWith(WINDOWS_PROCESS_BIRTH_PREFIX)
+    ? identity.slice(WINDOWS_PROCESS_BIRTH_PREFIX.length)
+    : undefined
+}
+
+const windowsProcessBirthIfLive = (pid: number): string | undefined => {
+  if (!windowsProcessIsAlive(pid)) return undefined
+  const birth = windowsProcessBirth(pid)
+  if (birth !== undefined) return birth
+  if (!windowsProcessIsAlive(pid)) return undefined
+  throw new Error(`Electron crash simulation cannot read the birth identity for PID ${pid}.`)
+}
+
+const windowsProcessIdentityMatches = (pid: number, birth: string): boolean => {
+  return windowsProcessBirthIfLive(pid) === birth
+}
 type E2eWindowMode = 'hidden' | 'normal'
 
 const assertPackagedElectronIdentity = (
-  evidence: { packaged: boolean; appPath: string; executable: string; version: string },
+  evidence: {
+    packaged: boolean
+    appPath: string
+    executable: string
+    version: string
+    appImage?: string
+    appDir?: string
+  },
   environment: NodeJS.ProcessEnv = process.env
 ): void => {
   const revision = environment.OPEN_SCIENCE_E2E_EXPECTED_BUILD_SHA
+  const expected = environment.OPEN_SCIENCE_E2E_EXECUTABLE
+  const mounted =
+    process.platform === 'linux' &&
+    expected?.endsWith('.AppImage') &&
+    evidence.appImage === expected &&
+    evidence.appDir &&
+    evidence.executable === join(evidence.appDir, 'open-science') &&
+    evidence.appPath === join(evidence.appDir, 'resources/app.asar')
   if (
     !evidence.packaged ||
     !evidence.appPath.endsWith('app.asar') ||
-    evidence.executable !== environment.OPEN_SCIENCE_E2E_EXECUTABLE ||
+    (!mounted && evidence.executable !== expected) ||
     (revision && !evidence.version.endsWith(`-nightly.g${revision.slice(0, 7)}`))
   ) {
     throw new Error(`Packaged Electron identity mismatch: ${JSON.stringify(evidence)}`)
@@ -302,7 +338,7 @@ const settlesWithin = async (promise: Promise<void>, timeoutMs: number): Promise
 
 // Allow platform-specific shutdown latency while keeping each cleanup phase bounded.
 const CLEANUP_GRACEFUL_TIMEOUT_MS =
-  process.platform === 'win32' ? 30_000 : process.platform === 'darwin' ? 20_000 : 10_000
+  process.platform === 'win32' ? 30_000 : process.platform === 'darwin' ? 30_000 : 10_000
 const CLEANUP_FORCED_TIMEOUT_MS =
   process.platform === 'win32' ? 30_000 : process.platform === 'darwin' ? 20_000 : 10_000
 
@@ -333,6 +369,7 @@ const closeElectronApplicationForCleanup = async (
 }
 
 type BrandState = {
+  resources: string
   name: string
   packaged: boolean
   profile: string
@@ -349,6 +386,7 @@ type NativeMenuProbe = {
 }
 type ElectronApp = {
   addCleanupAudit: (audit: () => Promise<void>) => void
+  isolatedDataRoot: () => Promise<string>
   captureBrandState: () => Promise<BrandState>
   restartWithBrandFixture: (
     mode: 'legacy' | 'legacy-config' | 'custom' | 'onboarding'
@@ -360,6 +398,11 @@ type ElectronApp = {
   authenticatedWebUrl: () => Promise<string>
   allowRendererConsoleError: (text: string) => void
   captureMainLog: (name: string) => Promise<string>
+  captureWebNetworkState: () => Promise<{
+    platform: string
+    versions: Record<string, string | undefined>
+    proxyDirectives: Record<string, string[]>
+  }>
   armDelegatedHandoffCleanupSabotage: (childName: string) => Promise<void>
   beginResourceProfile: (options?: RuntimeResourceProfilerOptions) => Promise<void>
   capturePersistedLocaleNativeQuitDialog: () => Promise<{
@@ -384,6 +427,7 @@ type ElectronApp = {
   createTestDirectory: (name: string) => Promise<string>
   holdNextFakeSessionCreate: () => Promise<{ started: string; release: string; closed: string }>
   configureSessionPackageDialogs: (options?: { availableBytes?: number }) => Promise<string>
+  observeSensitiveExportDialog: () => Promise<JSHandle<Electron.MessageBoxOptions[]>>
   restartWithPackage: (path: string) => Promise<Page>
   emitPackageFileOpen: (path: string) => Promise<void>
   emitBrowserImport: (url: string) => Promise<void>
@@ -405,6 +449,7 @@ type ElectronApp = {
   readFakeAgentPrompts: () => Promise<
     readonly Readonly<{ sessionId: string; role: 'main' | 'delegate'; prompt: string }>[]
   >
+  close: (gracefulTimeoutMs?: number) => Promise<void>
   requestMainWindowClose: () => Promise<void>
   restoreDelegatedHandoffCleanup: (childName: string) => Promise<void>
   emitPreviewContextMenuAtCssPoint: (point: { x: number; y: number }) => Promise<void>
@@ -415,6 +460,11 @@ type ElectronApp = {
   }) => Promise<Page>
   restartAfterCrash: (options?: { force?: boolean }) => Promise<Page>
   restartWithCorruptHistoricalSessionFile: (projectId: string) => Promise<Page>
+  restartWithRawSessionFileFixture: (fixture: {
+    projectId: string
+    sessionId: string
+    contents: string
+  }) => Promise<Page>
   restartWithSessionFixture: (
     session: PersistedChatSession,
     notebookRuns?: NotebookRunRecord[],
@@ -425,6 +475,7 @@ type ElectronApp = {
   captureResourceTimings: (prefix?: string) => Promise<void>
   sampleResourceProfileNow: () => Promise<void>
   setMainWindowSize: (width: number, height: number) => Promise<void>
+  setMainWindowSizeAndViewport: (width: number, height: number) => Promise<void>
   auditSourceAttachments: () => Promise<JSHandle<boolean[]>>
   pressSourcePreviewShortcut: (
     url: string,
@@ -460,9 +511,16 @@ const launchEnvironment = (
       'comspec',
       'temp',
       'tmp',
+      'tmpdir',
       'number_of_processors',
       'processor_architecture',
       'systemdrive',
+      // Keep the operator's transport policy while isolating provider credentials. Network
+      // acceptance must not silently become a direct connection when HOME is isolated.
+      'http_proxy',
+      'https_proxy',
+      'all_proxy',
+      'no_proxy',
       // Keep the test display and Secret Service session when isolating Linux HOME.
       'display',
       'xauthority',
@@ -484,6 +542,8 @@ const launchEnvironment = (
         !key.startsWith('OPEN_SCIENCE_E2E_') &&
         key !== 'OPEN_SCIENCE_WINDOWS_APPCONTAINER_CERT' &&
         key !== 'OPEN_SCIENCE_BROWSER_IMPORT_DISCOVERY_PORT' &&
+        key !== 'OPEN_SCIENCE_ALLOW_MULTI_INSTANCE' &&
+        key !== 'OPEN_SCIENCE_WEB_PORT' &&
         key !== 'OPEN_SCIENCE_MICROMAMBA_BIN'
       )
         delete environment[key]
@@ -703,6 +763,15 @@ const launchOpenScience = async (
     ...electronLaunchTarget(userDataRoot),
     args: [...electronLaunchTarget(userDataRoot).args, ...(packagePath ? [packagePath] : [])],
     cwd: fakeRemoteItEnabled ? fakeRemoteItRoot : APP_ROOT,
+    // Opt-in recordings stay outside disposable fixture profiles for before/after evidence.
+    ...(process.env.OPEN_SCIENCE_E2E_VIDEO_DIR
+      ? {
+          recordVideo: {
+            dir: process.env.OPEN_SCIENCE_E2E_VIDEO_DIR,
+            size: { width: 1280, height: 900 }
+          }
+        }
+      : {}),
     env: {
       ...environment,
       ...(process.platform === 'darwin' && !process.env.OPEN_SCIENCE_E2E_EXECUTABLE
@@ -946,14 +1015,15 @@ class ElectronAppHarness implements ElectronApp {
           : 'open-science-electron-e2e-'
       )
     )
+    const canonicalRoot = await realpath(testRoot)
     const harness = new ElectronAppHarness(
       testRoot,
       {
         fakeAgentBinRoot: join(testRoot, 'fake-agent-bin'),
         fakeRemoteItRoot: join(testRoot, 'fake-remoteit'),
         fakeRemoteItState: join(testRoot, 'fake-remoteit-state.json'),
-        storageRoot: join(testRoot, 'storage'),
-        userDataRoot: join(testRoot, 'electron-profile')
+        storageRoot: join(canonicalRoot, 'storage'),
+        userDataRoot: join(canonicalRoot, 'electron-profile')
       },
       windowMode
     )
@@ -1247,14 +1317,17 @@ class ElectronAppHarness implements ElectronApp {
     settingsPath: string,
     model: string,
     credentialProfile?: string,
-    framework: AgentFrameworkId = 'opencode'
+    framework: AgentFrameworkId = 'open-science-agent'
   ): Promise<Page> {
     const source = JSON.parse(await readFile(settingsPath, 'utf8'))
     const provider = source.providers?.find(
       (candidate: { id: string }) => candidate.id === source.activeProviderId
     )
-    if (!provider?.keyRef || source.activeModel !== model || !source.opencodePath) {
-      throw new Error('The requested live model and OpenCode must already be configured.')
+    if (!provider?.keyRef || source.activeModel !== model) {
+      throw new Error('The requested live model must already be configured.')
+    }
+    if (framework === 'opencode' && !source.opencodePath) {
+      throw new Error('OpenCode must already be configured for the OpenCode fixture.')
     }
     if (process.platform === 'win32' && provider.keyRef.startsWith('enc:') && !credentialProfile) {
       throw new Error('Encrypted Windows credentials require the source Electron profile.')
@@ -1357,13 +1430,13 @@ class ElectronAppHarness implements ElectronApp {
       await writeFile(
         codebuddyPath,
         process.platform === 'win32'
-          ? `@echo off\r\nif "%~1"=="--version" (echo 2.138.0 & exit /b 0)\r\n"${process.execPath}" "${FAKE_AGENT_PATH}" %*\r\n`
-          : `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 2.138.0; exit 0; fi\nexec ${shellQuote(process.execPath)} ${shellQuote(FAKE_AGENT_PATH)} "$@"\n`,
+          ? `@echo off\r\nif "%~1"=="--version" (echo ${CODEBUDDY_VERSION} & exit /b 0)\r\n"${process.execPath}" "${FAKE_AGENT_PATH}" %*\r\n`
+          : `#!/bin/sh\nif [ "$1" = "--version" ]; then echo ${CODEBUDDY_VERSION}; exit 0; fi\nexec ${shellQuote(process.execPath)} ${shellQuote(FAKE_AGENT_PATH)} "$@"\n`,
         'utf8'
       )
       if (process.platform !== 'win32') await chmod(codebuddyPath, 0o755)
       settings.codebuddyPath = codebuddyPath
-      settings.codebuddyVersion = '2.138.0'
+      settings.codebuddyVersion = CODEBUDDY_VERSION
     }
     if (
       process.env.OPEN_SCIENCE_E2E_MICROMAMBA_EVENTS ||
@@ -1451,6 +1524,21 @@ class ElectronAppHarness implements ElectronApp {
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [archive] })
     }, archive)
     return archive
+  }
+
+  async observeSensitiveExportDialog(): Promise<JSHandle<Electron.MessageBoxOptions[]>> {
+    return this.runningApplication.evaluateHandle(({ dialog }) => {
+      const seen: Electron.MessageBoxOptions[] = []
+      const original = dialog.showMessageBox
+      dialog.showMessageBox = ((...args: unknown[]) => {
+        const options = args.at(-1) as Electron.MessageBoxOptions
+        if (!options.detail?.includes('SHA-256:')) return Reflect.apply(original, dialog, args)
+        seen.push({ ...options, signal: undefined })
+        dialog.showMessageBox = original
+        return Promise.resolve({ response: 1, checkboxChecked: false })
+      }) as typeof dialog.showMessageBox
+      return seen
+    })
   }
 
   async enableFakeRemoteIt(): Promise<Page> {
@@ -1636,6 +1724,22 @@ class ElectronAppHarness implements ElectronApp {
     )
   }
 
+  async setMainWindowSizeAndViewport(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height })
+    await this.setMainWindowSize(width, height)
+    await expect
+      .poll(() =>
+        this.runningApplication.evaluate(({ BrowserWindow }) => {
+          const bounds = BrowserWindow.getAllWindows()[0].getBounds()
+          return { width: bounds.width, height: bounds.height }
+        })
+      )
+      .toEqual({ width, height })
+    await expect
+      .poll(() => this.page.evaluate(() => ({ width: innerWidth, height: innerHeight })))
+      .toEqual({ width, height })
+  }
+
   async pressSourcePreviewShortcut(
     url: string,
     key: string,
@@ -1661,11 +1765,8 @@ class ElectronAppHarness implements ElectronApp {
   }
 
   async setMainWindowZoomFactor(factor: number): Promise<void> {
-    await this.runningApplication.evaluate(({ BrowserWindow }, nextFactor) => {
-      const mainWindow = BrowserWindow.getAllWindows()[0]
-      if (!mainWindow) throw new Error('Open-Science main window was not found.')
-      mainWindow.webContents.setZoomFactor(nextFactor)
-    }, factor)
+    const window = await this.runningApplication.browserWindow(this.page)
+    await window.evaluate((window, zoom) => window.webContents.setZoomFactor(zoom), factor)
   }
 
   async launchSecondInstance(): Promise<Page> {
@@ -1813,10 +1914,21 @@ class ElectronAppHarness implements ElectronApp {
     this.sabotagedDelegatedHandoffs.delete(childName)
   }
 
+  async isolatedDataRoot(): Promise<string> {
+    const dataRoot = await realpath(
+      await this.page.evaluate(async () => (await window.api.storage.getInfo()).dataRoot)
+    )
+    const offset = relative(await realpath(this.testRoot), dataRoot)
+    if (!offset || offset === '..' || offset.startsWith('..' + sep) || isAbsolute(offset))
+      throw new Error('Data root is outside the Electron fixture: ' + dataRoot)
+    return dataRoot
+  }
+
   async captureBrandState(): Promise<BrandState> {
     return this.runningApplication.evaluate(({ app, BrowserWindow, Menu }) => ({
       name: app.getName(),
       packaged: app.isPackaged,
+      resources: process.resourcesPath,
       profile: app.getPath('userData'),
       logs: app.getPath('logs'),
       title: BrowserWindow.getAllWindows()[0]?.getTitle() ?? '',
@@ -1858,29 +1970,91 @@ class ElectronAppHarness implements ElectronApp {
     if (!application) throw new Error('No Electron process is available to terminate.')
     const child = this.applicationProcess
     if (!child) throw new Error('No captured Electron child is available to terminate.')
-    const before =
-      process.platform === 'win32' && child.pid !== undefined
-        ? await readProcessTree(child.pid)
-        : undefined
+    if (process.platform === 'win32' && !child.pid)
+      throw new Error('Electron crash simulation has no launcher PID.')
+    const launcherBirth =
+      process.platform === 'win32' && child.pid ? windowsProcessBirthIfLive(child.pid) : undefined
+    if (
+      process.platform === 'win32' &&
+      child.pid &&
+      launcherBirth === undefined &&
+      windowsProcessIsAlive(child.pid)
+    )
+      throw new Error(
+        `Electron crash simulation cannot capture the launcher birth identity for PID ${child.pid}.`
+      )
     await this.stopElectronTrace(application)
+    const windowsProcesses =
+      process.platform === 'win32'
+        ? await application.evaluate(({ app }) => {
+            const { createRequire } = process.getBuiltinModule('node:module')
+            const { join } = process.getBuiltinModule('node:path')
+            const binding = createRequire(join(app.getAppPath(), 'package.json'))(
+              '@aipoch/process-tree-native'
+            ) as typeof import('@aipoch/process-tree-native')
+            // Capture the fixture app's live tree from inside its root before killing the launcher.
+            const members = (): number[] => [
+              process.pid,
+              ...binding.windowsCurrentProcessDescendants()
+            ]
+            const births = members().map(
+              (pid) => [pid, binding.getWindowsProcessCreationTime(pid)] as const
+            )
+            const current = new Set(members())
+            return births.filter(
+              (entry): entry is readonly [number, string] =>
+                entry[1] !== null &&
+                current.has(entry[0]) &&
+                binding.getWindowsProcessCreationTime(entry[0]) === entry[1]
+            )
+          })
+        : undefined
     const result = await terminateProcessTree(child, options.force ? 'SIGKILL' : undefined)
     let reaped = result.reaped
     // Windows termination is asynchronous even when taskkill succeeds. Playwright's child is
     // a shell, so wait for the observed Electron descendants too before reusing the profile lock.
-    if (process.platform === 'win32') {
-      reaped = false
-      if (before?.complete) {
-        const deadline = Date.now() + 10_000
-        do {
-          const after = await readProcessTable()
-          reaped =
-            after.complete &&
-            before.processes.every(
-              ({ pid }) => selectProcessTree(after.processes, pid).length === 0
-            )
-          if (reaped || Date.now() >= deadline) break
-          await new Promise((resolve) => setTimeout(resolve, 100))
-        } while (Date.now() < deadline)
+    if (windowsProcesses) {
+      const owned = new Map(windowsProcesses)
+      if (child.pid && launcherBirth !== undefined) owned.set(child.pid, launcherBirth)
+      const deadline = Date.now() + 10_000
+      // An intermediate launcher can exit before taskkill reaches every captured descendant.
+      await terminateWindowsProcessesByIdentity(new Map(owned), deadline)
+      for (;;) {
+        const observed = listWindowsProcesses()
+        const liveOwned = new Set<number>()
+        for (const [pid, birth] of owned) {
+          if (windowsProcessIdentityMatches(pid, birth)) liveOwned.add(pid)
+        }
+        const discovered = new Map<number, string>()
+        for (const { pid, ppid } of observed) {
+          if (owned.has(pid) || !liveOwned.has(ppid)) continue
+          const birth = windowsProcessBirthIfLive(pid)
+          if (birth === undefined) continue
+          const current = listWindowsProcesses().find(
+            (candidate) => candidate.pid === pid && candidate.ppid === ppid
+          )
+          if (!current) continue
+          const parentBirth = owned.get(ppid)
+          if (parentBirth === undefined || !windowsProcessIdentityMatches(ppid, parentBirth))
+            continue
+          if (!windowsProcessIdentityMatches(pid, birth)) continue
+          owned.set(pid, birth)
+          discovered.set(pid, birth)
+        }
+        if (discovered.size) await terminateWindowsProcessesByIdentity(discovered, deadline)
+        const remaining = observed.filter(({ pid }) => {
+          const birth = owned.get(pid)
+          return birth !== undefined && windowsProcessIdentityMatches(pid, birth)
+        })
+        if (remaining.length === 0) {
+          reaped = true
+          break
+        }
+        if (Date.now() >= deadline)
+          throw new Error(
+            `Electron crash simulation still observes PIDs ${remaining.map(({ pid, ppid, executablePath }) => JSON.stringify({ pid, ppid, executablePath })).join(', ')}.`
+          )
+        await new Promise((resolve) => setTimeout(resolve, 100))
       }
     }
     if (!reaped) throw new Error('Electron crash simulation did not reap the process tree.')
@@ -1911,8 +2085,12 @@ class ElectronAppHarness implements ElectronApp {
       const directory = join(this.roots.storageRoot, 'sessions', fixture.projectId)
       await mkdir(directory, { recursive: true })
       await writeFile(
-        join(directory, `${fixture.id}.json`),
-        JSON.stringify(createSessionFile(fixture))
+        join(directory, `${fixture.id}.jsonl`),
+        JSON.stringify({
+          type: 'session_snapshot',
+          journalVersion: 1,
+          document: createSessionFile(fixture)
+        }) + '\n'
       )
     }
     if (dataRoot && notebookRuns.length) {
@@ -1938,6 +2116,33 @@ class ElectronAppHarness implements ElectronApp {
         })
     }
     // Rebuild the catalog from the fixture file, just as the historical-session fixture does.
+    const client = createProjectDbClient(this.roots.storageRoot)
+    try {
+      await client.sessionProjectionState.deleteMany()
+    } finally {
+      await client.$disconnect()
+    }
+    await this.launch()
+    return this.page
+  }
+
+  async restartWithRawSessionFileFixture(fixture: {
+    projectId: string
+    sessionId: string
+    contents: string
+  }): Promise<Page> {
+    if (![fixture.projectId, fixture.sessionId].every((id) => /^[a-zA-Z0-9_-]+$/.test(id))) {
+      throw new Error('Invalid E2E Session fixture identity.')
+    }
+    await this.close()
+    const directory = join(this.roots.storageRoot, 'sessions', fixture.projectId)
+    await mkdir(directory, { recursive: true })
+    // Preserve the released fixture byte-for-byte instead of re-encoding it through the current
+    // createSessionFile projection.
+    const path = join(directory, `${fixture.sessionId}.json`)
+    await writeFile(path, fixture.contents, 'utf8')
+    // A current journal takes precedence over the explicitly requested legacy fixture.
+    await rm(sessionJournalPath(path), { force: true })
     const client = createProjectDbClient(this.roots.storageRoot)
     try {
       await client.sessionProjectionState.deleteMany()
@@ -2036,6 +2241,8 @@ class ElectronAppHarness implements ElectronApp {
           packaged: app.isPackaged,
           appPath: app.getAppPath(),
           executable: process.execPath,
+          appImage: process.env.APPIMAGE,
+          appDir: process.env.APPDIR,
           version: app.getVersion()
         }))
         assertPackagedElectronIdentity(evidence)
@@ -2082,6 +2289,32 @@ class ElectronAppHarness implements ElectronApp {
   private get runningApplication(): ElectronApplication {
     if (!this.application) throw new Error('Electron application is not running.')
     return this.application
+  }
+
+  async captureWebNetworkState(): Promise<{
+    platform: string
+    versions: Record<string, string | undefined>
+    proxyDirectives: Record<string, string[]>
+  }> {
+    return this.runningApplication.evaluate(async ({ session }) => {
+      const endpoints = ['https://mcp.exa.ai/mcp', 'https://example.org/']
+      const proxyDirectives: Record<string, string[]> = {}
+      for (const endpoint of endpoints) {
+        proxyDirectives[endpoint] = (await session.defaultSession.resolveProxy(endpoint))
+          .split(';')
+          .map((directive) => directive.trim().split(/\s+/)[0])
+      }
+      // Never return proxy addresses, authentication, the environment or application settings.
+      return {
+        platform: process.platform,
+        versions: {
+          electron: process.versions.electron,
+          chromium: process.versions.chrome,
+          node: process.versions.node
+        },
+        proxyDirectives
+      }
+    })
   }
 
   private async findDelegatedHandoff(
@@ -2134,8 +2367,8 @@ class ElectronAppHarness implements ElectronApp {
     return handoffPath
   }
 
-  private async close(): Promise<void> {
-    await this.closeForCleanup(true)
+  async close(gracefulTimeoutMs?: number): Promise<void> {
+    await this.closeForCleanup(true, gracefulTimeoutMs)
   }
 
   private async closeForCleanup(
@@ -2230,9 +2463,13 @@ class ElectronAppHarness implements ElectronApp {
 }
 
 const test = base.extend<{ app: ElectronApp; windowMode: E2eWindowMode }>({
-  // Packaged Windows windows need a presented surface for screenshots and native clipboard focus.
+  // Conversation certification captures real UI evidence; hidden Linux windows can stop painting.
+  // Packaged Windows also needs presentation for native clipboard focus.
   windowMode: [
-    process.platform === 'win32' && process.env.OPEN_SCIENCE_E2E_EXECUTABLE ? 'normal' : 'hidden',
+    process.env.OPEN_SCIENCE_DEFAULT_AGENT_CERT === '1' ||
+    (process.platform === 'win32' && process.env.OPEN_SCIENCE_E2E_EXECUTABLE)
+      ? 'normal'
+      : 'hidden',
     { option: true }
   ],
   // Playwright fixture callbacks require an object pattern even when no base fixture is needed.

@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_FRAMEWORK_ID } from '../../../../shared/agent-framework-id'
 import type { AcpMessageImage } from '../../../../shared/acp-image-contract'
 import type {
   HistoryReplayDescriptor,
@@ -6,12 +7,12 @@ import type {
 import { resolveModelContextWindow } from '../../../../shared/provider-model-policy'
 import { buildSessionHistoryReplay } from '../../../../shared/session-history-replay'
 import { isHiddenControlMessage } from '../../../../shared/session-persistence'
-import {
-  requiresChatCompletionsBridge,
-  type AgentFrameworkId,
-  type AgentFrameworkView,
-  type ProviderView
+import type {
+  AgentFrameworkId,
+  AgentFrameworkView,
+  ProviderView
 } from '../../../../shared/settings'
+import { requiresChatCompletionsBridge } from '../../../../shared/settings-runtime'
 import type { UploadedAttachment } from '../../../../shared/uploads'
 import type { ChatMessage } from '../../stores/session-store-contract'
 
@@ -20,11 +21,8 @@ export const resolveHistoryReplayTarget = (
   provider?: ProviderView,
   framework?: AgentFrameworkView
 ): HistoryReplayTarget => {
-  if (frameworkId === 'opencode') return 'opencode'
-  if (frameworkId === 'codebuddy') return 'codebuddy'
-  if (frameworkId === 'open-science-agent') return 'open-science-agent'
-  if (frameworkId === 'pi') return 'pi'
-  if (frameworkId !== 'codex') return 'claude-code'
+  const selectedFramework = frameworkId ?? DEFAULT_AGENT_FRAMEWORK_ID
+  if (selectedFramework !== 'codex') return selectedFramework
   if (
     provider &&
     framework &&

@@ -3,6 +3,8 @@ export type ScientificScriptMarker = Readonly<{
   label: string
   scale: number
   rise: number
+  baseline?: number
+  fontName?: string
   sourceIndices: readonly number[]
   bounds?: readonly [number, number, number, number]
 }>
@@ -22,10 +24,12 @@ export function resolveNestedScriptGroups(
   sourceOffset: number
   targetOffset: number
   label: string
+  sourceLabel?: string
   sourceIndices: number[]
   baselineIndex?: number
   indexedProduct?: true
   nativeScriptGroup?: true
+  needsInlineReflow?: true
   scriptOnly?: true
 }>
 export function resolveScientificScriptSpans(

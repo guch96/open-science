@@ -19,6 +19,7 @@ export type InspectionWorkerMessage =
   | {
       kind: 'error'
       message: string
+      tarCode?: 'TAR_BAD_ARCHIVE'
       capacity?: { directory: string; requiredBytes: number; freeBytes: number }
     }
 
@@ -26,12 +27,16 @@ export type InspectionWorkerMessage =
 // DB access nor a Session graph crosses this boundary; the caller owns source staging.
 export const createPackageInspector =
   (createWorker: (options: WorkerOptions) => Worker): typeof inspectSessionPackage =>
-  async (path, directory, signal, _temporaryRoot, onProgress) =>
+  async (path, directory, signal, temporaryRoot, onProgress) =>
     withPackageTransfer(async (transfer) => {
       signal = AbortSignal.any([signal, transfer.signal])
       signal.throwIfAborted()
       await mkdir(directory, { recursive: true, mode: 0o700 })
-      const temporaryRoot = await mkdtemp(join(directory, '.inspection-'))
+      const inspectionParent = temporaryRoot ?? directory
+      await mkdir(inspectionParent, { recursive: true, mode: 0o700 })
+      const inspectionRoot = await mkdtemp(
+        join(inspectionParent, temporaryRoot ? 'open-science-package-inspection-' : '.inspection-')
+      )
       try {
         return await withPackageCleanup(
           async () => {
@@ -39,7 +44,11 @@ export const createPackageInspector =
             const worker = createWorker({
               execArgv: [],
               resourceLimits: { maxOldGenerationSizeMb: 1024, maxYoungGenerationSizeMb: 32 },
-              workerData: { path, directory, temporaryRoot } satisfies InspectionWorkerInput
+              workerData: {
+                path,
+                directory,
+                temporaryRoot: inspectionRoot
+              } satisfies InspectionWorkerInput
             })
             let active = true
             let detach = (): void => undefined
@@ -61,7 +70,10 @@ export const createPackageInspector =
                             capacity.freeBytes,
                             new Error(value.message)
                           )
-                        : new Error(value.message)
+                        : Object.assign(
+                            new Error(value.message),
+                            value.tarCode ? { tarCode: value.tarCode } : {}
+                          )
                     )
                   } else if (value.kind === 'pace') {
                     // Use the parent's live rate, speed meter and inactivity budget. AsyncLocalStorage
@@ -94,7 +106,7 @@ export const createPackageInspector =
               detach()
             }
           },
-          () => rm(temporaryRoot, { recursive: true, force: true })
+          () => rm(inspectionRoot, { recursive: true, force: true })
         )
       } catch (error) {
         if (error instanceof PackageCleanupPendingError && 'value' in error.outcome) {

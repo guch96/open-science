@@ -1,6 +1,6 @@
 import type { PdfAnnotation, PdfAnnotationSource } from '../../../shared/pdf-annotations'
 import { create } from 'zustand'
-import type { ConnectorsView } from '@/lib/settings-navigation'
+import type { ConnectorsView, SettingsRoute } from '@/lib/settings-navigation'
 
 import { recordLastOpenedProject } from '@/lib/last-opened-project'
 import type { CustomizeGoal } from '@/lib/customize-chat'
@@ -28,11 +28,14 @@ import {
 export type NavigationView = 'home' | 'library' | 'marketplace' | 'workspace'
 export type NavigationOrigin = 'user' | 'notification' | 'automatic'
 export type ResourceCenterResource = 'marketplace' | 'skills' | 'specialists' | 'connectors'
-export type ResourceCenterIntent =
+export type ResourceCenterIntent = {
+  settingsOrigin?: { view: NavigationView; route: SettingsRoute }
+} & (
   | { resource: 'marketplace' }
   | { resource: 'connectors'; view?: ConnectorsView }
   | { resource: 'skills'; skillId?: string }
   | { resource: 'specialists'; specialistId?: string; specialistKind?: 'builtin' | 'edit' }
+)
 
 // A compact list expands around its visible case, even when the grid changes column count.
 export type MarketplaceListSnapshot = {
@@ -76,6 +79,9 @@ export type WslSupportPrefillIntent = {
 }
 
 type NavigationStore = {
+  scheduleScope?: { projectId: string; sessionId?: string; taskId?: string; revision: number }
+  openSchedule: (projectId: string, sessionId?: string, taskId?: string) => void
+  closeSchedule: () => void
   view: NavigationView
   activeProjectId: string | undefined
   marketplaceListContext: { projectId: string; list: MarketplaceListSnapshot } | undefined
@@ -205,6 +211,7 @@ const navigationState = (
   next: Pick<NavigationStore, 'view'> & Partial<Pick<NavigationStore, 'activeProjectId'>>
 ): Pick<
   NavigationStore,
+  | 'scheduleScope'
   | 'view'
   | 'activeProjectId'
   | 'userNavigationRevision'
@@ -213,6 +220,10 @@ const navigationState = (
   | 'marketplaceListContext'
 > => ({
   view: next.view,
+  scheduleScope:
+    next.view === 'home' || (next.activeProjectId && next.activeProjectId !== state.activeProjectId)
+      ? undefined
+      : state.scheduleScope,
   // A Project handoff survives the round trip, but never leaks into Home or another Project.
   marketplaceListContext:
     next.view === 'home' ||
@@ -232,6 +243,38 @@ const navigationState = (
 // latest conversation instead of a blank workspace.
 const findMostRecentSessionId = (projectId: string): string | undefined =>
   findMostRecentProjectSessionId(useSessionStore.getState().sessions, projectId)
+
+const selectSessionForNavigation = (session: {
+  projectId: string
+  id: string
+  contentLoaded?: boolean
+  needsStartupRecovery?: boolean
+}): void => {
+  const request = { projectId: session.projectId, sessionId: session.id }
+  const recoverSessionDetails = session.needsStartupRecovery === true
+  if (session.contentLoaded === false) {
+    useSessionStore.setState({
+      selectedSessionId: session.id,
+      sessionDetailsRecoveryRequest: recoverSessionDetails ? request : undefined
+    })
+    return
+  }
+  useSessionStore.getState().selectSession(session.id)
+  useSessionStore.setState({ sessionDetailsRecoveryRequest: undefined })
+  if (!recoverSessionDetails) return
+  const loadOne = typeof window === 'undefined' ? undefined : window.api?.sessions?.loadOne
+  if (typeof loadOne !== 'function') return
+  void loadOne({ ...request, recoverSessionDetails: true })
+    .then((loaded) => {
+      if (!loaded) return
+      useSessionStore.setState((state) => ({
+        sessions: state.sessions.map((candidate) =>
+          candidate.id === session.id ? { ...candidate, needsStartupRecovery: false } : candidate
+        )
+      }))
+    })
+    .catch(() => undefined)
+}
 
 const isActiveProject = (projectId: string): boolean =>
   useProjectStore
@@ -276,6 +319,21 @@ const requestPreviewLeaveForNavigation = (
 // Owns which top-level screen is visible and which project the workspace is scoped to. Session
 // selection stays in the session store; this store coordinates it when navigating.
 export const useNavigationStore = create<NavigationStore>((set, get) => ({
+  openSchedule: (projectId, sessionId, taskId) => {
+    if (get().view !== 'workspace' || get().activeProjectId !== projectId) return
+    if (sessionId && !isActiveSession(projectId, sessionId)) return
+    set((state) => ({
+      userNavigationRevision: state.userNavigationRevision + 1,
+      explicitNavigationRevision: state.explicitNavigationRevision + 1,
+      scheduleScope: {
+        projectId,
+        sessionId,
+        taskId,
+        revision: state.explicitNavigationRevision + 1
+      }
+    }))
+  },
+  closeSchedule: () => set({ scheduleScope: undefined }),
   view: 'home',
   activeProjectId: undefined,
   marketplaceListContext: undefined,
@@ -423,7 +481,11 @@ export const useNavigationStore = create<NavigationStore>((set, get) => ({
       const mostRecentSessionId = findMostRecentSessionId(projectId)
 
       if (mostRecentSessionId) {
-        useSessionStore.getState().selectSession(mostRecentSessionId)
+        const session = useSessionStore
+          .getState()
+          .sessions.find((candidate) => candidate.id === mostRecentSessionId)
+        if (session && origin !== 'automatic') selectSessionForNavigation(session)
+        else useSessionStore.getState().selectSession(mostRecentSessionId)
       } else {
         useSessionStore.getState().clearSelection()
       }
@@ -445,7 +507,13 @@ export const useNavigationStore = create<NavigationStore>((set, get) => ({
     if (!isActiveSession(projectId, sessionId)) return false
     return requestPreviewLeaveForNavigation({ view: 'workspace', projectId }, () => {
       if (!isActiveSession(projectId, sessionId)) return false
-      useSessionStore.getState().selectSession(sessionId)
+      const session = useSessionStore
+        .getState()
+        .sessions.find(
+          (candidate) => candidate.projectId === projectId && candidate.id === sessionId
+        )
+      if (session) selectSessionForNavigation(session)
+      else useSessionStore.getState().selectSession(sessionId)
 
       if (origin === 'user') recordLastOpenedProject(projectId)
 

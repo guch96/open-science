@@ -16,7 +16,7 @@ export type AcpProviderTurnBeginInput = Readonly<{
 
 /**
  * The provider stop response is the only terminal provider payload exposed at this seam. Adapters
- * may inspect it to recover usage metadata, but the executor keeps ownership of the raw response.
+ * may inspect it to recover provider facts, but the executor keeps ownership of the raw response.
  */
 export type AcpProviderTurnFinalizationInput = Readonly<{
   response: Readonly<PromptResponse>
@@ -46,6 +46,8 @@ export type AcpProviderModelCallUsage = Readonly<
 export type AcpProviderTurnResult = Readonly<{
   /** Native summary result, independent of token usage; absent when unverified. */
   compaction?: Readonly<{ succeeded: boolean; error?: string }>
+  /** The final model response ended at its output limit. */
+  outputTruncated?: true
   turnUsage?: Readonly<Omit<AcpTurnTokenUsage, 'turnCount'>>
   modelTurnCount?: number
   modelCalls?: ReadonlyArray<AcpProviderModelCallUsage>
@@ -77,5 +79,7 @@ export type AcpProviderTurnProbe = Readonly<{
  * than by widening this interface with provider payloads or application-owner concerns.
  */
 export type AcpProviderTurnAdapter = Readonly<{
+  /** Some ACP providers encode request failures in a successful terminal RPC response. */
+  getPromptError?: (response: Readonly<PromptResponse>) => Error | undefined
   begin: (input: AcpProviderTurnBeginInput) => AcpProviderTurnProbe | Promise<AcpProviderTurnProbe>
 }>

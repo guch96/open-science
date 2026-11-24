@@ -1,3 +1,5 @@
+import { scheduleToolDraft } from '../../../src/shared/session-schedules'
+import { useTranslation } from 'react-i18next'
 import { getRenderableActivityEntries } from '../../../src/renderer/src/pages/workspace/workspace-tool-activity-groups'
 import '@/assets/main.css'
 import { useState } from 'react'
@@ -8,6 +10,7 @@ import type { ToolActivity } from '@/stores/session-store'
 import { createRoot } from 'react-dom/client'
 import { initI18n, prepareI18nLocale } from '@/i18n'
 import { PermissionApprovalControls } from '@/pages/workspace/PermissionApprovalControls'
+import { ResizableBottomPanel } from '@/pages/workspace/ResizableBottomPanel'
 import { useAcpRuntime } from '@/lib/acp/useAcpRuntime'
 import type {
   AcpPermissionRequest,
@@ -49,6 +52,25 @@ const request: AcpPermissionRequest = {
   ]
 }
 const powershell = new URLSearchParams(location.search).has('powershell')
+const builtInSearch = new URLSearchParams(location.search).has('built-in-search')
+const builtInSearchRequest: AcpPermissionRequest = {
+  ...request,
+  requestId: 'built-in-search',
+  title: 'mcp__open_science_web__web_search',
+  providerToolName: 'mcp__open_science_web__web_search',
+  toolKind: 'search',
+  isMcp: true,
+  mcpIdentity: 'open-science-web/web_search',
+  delegated: undefined,
+  rawInput: {
+    query: 'new foundation model release 2026',
+    freshness: 'month',
+    max_results: 10,
+    ...(new URLSearchParams(location.search).has('sites')
+      ? { allowed_domains: ['nature.com', 'science.org'] }
+      : {})
+  }
+}
 const risk = new URLSearchParams(location.search).has('risk')
 const large = new URLSearchParams(location.search).has('large')
 const riskPrefix = large
@@ -258,22 +280,114 @@ const RiskReceipt = (): React.JSX.Element => {
     </section>
   )
 }
+const schedulePreview = new URLSearchParams(location.search).has('schedule')
+const SchedulePreview = (): React.JSX.Element => {
+  const [expanded, setExpanded] = useState(false)
+  const message = new URLSearchParams(location.search).has('message')
+  const invalid = new URLSearchParams(location.search).has('invalid-schedule')
+  const title = 'mcp__open_science_schedule__create_schedule'
+  const rawInput = {
+    name: 'PubMed literature tracking',
+    rule: invalid
+      ? { kind: 'once', at: Date.UTC(2026, 10, 15, 12), timeZone: 'UTC' }
+      : { kind: 'interval', minutes: 5, anchor: 0, timeZone: 'UTC' },
+    ...(invalid ? { permissionProfile: 'auto', maxRuns: 1 } : {}),
+    ...(message
+      ? {
+          message:
+            'Search PubMed for recently published papers. Summarize up to 10 new papers and report them here, excluding papers from the previous run.'
+        }
+      : { script: { language: 'python', code: 'from datetime import date\nprint(date.today())' } })
+  }
+
+  const activity: ToolActivity = {
+    id: 'create-task',
+    rawOutput: invalid
+      ? {
+          isError: true,
+          content: [
+            { type: 'text', text: 'MCP error -32602: Input validation error: Invalid arguments' }
+          ]
+        }
+      : { id: 'created-task', draft: scheduleToolDraft(rawInput), revision: 1 },
+    kind: 'tool',
+    title,
+    providerToolName: title,
+    rawInput,
+    status: invalid ? 'failed' : 'completed',
+    eventIds: [],
+    sortIndex: 1,
+    createdAt: 1,
+    updatedAt: 1
+  }
+  const { t } = useTranslation()
+  return (
+    <div className="space-y-4">
+      <PermissionApprovalControls
+        requests={[
+          {
+            requestId: 'create-task',
+            sessionId: 'parent',
+            toolCallId: 'create-task',
+            toolKind: 'other',
+            title,
+            isMcp: true,
+            mcpIdentity: 'open-science-schedule/create_schedule',
+            rawInput,
+            options: request.options.filter((option) => option.kind !== 'allow_always')
+          }
+        ]}
+        onRespond={() => {}}
+      />
+      <WorkspaceToolDetailsRow
+        activity={activity}
+        details={buildToolActivityDetails(activity, t)!}
+        isExpanded={expanded}
+        onToggle={(_id, open) => setExpanded(open)}
+      />
+    </div>
+  )
+}
 void Promise.resolve(prepareI18nLocale(language)).then(() => {
   initI18n(language)
+  const embedded = new URLSearchParams(location.search).has('embedded')
+  const approval = (
+    <PermissionApprovalControls
+      embedded={embedded}
+      requests={[
+        runtimeSelection
+          ? runtimeRequest
+          : risk
+            ? riskRequest
+            : builtInSearch
+              ? builtInSearchRequest
+              : request
+      ]}
+      onRespond={(requestId, optionId) => {
+        responses.push({ requestId, optionId })
+      }}
+    />
+  )
   createRoot(document.getElementById('root')!).render(
     <main className="min-h-screen bg-background p-5 text-foreground">
       <div className="mx-auto max-w-3xl">
-        {receiptState ? (
+        {schedulePreview ? (
+          <SchedulePreview />
+        ) : receiptState ? (
           <RiskReceipt />
         ) : network ? (
           <NetworkApproval />
+        ) : embedded ? (
+          <ResizableBottomPanel
+            ariaLabel="Resize permission panel"
+            testId="permission-composer"
+            scrollTestId="permission-composer-scroll"
+            constrainGrowthToOverflow
+          >
+            {approval}
+          </ResizableBottomPanel>
         ) : (
-          <PermissionApprovalControls
-            requests={[runtimeSelection ? runtimeRequest : risk ? riskRequest : request]}
-            onRespond={(requestId, optionId) => {
-              responses.push({ requestId, optionId })
-            }}
-          />
+          approval
         )}
       </div>
     </main>

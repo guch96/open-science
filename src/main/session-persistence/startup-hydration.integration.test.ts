@@ -41,9 +41,12 @@ import { SessionProjectionRepository } from './projection'
 import { SessionPersistenceCoordinator, type SessionFileIndex } from './coordinator'
 import { composeSessionProjection } from '../composition/session-projection'
 import {
+  createSessionFile,
   materializeSessionConversationGraph,
+  type LoadAllSessionsResult,
   type PersistedChatSession
 } from '../../shared/session-persistence'
+import { sessionJournalPath } from './journal'
 import { ArtifactProvenanceRepository } from '../artifacts/provenance-repository'
 import { ProvenanceMessageSnapshotRepository } from '../artifacts/provenance-message-snapshot'
 import { ReviewRepository } from '../reviewer/repository'
@@ -137,6 +140,13 @@ async function createStartupHarness(
     status: 'running',
     activeRun: { promptMessageId: 'interrupted-message', startedAt: 1 }
   })
+  // These upstream startup tests exercise the released legacy JSON reader. Keep that format so
+  // their injected readSessionFile delays and temp/quarantine fixtures observe the intended path.
+  for (const saved of [historical, selected, interrupted]) {
+    const primary = join(root, 'sessions/project', `${saved.id}.json`)
+    await writeFile(primary, `${JSON.stringify(createSessionFile(saved), null, 2)}\n`)
+    await rm(sessionJournalPath(primary), { force: true })
+  }
   await projection.replaceAll([historical, interrupted, selected])
   const owners = new Set(['historical', 'interrupted'])
   const fileIndex: SessionFileIndex = {
@@ -173,7 +183,11 @@ async function createStartupHarness(
       allowNotebookNetworkDestination: async () => undefined
     },
     sessionEnabledComputeHostsOwnerRef: {
-      current: { reconcileSession: async (session: PersistedChatSession) => session }
+      current: {
+        reconcileSession: async (session: PersistedChatSession) => session,
+        hydrateFromSessionCatalog: (loadCatalog: () => Promise<LoadAllSessionsResult>) =>
+          loadCatalog()
+      }
     },
     projectDeletionCoordinator: { recoverPendingDeletions: async () => undefined },
     wslSetupSessions: {
@@ -196,6 +210,44 @@ async function createStartupHarness(
     fileIndex
   }
 }
+
+it('waits for startup authority when a Task session is absent from the partial catalog', async () => {
+  const { composed, repository, projection, historical, makeSession } = await createStartupHarness()
+  await projection.replaceAll([])
+  const originalEnsure = repository.ensureSessionProjection.bind(repository)
+  const entered = Promise.withResolvers<void>()
+  const resume = Promise.withResolvers<void>()
+  vi.spyOn(repository, 'ensureSessionProjection').mockImplementationOnce(async (...args) => {
+    entered.resolve()
+    await resume.promise
+    return originalEnsure(...args)
+  })
+
+  const startup = composed.beginStartupProjection()
+  try {
+    await entered.promise
+    const partial = await composed.sessionPersistenceBackend.list!()
+    expect(partial.diagnostics?.catalogHydrationPending).toBe(true)
+    expect(partial.sessions).toEqual([])
+
+    const lookup = composed.findSessionAfterCatalogHydration(historical.id)
+    expect(repository.ensureSessionProjection).toHaveBeenCalledOnce()
+    resume.resolve()
+    await expect(lookup).resolves.toMatchObject({
+      id: historical.id,
+      projectId: historical.projectId
+    })
+    const newer = await repository.saveSession(makeSession('added-after-startup'))
+    await expect(composed.findSessionAfterCatalogHydration(newer.id)).resolves.toMatchObject({
+      id: newer.id,
+      projectId: newer.projectId
+    })
+    await expect(composed.findSessionAfterCatalogHydration('missing')).resolves.toBeUndefined()
+  } finally {
+    resume.resolve()
+    await startup
+  }
+})
 
 it('loads selected context while pending and idle history remain summary-only until deferred work starts', async () => {
   const { composed, reads, owners } = await createStartupHarness()

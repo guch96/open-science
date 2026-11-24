@@ -1,7 +1,9 @@
+import { isNotebookRunReference } from '../notebook/run-record-reference'
+import { mergePendingRuns, pendingDirectoryIdentity } from '../notebook/pending-run-files'
 import { constants } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
-import { appendFile, lstat, mkdir, open, opendir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, lstat, mkdir, open, opendir, readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import * as tar from 'tar'
 import type {
@@ -15,14 +17,21 @@ import { projectDiagnosticSession, projectDiagnosticLog } from './projection'
 import { readDiagnosticDatabase } from './database'
 import { projectDiagnosticNotebook, type DiagnosticNotebookCodeCoverage } from './notebook'
 import { projectDiagnosticEnvironment } from './environment'
+import { sessionJournalPath, SessionJournalStore } from '../session-persistence/journal'
 import { diagnosticText } from './detail'
 import { exportResourceJournal, inspectResourceJournal } from './resources'
 
 const FILE_LIMIT = 8 * 1024 * 1024
 const TOTAL_LIMIT = 32 * 1024 * 1024
+const ENVIRONMENT_MANIFEST_LIMIT = 32 * 1024 * 1024
+const ENVIRONMENT_MANIFEST_DIRECTORY = join('runtime', 'provenance', 'environment-manifests')
+const digestPattern = /^[a-f0-9]{64}$/
+const digest = (contents: string): string => createHash('sha256').update(contents).digest('hex')
+const SESSION_JOURNAL_READ_LIMIT = 32 * 1024 * 1024
 const BACKEND_LOG_TAIL_BYTES = 256 * 1024
 const safeSegment = (value: string): boolean => /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$/.test(value)
 class DiagnosticCollectionError extends Error {}
+class NotebookSnapshotChangedError extends DiagnosticCollectionError {}
 const ownsDiagnosticSession = (
   value: Record<string, unknown>,
   projectId: string,
@@ -114,6 +123,14 @@ async function discoverSessionSources(
 ): Promise<Source[]> {
   const project = join(input.configRoot, 'sessions', input.projectId)
   const notebookRoot = join(input.dataRoot, 'notebooks', input.projectId, input.sessionId)
+  const legacySessionPath = join(project, `${input.sessionId}.json`)
+  const journalPath = sessionJournalPath(legacySessionPath)
+  const sessionPath = await lstat(journalPath)
+    .then(() => journalPath)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return legacySessionPath
+      throw error
+    })
   const sources: Source[] = [
     {
       id: 'session',
@@ -121,7 +138,7 @@ async function discoverSessionSources(
       kind: 'session',
       available: false,
       root: input.configRoot,
-      path: join(project, `${input.sessionId}.json`),
+      path: sessionPath,
       output: 'session.json'
     },
     {
@@ -431,6 +448,27 @@ async function readSource(source: Source): Promise<{
   }
 }
 
+const sourceReadLimit = (source: Source): number =>
+  source.kind === 'session' && source.path?.endsWith('.jsonl')
+    ? SESSION_JOURNAL_READ_LIMIT
+    : FILE_LIMIT
+
+// Reconstruct JSONL through the ordinary diagnostic redaction path. It remains a read-only
+// observation: no recovery, migration or file cleanup is performed during collection.
+async function readSessionSource(source: Source): ReturnType<typeof readSource> {
+  if (!source.path!.endsWith('.jsonl')) return readSource(source)
+  await checkPath(source.root, source.path!)
+  const journal = new SessionJournalStore({
+    maxBytes: FILE_LIMIT,
+    maxReplayBytes: sourceReadLimit(source),
+    maxCacheEntries: 0
+  })
+  const reconstructed = await journal.read(source.path!)
+  if (reconstructed?.format !== 'journal')
+    throw new DiagnosticCollectionError('Session journal is unavailable')
+  return { text: JSON.stringify(reconstructed.document) }
+}
+
 async function readBinarySource(source: Source): Promise<Buffer> {
   await checkPath(source.root, source.path!)
   const handle = await open(source.path!, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
@@ -458,6 +496,21 @@ async function readBinarySource(source: Source): Promise<Buffer> {
     await handle.close()
   }
 }
+
+const environmentManifestChecksumForRun = (run: Record<string, unknown>): string | undefined => {
+  if (typeof run.environmentManifestChecksum === 'string') return run.environmentManifestChecksum
+  const capture = run.environmentCapture
+  if (!capture || typeof capture !== 'object' || Array.isArray(capture)) return undefined
+  const state = capture as Record<string, unknown>
+  return state.state === 'available' || state.state === 'partial'
+    ? typeof state.manifestChecksum === 'string'
+      ? state.manifestChecksum
+      : undefined
+    : undefined
+}
+
+const environmentManifestPath = (dataRoot: string, checksum: string): string =>
+  join(dataRoot, ENVIRONMENT_MANIFEST_DIRECTORY, `${checksum}.json`)
 
 export async function runSessionDiagnosticWorker(
   input: SessionDiagnosticWorkerInput
@@ -533,6 +586,153 @@ export async function runSessionDiagnosticWorker(
         record(`Diagnostic output ${name} failed: ${reason}`)
         return false
       }
+    }
+    const exportedEnvironmentManifestChecksums = new Set<string>()
+    const exportEnvironmentManifests = async (
+      value: Record<string, unknown>,
+      state: { status: string; reason?: string }
+    ): Promise<void> => {
+      const runs = Array.isArray(value.runs) ? value.runs.slice(-100) : []
+      for (const entry of runs) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+        const checksum = environmentManifestChecksumForRun(entry as Record<string, unknown>)
+        if (!checksum || exportedEnvironmentManifestChecksums.has(checksum)) continue
+        exportedEnvironmentManifestChecksums.add(checksum)
+        if (!digestPattern.test(checksum)) {
+          partial = true
+          if (state.status === 'exported') state.status = 'partial'
+          state.reason = 'Environment manifest reference is invalid'
+          record('Notebook environment manifest reference is invalid')
+          continue
+        }
+        const inlineManifest =
+          entry.environmentManifest &&
+          typeof entry.environmentManifest === 'object' &&
+          !Array.isArray(entry.environmentManifest)
+            ? (entry.environmentManifest as Record<string, unknown>)
+            : undefined
+        const inlineContents =
+          inlineManifest &&
+          inlineManifest.schemaVersion === 1 &&
+          inlineManifest.captureKind === 'completed-run' &&
+          Array.isArray(inlineManifest.packages)
+            ? `${JSON.stringify(inlineManifest, null, 2)}\n`
+            : undefined
+        const path = environmentManifestPath(input.dataRoot, checksum)
+        const output = `notebook/environment-manifests/${checksum}.json`
+        try {
+          if (inlineContents && digest(inlineContents) === checksum) {
+            if (Buffer.byteLength(inlineContents) > FILE_LIMIT) {
+              partial = true
+              if (state.status === 'exported') state.status = 'partial'
+              state.reason = 'Environment manifest exceeds diagnostic output limit'
+              record('Notebook environment manifest exceeds diagnostic output limit')
+              await writeBestEffort(
+                `${output}.metadata.json`,
+                () =>
+                  encode({
+                    checksum,
+                    sizeBytes: Buffer.byteLength(inlineContents),
+                    omissionReason: 'source-size-limit'
+                  }),
+                state
+              )
+            } else await writeBestEffort(output, () => inlineContents, state)
+            continue
+          }
+          await checkPath(input.dataRoot, path)
+          const before = await lstat(path)
+          if (!before.isFile() || before.isSymbolicLink())
+            throw new DiagnosticCollectionError('Environment manifest is not a regular file')
+          if (before.size > ENVIRONMENT_MANIFEST_LIMIT)
+            throw new DiagnosticCollectionError('Environment manifest exceeds file limit')
+          const contents = await readFile(path, 'utf8')
+          const after = await lstat(path)
+          if (
+            before.size !== after.size ||
+            before.mtimeMs !== after.mtimeMs ||
+            digest(contents) !== checksum
+          )
+            throw new DiagnosticCollectionError('Environment manifest checksum mismatch')
+          const parsed = JSON.parse(contents) as Record<string, unknown>
+          if (
+            !parsed ||
+            Array.isArray(parsed) ||
+            parsed.schemaVersion !== 1 ||
+            parsed.captureKind !== 'completed-run' ||
+            !Array.isArray(parsed.packages)
+          )
+            throw new DiagnosticCollectionError('Environment manifest shape is invalid')
+          if (Buffer.byteLength(contents) > FILE_LIMIT) {
+            partial = true
+            if (state.status === 'exported') state.status = 'partial'
+            state.reason = 'Environment manifest exceeds diagnostic output limit'
+            record('Notebook environment manifest exceeds diagnostic output limit')
+            await writeBestEffort(
+              `${output}.metadata.json`,
+              () =>
+                encode({
+                  checksum,
+                  sizeBytes: Buffer.byteLength(contents),
+                  omissionReason: 'source-size-limit'
+                }),
+              state
+            )
+          } else {
+            await writeBestEffort(output, () => contents, state)
+          }
+        } catch (error) {
+          partial = true
+          if (state.status === 'exported') state.status = 'partial'
+          state.reason = diagnosticFailure(error)
+          record(`Notebook environment manifest unavailable: ${diagnosticFailure(error)}`)
+          await writeBestEffort(
+            `${output}.metadata.json`,
+            () => encode({ checksum, omissionReason: 'source-unavailable-or-integrity-failure' }),
+            state
+          )
+        }
+      }
+    }
+    const hydrateNotebookRunReferences = async (
+      value: Record<string, unknown>,
+      source: Source,
+      state: { status: string; reason?: string }
+    ): Promise<Record<string, unknown>> => {
+      if (!Array.isArray(value.runs)) return value
+      const runs = [...value.runs]
+      const firstRetained = Math.max(0, runs.length - 100)
+      for (let index = firstRetained; index < runs.length; index++) {
+        const reference = runs[index]
+        if (!isNotebookRunReference(reference)) continue
+        const path = join(dirname(source.path!), '.run-records', `${reference.sha256}.json`)
+        try {
+          await checkPath(source.root, path)
+          const before = await lstat(path)
+          if (!before.isFile() || before.isSymbolicLink() || before.size > FILE_LIMIT)
+            throw new DiagnosticCollectionError('Notebook run record is unavailable')
+          const contents = await readFile(path, 'utf8')
+          const after = await lstat(path)
+          if (
+            before.size !== after.size ||
+            before.mtimeMs !== after.mtimeMs ||
+            before.size !== reference.bytes ||
+            digest(contents) !== reference.sha256
+          )
+            throw new DiagnosticCollectionError('Notebook run record checksum mismatch')
+          const run = JSON.parse(contents) as Record<string, unknown>
+          if (!run || Array.isArray(run) || run.runId !== reference.runId)
+            throw new DiagnosticCollectionError('Notebook run record identity mismatch')
+          runs[index] = run
+        } catch (error) {
+          partial = true
+          if (state.status === 'exported') state.status = 'partial'
+          state.reason = diagnosticFailure(error)
+          record(`Notebook run record unavailable: ${diagnosticFailure(error)}`)
+          runs[index] = { unavailable: 'run-record-unavailable', runId: reference.runId }
+        }
+      }
+      return { ...value, runs }
     }
     const selected = new Set(
       (input.selectedItems ?? []).filter((id) => sources.some((source) => source.id === id))
@@ -722,7 +922,7 @@ export async function runSessionDiagnosticWorker(
           const stat = await lstat(source.path!)
           const metadata = { sizeBytes: stat.size, mtimeMs: stat.mtimeMs }
           state.sourceMetadata = metadata
-          if (stat.size > FILE_LIMIT && !source.tailBytes) {
+          if (stat.size > sourceReadLimit(source) && !source.tailBytes) {
             await writeBestEffort(
               `${source.output}.metadata.json`,
               () => encode({ ...metadata, omissionReason: 'source-size-limit' }),
@@ -732,7 +932,8 @@ export async function runSessionDiagnosticWorker(
             state.status = 'truncated'
             record('Source exceeds read budget; file metadata retained')
           } else {
-            const observation = await readSource(source)
+            const observation =
+              source.kind === 'session' ? await readSessionSource(source) : await readSource(source)
             if (observation.note) record(observation.note)
             if (observation.partial) {
               partial = true
@@ -753,8 +954,40 @@ export async function runSessionDiagnosticWorker(
               if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
                 if (source.kind === 'notebook') {
                   try {
+                    const rows = (parsed as { runs?: Array<{ runId: string }> }).runs
+                    if (Array.isArray(rows) && input.projectId && input.sessionId) {
+                      await checkPath(source.root, dirname(source.path!))
+                      const pending = await pendingDirectoryIdentity(source.path!)
+                      await mergePendingRuns(
+                        source.path!,
+                        {
+                          projectId: input.projectId,
+                          sessionId: input.sessionId,
+                          frameId: source.frameId ?? null
+                        },
+                        rows,
+                        (run) => typeof run === 'object' && run !== null && 'runId' in run,
+                        sourceReadLimit(source) - stat.size
+                      )
+                      // A checkpoint can replace the manifest and remove the entire hot directory during the read.
+                      const current = await lstat(source.path!)
+                      if (
+                        current.dev !== stat.dev ||
+                        current.ino !== stat.ino ||
+                        current.size !== stat.size ||
+                        current.ctimeMs !== stat.ctimeMs ||
+                        current.mtimeMs !== stat.mtimeMs ||
+                        pending !== (await pendingDirectoryIdentity(source.path!))
+                      )
+                        throw new NotebookSnapshotChangedError()
+                    }
+                    const hydratedNotebook = await hydrateNotebookRunReferences(
+                      parsed as Record<string, unknown>,
+                      source,
+                      state
+                    )
                     const projection = projectDiagnosticNotebook(
-                      parsed,
+                      hydratedNotebook,
                       {
                         projectId: input.projectId,
                         sessionId: input.sessionId,
@@ -765,7 +998,12 @@ export async function runSessionDiagnosticWorker(
                     )
                     const truncation = projection.truncation as Record<string, number>
                     state.arrayCounts = { runs: projection.runCounts, truncation }
-                    if (Object.values(truncation).some((count) => count > 0)) {
+                    // Runs outside the recent-history window are intentionally filtered.
+                    if (
+                      Object.entries(truncation).some(
+                        ([key, count]) => key !== 'omittedRuns' && count > 0
+                      )
+                    ) {
                       partial = true
                       state.status = 'truncated'
                       record('Notebook diagnostic projection truncated; omission counts recorded')
@@ -800,15 +1038,25 @@ export async function runSessionDiagnosticWorker(
                     } else {
                       state.status = 'partial'
                     }
-                  } catch {
+                    await exportEnvironmentManifests(hydratedNotebook, state)
+                  } catch (error) {
+                    const changed = error instanceof NotebookSnapshotChangedError
                     await writeBestEffort(
                       `${source.output}.metadata.json`,
-                      () => encode({ ...metadata, omissionReason: 'invalid-scope-or-shape' }),
+                      () =>
+                        encode({
+                          ...metadata,
+                          omissionReason: changed ? 'source-changed' : 'invalid-scope-or-shape'
+                        }),
                       state
                     )
                     partial = true
                     state.status = 'partial'
-                    record('Notebook document scope or shape invalid; content omitted')
+                    record(
+                      changed
+                        ? 'Notebook changed during collection; content omitted'
+                        : 'Notebook document scope or shape invalid; content omitted'
+                    )
                   }
                 } else {
                   if (

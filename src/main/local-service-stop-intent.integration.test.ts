@@ -101,7 +101,9 @@ it('never accepts App B after stop publication even when old authorization compl
       expect(await readServiceLifetime(configRoot)).toMatchObject({ stopping: true })
     )
     await expect(attach()).rejects.toThrow()
-    await vi.waitFor(() => expect(waiting).toHaveBeenCalledOnce())
+    // app-exit may await its 2-second acknowledgement timeout while compensation is held.
+    // Vitest's default 1-second polling budget can expire before stop confirmation begins.
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalledOnce(), { timeout: 5000 })
     const captured = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
     releaseOldRead = release.resolve
@@ -128,8 +130,9 @@ it('never accepts App B after stop publication even when old authorization compl
     await vi.waitFor(async () =>
       expect(await readServiceLifetime(configRoot)).toMatchObject({ stopping: false })
     )
+    // Rename makes the old record readable before the compensating write has settled.
+    await vi.waitFor(() => expect(() => lifetime.connect('b', 'socket-b')).toThrow('stopping'))
     await expect(attach()).rejects.toThrow()
-    expect(() => lifetime.connect('b', 'socket-b')).toThrow('stopping')
     await expect(lifetime.start()).rejects.toThrow('stopping')
     release.resolve()
     await denied

@@ -3,33 +3,40 @@
 // PDFium can report their legacy encodings as "b"/"e", whereas PDF.js resolves
 // the accent. Never reinterpret prose: require the extension font and geometry,
 // centered above exactly one separate mathematical base glyph.
-// CMR's spacing circumflex has narrower ink, but still needs that same
-// unique raised-base proof; an ordinary inline circumflex is not an accent.
+// CMR spacing accents use the same unique raised-base proof with their
+// own narrower ink limits. Inline or detached marks remain separate.
 export const resolveNativeMathAccents = (objects) => {
   const result = []
   const used = new Set()
   for (const accent of objects) {
-    const macron =
-        accent.text.trim() === '¯' &&
-        /^(?:[A-Z]{6}\+)?CMR(?:7|8|9|10|12)$/u.test(accent.fontName ?? ''),
-      narrowHat =
-        accent.text.trim() === 'ˆ' &&
-        /^(?:[A-Z]{6}\+)?CMR(?:7|8|9|10|12)$/u.test(accent.fontName ?? ''),
-      tilde =
-        accent.text.trim() === 'e' &&
-        /^(?:[A-Z]{6}\+)?CMEX(?:7|8|9|10|12)$/u.test(accent.fontName ?? '')
+    const text = accent.text.trim(),
+      macron = text === '¯' && /^(?:[A-Z]{6}\+)?CMR(?:7|8|9|10|12)$/u.test(accent.fontName ?? ''),
+      dot = text === '˙' && /^(?:[A-Z]{6}\+)?CMR(?:7|8|9|10|12)$/u.test(accent.fontName ?? ''),
+      spacingAccent =
+        /^[ˆ˜]$/u.test(text) && /^(?:[A-Z]{6}\+)?CMR(?:7|8|9|10|12)$/u.test(accent.fontName ?? ''),
+      maximumWidth = text === 'ˆ' ? 0.8 : text === '˜' ? 1 : 1.8,
+      tilde = text === 'e' && /^(?:[A-Z]{6}\+)?CMEX(?:7|8|9|10|12)$/u.test(accent.fontName ?? '')
     if (
       !macron &&
-      !narrowHat &&
+      !spacingAccent &&
+      !dot &&
       !tilde &&
-      (accent.text.trim() !== 'b' ||
-        !/^(?:[A-Z]{6}\+)?CMEX(?:7|8|9|10|12)$/u.test(accent.fontName ?? ''))
+      (text !== 'b' || !/^(?:[A-Z]{6}\+)?CMEX(?:7|8|9|10|12)$/u.test(accent.fontName ?? ''))
     )
       continue
     const [left, bottom, right, top] = accent.bounds,
       width = right - left,
       height = top - bottom
-    if (width <= 0 || height <= 0 || height >= width * (narrowHat ? 0.8 : 0.45)) continue
+    if (width <= 0 || height <= 0) continue
+    if (dot) {
+      if (
+        !(accent.size > 0) ||
+        height < width * 0.8 ||
+        height > width * 1.2 ||
+        width > accent.size * 0.15
+      )
+        continue
+    } else if (height >= width * (spacingAccent ? 0.8 : 0.45)) continue
     const bases = objects.flatMap((base) => {
       if (
         base.i === accent.i ||
@@ -58,6 +65,14 @@ export const resolveNativeMathAccents = (objects) => {
           base.text.slice(glyph.offset, glyph.offset + glyph.text.length) !== glyph.text
         )
           return []
+        if (
+          dot &&
+          (!/^(?:[A-Z]{6}\+)?CMMI(?:7|8|9|10|12)$/u.test(base.fontName ?? '') ||
+            !/^\p{Script=Greek}$/u.test(base.text.trim()) ||
+            !(base.size > 0) ||
+            Math.abs(base.size - accent.size) >= accent.size * 0.01)
+        )
+          return []
         const [x, y, end, upper] = glyph.bounds,
           baseWidth = end - x,
           baseHeight = upper - y,
@@ -83,8 +98,8 @@ export const resolveNativeMathAccents = (objects) => {
           baseHeight > base.size * 0.65 &&
           baseHeight < base.size * 0.75
         return baseHeight > height * 1.5 &&
-          (shortMacron || width >= baseWidth * (narrowHat ? 0.2 : 0.6)) &&
-          width <= baseWidth * (narrowHat ? 0.8 : 1.8) &&
+          (shortMacron || width >= baseWidth * (dot ? 0.12 : spacingAccent ? 0.2 : 0.6)) &&
+          width <= baseWidth * (dot ? 0.3 : maximumWidth) &&
           Math.abs((left + right - x - end) / 2 - skew) < baseWidth * 0.25 &&
           bottom >= upper - height * 0.2 &&
           bottom - upper < baseHeight * 0.5
@@ -97,7 +112,7 @@ export const resolveNativeMathAccents = (objects) => {
     used.add(base.i)
     const before = base.text.slice(0, glyph.offset),
       after = base.text.slice(glyph.offset + glyph.text.length),
-      mark = macron ? '¯' : narrowHat ? 'ˆ' : tilde ? '˜' : '\u0302',
+      mark = macron || spacingAccent || dot ? text : tilde ? '˜' : '\u0302',
       label = (before + glyph.text + mark + after).trim(),
       leading = (before + mark + glyph.text + after).trim()
     result.push({
@@ -105,7 +120,15 @@ export const resolveNativeMathAccents = (objects) => {
       accentIndex: accent.i,
       baseIndex: base.i,
       label,
-      labels: [label, leading],
+      // A fused equality can put the raised mark after the whole run in reader order.
+      labels:
+        mark === '˜' &&
+        accent.i + 1 === base.i &&
+        accent.fontName === base.fontName &&
+        accent.size === base.size &&
+        /^\p{Script=Greek}\s*=$/u.test(base.text.trim())
+          ? [label, leading, base.text.trim() + mark]
+          : [label, leading],
       bounds: [
         Math.min(left, base.bounds[0]),
         Math.min(bottom, base.bounds[1]),
@@ -178,6 +201,100 @@ export const resolveNativeLatinAccents = (objects) => {
       baseIndex: base.i,
       offset: glyph.offset,
       letter: (glyph.text + '\u0308').normalize('NFC')
+    })
+  }
+  return result
+}
+
+// A separately painted math-symbol slash moves with its complete native equality.
+// Neither a detached mark nor source spelling alone proves a negated relation.
+export const resolveNativeNegatedEqualities = (objects, allowLegacySlash = false) => {
+  const result = [],
+    used = new Set()
+  for (const slash of objects) {
+    const latinModern = /^(?:[A-Z]{6}\+)?LMMathSymbols10-Regular$/u.test(slash.fontName ?? '')
+    if (
+      (slash.text.trim() !== '\u0338' &&
+        !(
+          allowLegacySlash &&
+          slash.text.trim() === '6' &&
+          /^(?:[A-Z]{6}\+)?CMSY10$/u.test(slash.fontName ?? '')
+        )) ||
+      (!latinModern && !/^(?:[A-Z]{6}\+)?CMSY(?:5|6|7|8|9|10|12)$/u.test(slash.fontName ?? '')) ||
+      !(slash.size > 0) ||
+      !Number.isFinite(slash.baseline)
+    )
+      continue
+    const candidates = objects.filter((base) => {
+      const text = base.text.trim()
+      const relationBounds =
+        text === '='
+          ? base.bounds
+          : latinModern && /^= \d{1,4}$/u.test(text)
+            ? base.glyphs?.find(
+                (part) => part.text === '=' && part.offset === base.text.indexOf('=')
+              )?.bounds
+            : undefined
+      if (
+        base.i !== slash.i + 1 ||
+        !relationBounds ||
+        !(
+          latinModern
+            ? /^(?:[A-Z]{6}\+)?LMRoman10-Regular$/u
+            : /^(?:[A-Z]{6}\+)?CMR(?:5|6|7|8|9|10|12)$/u
+        ).test(base.fontName ?? '') ||
+        base.size !== slash.size ||
+        !Number.isFinite(base.baseline) ||
+        Math.abs(base.baseline - slash.baseline) > 0.01
+      )
+        return false
+      const [left, bottom, right, top] = slash.bounds,
+        [x, y, end, upper] = relationBounds,
+        width = end - x,
+        height = top - bottom
+      return (
+        [...slash.bounds, ...base.bounds].every(Number.isFinite) &&
+        width > 0 &&
+        upper > y &&
+        right > left &&
+        height > 0 &&
+        left >= x &&
+        right <= end &&
+        bottom < y &&
+        top > upper &&
+        height < slash.size * 1.1 &&
+        height > slash.size * 0.7 &&
+        Math.abs(left + right - x - end) < width * 0.2
+      )
+    })
+    if (candidates.length !== 1 || used.has(candidates[0].i)) continue
+    const base = candidates[0],
+      bounds = [
+        Math.min(slash.bounds[0], base.bounds[0]),
+        slash.bounds[1],
+        Math.max(slash.bounds[2], base.bounds[2]),
+        slash.bounds[3]
+      ]
+    if (
+      objects.some(
+        (other) =>
+          other !== slash &&
+          other !== base &&
+          other.text.trim() &&
+          other.bounds[0] < bounds[2] &&
+          other.bounds[2] > bounds[0] &&
+          other.bounds[1] < bounds[3] &&
+          other.bounds[3] > bounds[1]
+      )
+    )
+      continue
+    used.add(base.i)
+    result.push({
+      indices: [slash.i, base.i],
+      label: '\u0338' + base.text.trim(),
+      baseline: base.baseline,
+      negatedEquality: true,
+      bounds
     })
   }
   return result

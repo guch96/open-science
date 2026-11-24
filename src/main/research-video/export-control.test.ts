@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { expect, it, vi } from 'vitest'
 import { createResearchVideoExportControl } from './export-control'
 import type { ApplicationCallerLease } from '../application-command-router'
+import { desktopNativeOperationSchema } from '../desktop-native-contract'
 const native = vi.hoisted(() => ({ chooseSavePath: vi.fn(), renderResearchVideo: vi.fn() }))
 vi.mock('../desktop-interaction', () => ({ desktopFileInteraction: () => native }))
 const lease = (id: string): ApplicationCallerLease =>
@@ -22,16 +23,21 @@ const content = Buffer.from(
   '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="open-science-research-video" content="1"><title>Heat &amp; Light: Where?</title><style>body{}</style><div id="root">player</div></html>'
 )
 it.each([
-  ['generated document', content],
+  [
+    'generated document over two chunks',
+    Buffer.concat([content, Buffer.alloc(1024 * 1024)]),
+    undefined
+  ],
   [
     'explicit head element',
     Buffer.from(
       '<!doctype html><html><head><meta name="open-science-research-video" content="1"><title>Heat &amp; Light: Where?</title></head><body>player</body></html>'
-    )
+    ),
+    '4k' as const
   ]
 ])(
   'exports %s with its decoded title and atomically replaces the chosen output',
-  async (_shape, content) => {
+  async (_shape, content, resolution) => {
     const root = await mkdtemp(join(tmpdir(), 'video-export-control-'))
     let htmlPath = ''
     try {
@@ -49,6 +55,7 @@ it.each([
       native.chooseSavePath.mockResolvedValue({ canceled: false, filePath: destination })
       native.renderResearchVideo.mockImplementation(async (request) => {
         htmlPath = request.htmlPath
+        expect(request.resolution).toBe(resolution ?? '720p')
         expect(await readFile(destination, 'utf8')).toBe('old')
         expect(await readFile(htmlPath, 'utf8')).toBe(content.toString())
         await writeFile(`${htmlPath}.mp4`, 'new')
@@ -56,7 +63,12 @@ it.each([
       })
       const control = createResearchVideoExportControl({ readRange }, tools)
       await expect(control.export(lease('other'), { resourceId: 'r' })).rejects.toThrow('not owned')
-      await control.export(lease('owner'), { resourceId: 'r' })
+      await expect(
+        control.export(lease('owner'), { resourceId: 'r', resolution })
+      ).resolves.toEqual({
+        canceled: false,
+        filePath: destination
+      })
       expect(native.chooseSavePath).toHaveBeenLastCalledWith(
         { defaultPath: 'Heat-&-Light-Where.mp4', filters: [{ name: 'MP4', extensions: ['mp4'] }] },
         undefined
@@ -68,6 +80,25 @@ it.each([
     }
   }
 )
+it('rejects unsupported resolutions at both boundaries before reading or saving a file', async () => {
+  const readRange = vi.fn()
+  const control = createResearchVideoExportControl({ readRange }, tools)
+  const calls = native.chooseSavePath.mock.calls.length
+  await expect(
+    control.export(lease('owner'), { resourceId: 'r', resolution: '8k' } as never)
+  ).rejects.toThrow()
+  expect(readRange).not.toHaveBeenCalled()
+  expect(native.chooseSavePath).toHaveBeenCalledTimes(calls)
+  expect(
+    desktopNativeOperationSchema.safeParse({
+      operation: 'research-video-mp4',
+      htmlPath: '/tmp/player.html',
+      encoderPath: '/tmp/ffmpeg',
+      probePath: '/tmp/ffprobe',
+      resolution: '8k'
+    }).success
+  ).toBe(false)
+})
 it('cancels the owning export without publishing, and cannot cancel another caller', async () => {
   const root = await mkdtemp(join(tmpdir(), 'video-export-cancel-'))
   let htmlPath = ''
@@ -107,13 +138,50 @@ it('cancels the owning export without publishing, and cannot cancel another call
   }
 })
 
+it('cancels an export while its first source read is stalled', async () => {
+  const entered = Promise.withResolvers<void>()
+  const disk = Promise.withResolvers<{
+    begin: number
+    end: number
+    total: number
+    data: Uint8Array
+  }>()
+  const control = createResearchVideoExportControl(
+    {
+      readRange: () => {
+        entered.resolve()
+        return disk.promise
+      }
+    },
+    tools
+  )
+  const owner = lease('owner')
+  const settled = vi.fn()
+  const task = control.export(owner, { resourceId: 'r' }).then(settled, settled)
+  const saveDialogs = native.chooseSavePath.mock.calls.length
+  try {
+    await entered.promise
+    control.cancel(owner, { resourceId: 'r' })
+    await vi.waitFor(
+      () => expect(settled).toHaveBeenCalledWith(new Error('Video export cancelled')),
+      { timeout: 300 }
+    )
+    await expect(control.export(owner, { resourceId: 'r' })).rejects.toThrow(/still waiting/)
+    expect(native.chooseSavePath).toHaveBeenCalledTimes(saveDialogs)
+  } finally {
+    disk.resolve({ begin: 0, end: 0, total: 0, data: new Uint8Array() })
+    await task
+    await control.close()
+  }
+})
+
 it('offers installation only after authorizing the preview, without opening a save dialog', async () => {
-  const readRange = vi.fn(async (_owner, request) => ({
-    begin: request.begin,
-    end: request.end,
-    total: content.length,
-    data: content.subarray(request.begin, request.end)
-  }))
+  const total = 16 * 1024 * 1024
+  const readRange = vi.fn(async (_owner, { begin, end }) => {
+    const data = Buffer.alloc(end - begin)
+    content.copy(data, 0, Math.min(begin, content.length), Math.min(end, content.length))
+    return { begin, end, total, data }
+  })
   const chooseCalls = native.chooseSavePath.mock.calls.length
   const missing = { ...tools, available: vi.fn(async () => false) }
   const control = createResearchVideoExportControl({ readRange }, missing)
@@ -121,7 +189,9 @@ it('offers installation only after authorizing the preview, without opening a sa
     canceled: false,
     needsInstallation: { downloadBytes: 42 }
   })
-  expect(readRange).toHaveBeenCalled()
+  expect(
+    readRange.mock.calls.reduce((bytes, [, { begin, end }]) => bytes + end - begin, 0)
+  ).toBeLessThanOrEqual(4097)
   expect(native.chooseSavePath).toHaveBeenCalledTimes(chooseCalls)
   await control.close()
 })

@@ -1,5 +1,20 @@
+import {
+  SESSION_HISTORY_CURSOR_STALE,
+  SessionHistoryCursorStaleError,
+  loadSessionHistoryPageRequestSchema
+} from '../shared/session-history'
+import type {
+  ImageTask,
+  ImageTaskStart,
+  ImageTaskList,
+  ImageTaskStartResult,
+  ImageTaskIdentity
+} from '../shared/image-task'
+import type { ImageTaskOwner } from './image-model/tasks'
+import { ImageModelError } from './image-model/contract'
 import type { LocalModelSnapshot } from '../shared/local-models'
 import type {
+  ResearchVideoActiveSession,
   ResearchVideoPresentationRequest,
   ResearchVideoStartRequest,
   ResearchVideoStatusRequest,
@@ -8,7 +23,8 @@ import type {
 import type { createResearchVideoPresentationOwner } from './research-video/presentation'
 import type {
   ResearchVideoProgress,
-  ResearchVideoExportResult
+  ResearchVideoExportResult,
+  ResearchVideoResolution
 } from '@aipoch/research-film/contracts'
 import type { createVideoExportTools } from '@aipoch/research-film'
 import { createResearchVideoExportControl } from './research-video/export-control'
@@ -19,6 +35,8 @@ import {
   type UseCase
 } from '../shared/use-cases'
 import type { OfficePreviewCommands } from './office-preview/application-commands'
+import type { PptxEditCommands } from './pptx-edit/application-commands'
+import type { PptxDraftCommands } from './pptx-edit/draft-commands'
 import type { FileSaveCommands } from './file-save'
 import type { ArtifactReproducibilityCommands } from './artifacts/artifact-reproducibility-commands'
 import type { ManagedFileVersionCommandOwner } from './managed-file-versions/ipc'
@@ -42,7 +60,11 @@ import type { ProjectFilesHandlers } from './project-files/ipc'
 import type { ProjectHandlers } from './projects/ipc'
 import type { SessionPersistenceHandlers } from './session-persistence/ipc'
 import type { ManagedPreviewOwnerRegistry } from './managed-preview-ipc'
-import { canMutateSessionDelegationPolicy } from './caller-context'
+import {
+  canMutateSessionDelegationPolicy,
+  canRelayTaskInteraction,
+  hasCallerAuthority
+} from './caller-context'
 import { preserveSessionSizeLimitCode } from './session-persistence/application-command-errors'
 
 import {
@@ -51,6 +73,7 @@ import {
 } from '../shared/application-command-contract'
 import * as Artifacts from '../shared/artifacts'
 import type * as ConversationExport from '../shared/conversation-export'
+import * as OrgCases from '../shared/org-cases'
 import * as SessionPackage from '../shared/session-package'
 import type * as SessionDiagnostics from '../shared/session-diagnostics'
 import { sessionDiagnosticCommandContracts } from '../shared/session-diagnostics-contracts'
@@ -148,6 +171,12 @@ type SessionApplicationCommandOwner = Omit<SessionPersistenceHandlers, 'deleteSe
   editDetails(
     request: SessionPersistence.EditSessionDetailsRequest
   ): Promise<SessionPersistence.PersistedChatSession>
+  rename(
+    request: SessionPersistence.RenameSessionRequest
+  ): Promise<SessionPersistence.SessionMetadataReceipt>
+  setPinned(
+    request: SessionPersistence.SetSessionPinnedRequest
+  ): Promise<SessionPersistence.SessionMetadataReceipt>
   updateSessionConfiguration(
     session: SessionPersistence.PersistedChatSession,
     expectedRevision: number
@@ -231,7 +260,15 @@ type DataRootWrite = <Result>(operation: () => Promise<Result>) => Promise<Resul
 
 type DataContentApplicationCommandDependencies = Readonly<{
   useCaseCatalog: UseCaseCatalog
+  orgCases: {
+    listCases(query?: OrgCases.ListOrgCasesQuery): Promise<OrgCases.ListOrgCasesResult>
+    getCase(caseId: string): Promise<OrgCases.GetOrgCaseDetailResult>
+    importCase(caseId: string): Promise<OrgCases.ImportOrgCaseResult>
+    cancelImport(caseId?: string): OrgCases.CancelOrgCaseImportResult
+  }
   officePreviewCommands: OfficePreviewCommands
+  pptxEditCommands: PptxEditCommands
+  pptxDraftCommands: PptxDraftCommands
   fileSaveCommands: FileSaveCommands
   reproducibility: ArtifactReproducibilityCommands
   runtimeWriter?: RuntimeWriterOwner
@@ -239,6 +276,7 @@ type DataContentApplicationCommandDependencies = Readonly<{
   electron: ElectronDataContentApplicationCommandAdapter
   events: ApplicationEventPublisher
   managedFileVersions: ManagedFileVersionCommandOwner
+  imageTasks?: ImageTaskOwner
   researchVideoPresentation?: ReturnType<typeof createResearchVideoPresentationOwner>
   videoExportTools?: ReturnType<typeof createVideoExportTools<LocalModelSnapshot>>
   managedPreview: ManagedPreviewApplicationCommandOwner
@@ -274,6 +312,26 @@ const dataContentApplicationCommands = Object.freeze({
     readonly ['cached' | 'refreshed' | 'reload'],
     UseCase[]
   >('sessions:use-case-catalog', useCaseCatalogContract),
+  orgCasesList: defineApplicationCommand<
+    'sessions:org-cases-list',
+    readonly [query?: OrgCases.ListOrgCasesQuery],
+    OrgCases.ListOrgCasesResult
+  >('sessions:org-cases-list', OrgCases.orgCaseCommandContracts.list),
+  orgCaseDetail: defineApplicationCommand<
+    'sessions:org-case-detail',
+    readonly [caseId: string],
+    OrgCases.GetOrgCaseDetailResult
+  >('sessions:org-case-detail', OrgCases.orgCaseCommandContracts.detail),
+  orgCaseImport: defineApplicationCommand<
+    'sessions:org-case-import',
+    readonly [caseId: string],
+    OrgCases.ImportOrgCaseResult
+  >('sessions:org-case-import', OrgCases.orgCaseCommandContracts.import),
+  orgCaseCancelImport: defineApplicationCommand<
+    'sessions:org-case-cancel-import',
+    readonly [caseId?: string],
+    OrgCases.CancelOrgCaseImportResult
+  >('sessions:org-case-cancel-import', OrgCases.orgCaseCommandContracts.cancelImport),
   officePreviewOpen: invocationCommandFor<OfficePreviewCommands>()('office-preview:open', 'open'),
   officePreviewAttachFrame: invocationCommandFor<OfficePreviewCommands>()(
     'office-preview:attach-frame',
@@ -287,6 +345,13 @@ const dataContentApplicationCommands = Object.freeze({
     'office-preview:report-state',
     'reportState'
   ),
+  pptxEditOpen: invocationCommandFor<PptxEditCommands>()('pptx-edit:open', 'open'),
+  pptxEditApply: invocationCommandFor<PptxEditCommands>()('pptx-edit:apply', 'apply'),
+  pptxEditSave: invocationCommandFor<PptxEditCommands>()('pptx-edit:save', 'save'),
+  pptxEditClose: invocationCommandFor<PptxEditCommands>()('pptx-edit:close', 'close'),
+  pptxDraftGet: invocationCommandFor<PptxDraftCommands>()('pptx-draft:get', 'get'),
+  pptxDraftAccept: invocationCommandFor<PptxDraftCommands>()('pptx-draft:accept', 'accept'),
+  pptxDraftReject: invocationCommandFor<PptxDraftCommands>()('pptx-draft:reject', 'reject'),
 
   sessionOpenRecoveryFolder: electronCommand('sessions:open-recovery-folder', 'openRecoveryFolder'),
   artifactSaveProgress: invocationCommandFor<FileSaveCommands>()(
@@ -394,6 +459,7 @@ const dataContentApplicationCommands = Object.freeze({
   ),
   artifactGetVersionReview: artifactCommand('artifacts:get-version-review', 'getVersionReview'),
   artifactOpenFile: artifactCommand('artifacts:open-file', 'openFile'),
+  artifactOpenInBrowser: artifactCommand('artifacts:open-in-browser', 'openInBrowser'),
   artifactReadPreview: artifactCommand('artifacts:read-preview', 'readPreview'),
   artifactReconcilePending: artifactCommand(
     'artifacts:reconcile-pending',
@@ -407,6 +473,10 @@ const dataContentApplicationCommands = Object.freeze({
   managedFileSaveTextEdit: managedFileCommand(
     'managed-file-versions:save-text-edit',
     'saveTextEdit'
+  ),
+  managedFileSaveBinaryEdit: managedFileCommand(
+    'managed-file-versions:save-binary-edit',
+    'saveBinaryEdit'
   ),
   managedFileDiffText: managedFileInvocationCommand('managed-file-versions:diff-text', 'diffText'),
   managedFileCancelDiff: managedFileInvocationCommand(
@@ -436,9 +506,34 @@ const dataContentApplicationCommands = Object.freeze({
   >('preview-resources:read-range'),
   previewResearchVideoExport: defineApplicationCommand<
     'preview-resources:export-research-video',
-    readonly [request: { resourceId: string }],
+    readonly [request: { resourceId: string; resolution?: ResearchVideoResolution }],
     ResearchVideoExportResult
   >('preview-resources:export-research-video'),
+  imageTaskStart: defineApplicationCommand<
+    'image-tasks:start',
+    readonly [request: ImageTaskStart],
+    ImageTaskStartResult
+  >('image-tasks:start'),
+  imageTaskGet: defineApplicationCommand<
+    'image-tasks:get',
+    readonly [request: ImageTaskIdentity],
+    ImageTask | undefined
+  >('image-tasks:get'),
+  imageTaskList: defineApplicationCommand<
+    'image-tasks:list',
+    readonly [request: ImageTaskList],
+    ImageTask[]
+  >('image-tasks:list'),
+  imageTaskCancel: defineApplicationCommand<
+    'image-tasks:cancel',
+    readonly [request: ImageTaskIdentity],
+    void
+  >('image-tasks:cancel'),
+  researchVideoPresentationActive: defineApplicationCommand<
+    'research-video:active-sessions',
+    readonly [],
+    readonly ResearchVideoActiveSession[]
+  >('research-video:active-sessions'),
   researchVideoPresentationStart: defineApplicationCommand<
     'research-video:start',
     readonly [request: ResearchVideoStartRequest],
@@ -565,6 +660,16 @@ const dataContentApplicationCommands = Object.freeze({
     'editDetails',
     SessionPersistence.sessionApplicationCommandContracts.editDetails
   ),
+  sessionRename: sessionCommand(
+    'sessions:rename',
+    'rename',
+    SessionPersistence.sessionApplicationCommandContracts.rename
+  ),
+  sessionSetPinned: sessionCommand(
+    'sessions:set-pinned',
+    'setPinned',
+    SessionPersistence.sessionApplicationCommandContracts.setPinned
+  ),
   sessionExportConversation: electronCommand(
     'sessions:export-conversation',
     'exportConversationFromInvokingWindow'
@@ -617,6 +722,7 @@ const dataContentApplicationCommands = Object.freeze({
   ),
   sessionLoadAll: sessionCommand('sessions:load-all', 'loadAll'),
   sessionLoadOne: sessionCommand('sessions:load-one', 'loadOne'),
+  sessionLoadHistoryPage: sessionCommand('sessions:load-history-page', 'loadHistoryPage'),
   sessionListRuntimeTerminalFailures: sessionCommand(
     'sessions:list-runtime-terminal-failures',
     'listRuntimeTerminalFailures'
@@ -726,6 +832,7 @@ const dataContentApplicationCommandGroups = Object.freeze([
     dataContentApplicationCommands.artifactGetVersionProvenance,
     dataContentApplicationCommands.artifactGetVersionReview,
     dataContentApplicationCommands.artifactOpenFile,
+    dataContentApplicationCommands.artifactOpenInBrowser,
     dataContentApplicationCommands.artifactReadPreview,
     dataContentApplicationCommands.artifactReconcilePending,
     dataContentApplicationCommands.artifactResolveVersionDescriptors
@@ -745,6 +852,11 @@ const dataContentApplicationCommandGroups = Object.freeze([
     dataContentApplicationCommands.previewResourceRelease,
     dataContentApplicationCommands.previewResearchVideoExport,
     dataContentApplicationCommands.previewResearchVideoCancel,
+    dataContentApplicationCommands.imageTaskStart,
+    dataContentApplicationCommands.imageTaskGet,
+    dataContentApplicationCommands.imageTaskList,
+    dataContentApplicationCommands.imageTaskCancel,
+    dataContentApplicationCommands.researchVideoPresentationActive,
     dataContentApplicationCommands.researchVideoPresentationStart,
     dataContentApplicationCommands.researchVideoPresentationStatus,
     dataContentApplicationCommands.researchVideoPresentationRemove,
@@ -779,6 +891,8 @@ const dataContentApplicationCommandGroups = Object.freeze([
     dataContentApplicationCommands.sessionDelete,
     dataContentApplicationCommands.sessionDeleteRecoveryFile,
     dataContentApplicationCommands.sessionEditDetails,
+    dataContentApplicationCommands.sessionRename,
+    dataContentApplicationCommands.sessionSetPinned,
     dataContentApplicationCommands.sessionExportConversation,
     dataContentApplicationCommands.sessionInspectDiagnostics,
     dataContentApplicationCommands.sessionExportDiagnostics,
@@ -787,6 +901,10 @@ const dataContentApplicationCommandGroups = Object.freeze([
     dataContentApplicationCommands.sessionExportPackage,
     dataContentApplicationCommands.sessionImportPackage,
     dataContentApplicationCommands.sessionPackageOperation,
+    dataContentApplicationCommands.orgCasesList,
+    dataContentApplicationCommands.orgCaseDetail,
+    dataContentApplicationCommands.orgCaseImport,
+    dataContentApplicationCommands.orgCaseCancelImport,
     dataContentApplicationCommands.useCaseCatalog,
     dataContentApplicationCommands.useCaseIntroduction,
     dataContentApplicationCommands.sessionFilterPdfContextCandidates,
@@ -794,6 +912,7 @@ const dataContentApplicationCommandGroups = Object.freeze([
     dataContentApplicationCommands.sessionList,
     dataContentApplicationCommands.sessionLoadAll,
     dataContentApplicationCommands.sessionLoadOne,
+    dataContentApplicationCommands.sessionLoadHistoryPage,
     dataContentApplicationCommands.sessionListRuntimeTerminalFailures,
     dataContentApplicationCommands.sessionRetryRuntimeTerminalCommit,
     dataContentApplicationCommands.sessionSearchMessages,
@@ -827,6 +946,7 @@ const dataContentApplicationCommandGroups = Object.freeze([
   defineApplicationCommandGroup('managed-file-versions', [
     dataContentApplicationCommands.managedFileInspect,
     dataContentApplicationCommands.managedFileSaveTextEdit,
+    dataContentApplicationCommands.managedFileSaveBinaryEdit,
     dataContentApplicationCommands.managedFileDiffText,
     dataContentApplicationCommands.managedFileCancelDiff
   ] as const),
@@ -859,6 +979,15 @@ const dataContentApplicationCommandGroups = Object.freeze([
     dataContentApplicationCommands.officePreviewAttachFrame,
     dataContentApplicationCommands.officePreviewClose,
     dataContentApplicationCommands.officePreviewReportState
+  ]),
+  defineApplicationCommandGroup('pptx-edit', [
+    dataContentApplicationCommands.pptxEditOpen,
+    dataContentApplicationCommands.pptxEditApply,
+    dataContentApplicationCommands.pptxEditSave,
+    dataContentApplicationCommands.pptxEditClose,
+    dataContentApplicationCommands.pptxDraftGet,
+    dataContentApplicationCommands.pptxDraftAccept,
+    dataContentApplicationCommands.pptxDraftReject
   ])
 ] as const)
 
@@ -985,6 +1114,10 @@ const registerDataContentApplicationCommands = (
         assertLocalCaller(invocation, dataContentApplicationCommands.artifactOpenFile.name)
         return dependencies.artifacts.openFile(invocation.args[0])
       },
+      'artifacts:open-in-browser': (invocation) => {
+        assertLocalCaller(invocation, dataContentApplicationCommands.artifactOpenInBrowser.name)
+        return dependencies.artifacts.openInBrowser(invocation.args[0])
+      },
       'artifacts:read-preview': ({ args }) => dependencies.artifacts.readPreview(args[0]),
       'artifacts:reconcile-pending': ({ args }) =>
         dependencies.artifacts.reconcilePendingArtifacts(args[0]),
@@ -1020,6 +1153,33 @@ const registerDataContentApplicationCommands = (
           invocation.args[0],
           invocation.callerContext.clientId
         )
+      },
+      'image-tasks:start': async (invocation) => {
+        if (!dependencies.imageTasks) throw new Error('Image tasks are unavailable.')
+        try {
+          return await dependencies.imageTasks.start(invocation.args[0])
+        } catch (error) {
+          if (!(error instanceof ImageModelError)) throw error
+          return { error: error.detail }
+        }
+      },
+      'image-tasks:get': (invocation) => {
+        if (!dependencies.imageTasks) throw new Error('Image tasks are unavailable.')
+        return dependencies.imageTasks.get(invocation.args[0])
+      },
+      'image-tasks:list': (invocation) => {
+        if (!dependencies.imageTasks) throw new Error('Image tasks are unavailable.')
+        return dependencies.imageTasks.list(invocation.args[0])
+      },
+      'image-tasks:cancel': (invocation) => {
+        if (!dependencies.imageTasks) throw new Error('Image tasks are unavailable.')
+        return dependencies.imageTasks.cancel(invocation.args[0])
+      },
+      'research-video:active-sessions': (invocation) => {
+        assertElectronCaller(invocation, 'research-video:active-sessions')
+        if (!dependencies.researchVideoPresentation)
+          throw new Error('Research explanation service is unavailable.')
+        return dependencies.researchVideoPresentation.activeSessions()
       },
       'research-video:start': (invocation) => {
         assertElectronCaller(invocation, 'research-video:start')
@@ -1161,6 +1321,50 @@ const registerDataContentApplicationCommands = (
           })
         )
       },
+      'sessions:rename': (invocation) =>
+        dependencies.withDataRootWrite(() =>
+          preserveSessionSizeLimitCode(async () => {
+            try {
+              return await dependencies.sessions.rename(invocation.args[0])
+            } catch (error) {
+              if (SessionPersistence.isSessionDetailsConflictError(error)) {
+                throw new ApplicationCommandError(
+                  SessionPersistence.SESSION_DETAILS_CONFLICT_ERROR_CODE,
+                  error instanceof Error ? error.message : 'Session details changed elsewhere.'
+                )
+              }
+              if (SessionPersistence.isSessionRevisionConflictError(error)) {
+                throw new ApplicationCommandError(
+                  SessionPersistence.SESSION_REVISION_CONFLICT_ERROR_CODE,
+                  error instanceof Error ? error.message : 'Session revision conflict.'
+                )
+              }
+              throw error
+            }
+          })
+        ),
+      'sessions:set-pinned': (invocation) =>
+        dependencies.withDataRootWrite(() =>
+          preserveSessionSizeLimitCode(async () => {
+            try {
+              return await dependencies.sessions.setPinned(invocation.args[0])
+            } catch (error) {
+              if (SessionPersistence.isSessionDetailsConflictError(error)) {
+                throw new ApplicationCommandError(
+                  SessionPersistence.SESSION_DETAILS_CONFLICT_ERROR_CODE,
+                  error instanceof Error ? error.message : 'Session pin changed elsewhere.'
+                )
+              }
+              if (SessionPersistence.isSessionRevisionConflictError(error)) {
+                throw new ApplicationCommandError(
+                  SessionPersistence.SESSION_REVISION_CONFLICT_ERROR_CODE,
+                  error instanceof Error ? error.message : 'Session revision conflict.'
+                )
+              }
+              throw error
+            }
+          })
+        ),
       'sessions:export-conversation': (invocation) => {
         assertElectronCaller(
           invocation,
@@ -1190,7 +1394,7 @@ const registerDataContentApplicationCommands = (
         return dependencies.electron.cancelSessionDiagnostics(invocation)
       },
       'sessions:fork': (invocation) => {
-        assertElectronCaller(invocation, dataContentApplicationCommands.sessionFork.name)
+        assertElectronOrLocalWebCaller(invocation, dataContentApplicationCommands.sessionFork.name)
         return dependencies.electron.forkSession(invocation)
       },
       'sessions:export-package': (invocation) => {
@@ -1217,11 +1421,56 @@ const registerDataContentApplicationCommands = (
           ? dependencies.useCaseCatalog.cached()
           : dependencies.useCaseCatalog.refresh(invocation.args[0] === 'reload')
       },
+      'sessions:org-cases-list': (invocation) => {
+        assertElectronOrLocalWebCaller(invocation, dataContentApplicationCommands.orgCasesList.name)
+        return dependencies.orgCases.listCases(invocation.args[0])
+      },
+      'sessions:org-case-detail': (invocation) => {
+        assertElectronOrLocalWebCaller(
+          invocation,
+          dataContentApplicationCommands.orgCaseDetail.name
+        )
+        return dependencies.orgCases.getCase(invocation.args[0])
+      },
+      'sessions:org-case-import': (invocation) => {
+        assertElectronOrLocalWebCaller(
+          invocation,
+          dataContentApplicationCommands.orgCaseImport.name
+        )
+        return dependencies.orgCases.importCase(invocation.args[0])
+      },
+      'sessions:org-case-cancel-import': (invocation) => {
+        assertElectronOrLocalWebCaller(
+          invocation,
+          dataContentApplicationCommands.orgCaseCancelImport.name
+        )
+        return dependencies.orgCases.cancelImport(invocation.args[0])
+      },
       'sessions:package-operation': (invocation) => {
+        if (invocation.args[0].action === 'respond-export-review') {
+          if (
+            !canRelayTaskInteraction(invocation.callerContext) ||
+            !invocation.callerLease.isCurrent()
+          )
+            throw new ApplicationCommandError(
+              'command-unavailable',
+              'Relaying a sensitive export decision requires the authenticated local Agent interface.'
+            )
+          return dependencies.electron.sessionPackageOperation(invocation)
+        }
         assertElectronOrLocalWebCaller(
           invocation,
           dataContentApplicationCommands.sessionPackageOperation.name
         )
+        if (
+          invocation.args[0].action === 'agent-import' &&
+          !hasCallerAuthority(invocation.callerContext, 'import-local-package-path')
+        ) {
+          throw new ApplicationCommandError(
+            'command-unavailable',
+            'Importing an explicit path requires the authenticated local Agent interface.'
+          )
+        }
         return dependencies.electron.sessionPackageOperation(invocation)
       },
       'sessions:filter-pdf-context-candidates': ({ args }) =>
@@ -1249,6 +1498,18 @@ const registerDataContentApplicationCommands = (
         ),
       'sessions:load-one': ({ args }) =>
         dependencies.withDataRootWrite(() => dependencies.sessions.loadOne(args[0])),
+      'sessions:load-history-page': ({ args }) =>
+        dependencies.withDataRootWrite(async () => {
+          try {
+            return await dependencies.sessions.loadHistoryPage(
+              loadSessionHistoryPageRequestSchema.parse(args[0])
+            )
+          } catch (error) {
+            if (error instanceof SessionHistoryCursorStaleError)
+              throw new ApplicationCommandError(SESSION_HISTORY_CURSOR_STALE, error.message)
+            throw error
+          }
+        }),
       'sessions:list-runtime-terminal-failures': () =>
         dependencies.sessions.listRuntimeTerminalFailures(),
       'sessions:retry-runtime-terminal-commit': ({ args }) =>
@@ -1490,11 +1751,12 @@ const registerDataContentApplicationCommands = (
       'managed-file-versions:inspect': async (invocation) => {
         const [request] = invocation.args
         const result = await dependencies.managedFileVersions.inspect(request)
-        // The command may be reached from a remote Web caller. Never return a Version whose
-        // resolved Project or logical File identity differs from the requested scope.
+        // Artifact-only browser URLs let the service resolve the Project. Still reject any
+        // mismatch with an explicitly requested Project or the required logical File identity.
         if (
           result.ok &&
-          (result.value.projectId !== request.projectId || result.value.fileId !== request.fileId)
+          ((request.projectId !== undefined && result.value.projectId !== request.projectId) ||
+            result.value.fileId !== request.fileId)
         ) {
           throw new Error('Managed file version identity does not match the requested scope.')
         }
@@ -1506,6 +1768,8 @@ const registerDataContentApplicationCommands = (
       },
       'managed-file-versions:save-text-edit': ({ args }) =>
         dependencies.managedFileVersions.saveTextEdit(args[0]),
+      'managed-file-versions:save-binary-edit': ({ args }) =>
+        dependencies.managedFileVersions.saveBinaryEdit(args[0]),
       'managed-file-versions:diff-text': (invocation) =>
         dependencies.managedFileVersions.diffText(invocation),
       'managed-file-versions:cancel-diff': (invocation) =>
@@ -1561,6 +1825,15 @@ const registerDataContentApplicationCommands = (
       'office-preview:close': (invocation) => dependencies.officePreviewCommands.close(invocation),
       'office-preview:report-state': (invocation) =>
         dependencies.officePreviewCommands.reportState(invocation)
+    })
+    scope.registerGroup(dataContentApplicationCommandGroups[12], {
+      'pptx-edit:open': (invocation) => dependencies.pptxEditCommands.open(invocation),
+      'pptx-edit:apply': (invocation) => dependencies.pptxEditCommands.apply(invocation),
+      'pptx-edit:save': (invocation) => dependencies.pptxEditCommands.save(invocation),
+      'pptx-edit:close': (invocation) => dependencies.pptxEditCommands.close(invocation),
+      'pptx-draft:get': (invocation) => dependencies.pptxDraftCommands.get(invocation),
+      'pptx-draft:accept': (invocation) => dependencies.pptxDraftCommands.accept(invocation),
+      'pptx-draft:reject': (invocation) => dependencies.pptxDraftCommands.reject(invocation)
     })
     return scope.complete(() => {
       return Promise.all([videoExports.close(), dependencies.reproducibility?.dispose()]).then(

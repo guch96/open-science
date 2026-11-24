@@ -23,7 +23,45 @@ export async function bindNativeReferenceRolePage(
   unreliable: Set<string>,
   viewport = page.getViewport({ scale: 1 })
 ): Promise<void> {
-  if (!content.items.some((item) => 'str' in item && /^\[\d{1,4}\]$/u.test(item.str))) return
+  const bracketed = content.items.some(
+    (item) => 'str' in item && /^\[\d{1,4}\](?:$|\s+\p{Lu}\.)/u.test(item.str)
+  )
+  const invertedBibliography =
+    raw.page >= document.numPages - 1 &&
+    content.items.filter(
+      (item) => 'str' in item && /^\[\d{1,4}\] \p{Lu}[\p{L}\p{M}.’'–-]+,/u.test(item.str)
+    ).length >= 4
+  const compactBibliography =
+    raw.page >= document.numPages - 1 &&
+    raw.items
+      .filter((item) => item.str.trim())
+      .filter((item, i, items) => isCompactRaisedReferenceOrdinal(item, items[i + 1])).length >= 3
+  const terminalFullNames =
+    raw.page >= document.numPages - 1 &&
+    content.items.filter(
+      (item) => 'str' in item && /^\[\d{1,4}\] \p{Lu}[\p{L}\p{M}’'–-]+/u.test(item.str)
+    ).length >= 3
+  if (!bracketed && !invertedBibliography && !compactBibliography && !terminalFullNames) {
+    if (raw.page !== document.numPages) return
+    const entries = raw.items.filter((item) => item.str.trim())
+    const first = entries[0]
+    const flatOrdinals =
+      first?.str === '1'
+        ? entries.filter(
+            (item) => item.transform[4] === first.transform[4] && /^\d{1,3}$/u.test(item.str)
+          )
+        : []
+    const hangingBibliography =
+      flatOrdinals.length >= 4 && flatOrdinals.every((item, i) => Number(item.str) === i + 1)
+    if (!hangingBibliography) {
+      const right = entries.filter((item) => item.transform[4] > raw.width / 2)
+      const superscripts = right.filter((item, i) =>
+        isTightRaisedReferenceOrdinal(item, right[i + 1])
+      )
+      if (superscripts.length < 5 || superscripts.some((item, i) => Number(item.str) !== i + 1))
+        return
+    }
+  }
   let endTextAtEOF = false
   let eofCurrent = (): boolean => false
   try {
@@ -40,16 +78,40 @@ export async function bindNativeReferenceRolePage(
     ) {
       const show = operators.fnArray.lastIndexOf(OPS.showText),
         fontAt = operators.fnArray.findLastIndex((op, i) => i < show && op === OPS.setFont),
-        literal = (operators.argsArray[show]?.[0] ?? [])
-          .filter((g: unknown) => !!g && typeof g === 'object')
-          .map((g: { unicode?: string }) => g.unicode ?? '\uFFFD')
-          .join(''),
-        compact = (s: string): string => normalizeUnicode(s).normalize('NFD').replace(/\s/gu, '')
+        literal = (at: number): string =>
+          (operators.argsArray[at]?.[0] ?? [])
+            .filter((g: unknown) => !!g && typeof g === 'object')
+            .map((g: { unicode?: string }) => g.unicode ?? '\uFFFD')
+            .join(''),
+        compact = (s: string): string => normalizeUnicode(s).normalize('NFD').replace(/\s/gu, ''),
+        spelling = compact(last.str)
+      // The number and citation may paint through separate color operations.
+      // Color alone leaves the native font, text matrix and advance continuous.
+      let firstShow = show,
+        value = literal(show)
+      if (!compact(value).endsWith(spelling)) {
+        let previous = show - 1
+        while (
+          previous >= show - 8 &&
+          (operators.fnArray[previous] === OPS.setFillRGBColor ||
+            operators.fnArray[previous] === OPS.setStrokeRGBColor)
+        )
+          previous--
+        // A terminal word can be divided at a horizontal kerning move within its native item.
+        if (operators.fnArray[previous] === OPS.moveText) {
+          const [offset, rise] = operators.argsArray[previous] ?? []
+          if (rise === 0 && offset > 0 && offset <= last.width) previous--
+        }
+        if (previous > fontAt && operators.fnArray[previous] === OPS.showText) {
+          firstShow = previous
+          value = literal(previous) + value
+        }
+      }
       endTextAtEOF =
         show >= 0 &&
         fontAt >= 0 &&
         operators.argsArray[fontAt]?.[0] === last.fontName &&
-        compact(literal).endsWith(compact(last.str)) &&
+        compact(value).endsWith(spelling) &&
         operators.fnArray.slice(show + 1).includes(OPS.endText) &&
         !operators.fnArray
           .slice(show + 1)
@@ -66,16 +128,10 @@ export async function bindNativeReferenceRolePage(
           args = operators.argsArray,
           getOperators = page.getOperatorList,
           showArgs = args[show],
+          firstArgs = args[firstShow],
           fontArgs = args[fontAt],
           count = fn.length,
-          tail = JSON.stringify([
-            fn[fontAt],
-            fontArgs,
-            fn[show],
-            showArgs,
-            fn.slice(show + 1),
-            args.slice(show + 1)
-          ])
+          tail = JSON.stringify([fn[fontAt], fontArgs, fn.slice(firstShow), args.slice(firstShow)])
         eofCurrent = () =>
           page.getOperatorList === getOperators &&
           operators.fnArray === fn &&
@@ -83,16 +139,11 @@ export async function bindNativeReferenceRolePage(
           fn.length === count &&
           args.length === count &&
           args[show] === showArgs &&
+          args[firstShow] === firstArgs &&
           args[fontAt] === fontArgs &&
           operators.lastChunk === true &&
-          JSON.stringify([
-            fn[fontAt],
-            args[fontAt],
-            fn[show],
-            args[show],
-            fn.slice(show + 1),
-            args.slice(show + 1)
-          ]) === tail
+          JSON.stringify([fn[fontAt], args[fontAt], fn.slice(firstShow), args.slice(firstShow)]) ===
+            tail
       }
     }
   } catch {
@@ -506,6 +557,86 @@ export async function readNativeDisplayEquationEvidence(
   }
 }
 
+// This branch only supplies rules to the derivative-owner check. It does not
+// extend the accepted graphics state for the other native display proofs.
+export async function readNativeDerivativeRuleEvidence(
+  page: PDFPageProxy,
+  content: Content,
+  display: NativeReferenceEvidence
+): Promise<NativeReferenceEvidence> {
+  if (display.complete) return display
+  if (
+    display.reason === 'no-display-equation-number' &&
+    content.items.some((item) => 'str' in item && item.str.trim() === 'dx') &&
+    content.items.some(
+      (item) => 'str' in item && /^\([1-9]\d{0,3}\.[1-9]\d{0,3}\)$/u.test(item.str)
+    )
+  )
+    return readNativeLinearRuleEvidence(page, content, true)
+  if (
+    !display.reason.startsWith('unsupported-graphics-operator:') ||
+    !content.items.some((item) => 'str' in item && item.str.trim() === 'dt') ||
+    !content.items.some((item) => 'str' in item && /^\([1-9]\d{0,3}\)$/u.test(item.str))
+  )
+    return display
+  return readNativeLinearRuleEvidence(page, content, true)
+}
+
+export function isCompactRaisedReferenceOrdinal(
+  item: PdfLayoutPage['items'][number],
+  next: PdfLayoutPage['items'][number] | undefined
+): boolean {
+  if (!next || !/^[1-9]\d{0,2}$/u.test(item.str) || item.fontName !== next.fontName) return false
+  const em = next.height,
+    rise = item.transform[5] - next.transform[5],
+    gap = next.transform[4] - item.transform[4] - item.width
+  return (
+    item.height > em * 0.58 &&
+    item.height < em * 0.63 &&
+    rise > em * 0.43 &&
+    rise < em * 0.48 &&
+    gap > em * 0.2 &&
+    gap < em * 0.32 &&
+    /^\p{Lu}\./u.test(next.str)
+  )
+}
+
+/** A compact raised ordinal abuts the following author text with no wide gap. */
+export function isTightRaisedReferenceOrdinal(
+  item: { str: string; height: number; width: number; transform: number[] },
+  next: { height: number; transform: number[] } | undefined
+): boolean {
+  return (
+    /^\d{1,3}$/u.test(item.str) &&
+    !!next &&
+    item.height > next.height * 0.7 &&
+    item.height < next.height * 0.8 &&
+    item.transform[5] > next.transform[5] &&
+    item.transform[5] - next.transform[5] < next.height * 0.4 &&
+    next.transform[4] >= item.transform[4] + item.width &&
+    next.transform[4] - item.transform[4] - item.width < next.height * 0.1
+  )
+}
+
+/** Raised ordinals use the baseline and spacing of the following native text. */
+export function isRaisedReferenceOrdinal(
+  item: { str: string; height: number; width: number; transform: number[] },
+  next: { height: number; transform: number[] } | undefined
+): boolean {
+  if (!next || !/^[1-9]\d{0,2}$/u.test(item.str)) return false
+  const font = next.height,
+    raise = item.transform[5] - next.transform[5],
+    gap = next.transform[4] - item.transform[4] - item.width
+  return (
+    item.height > font * 0.64 &&
+    item.height < font * 0.69 &&
+    raise > font * 0.4 &&
+    raise < font * 0.46 &&
+    gap > font * 0.45 &&
+    gap < font * 0.55
+  )
+}
+
 /** Numbered control flow and superscript bibliographies have distinct native
  * markers. They request the unchanged strict font/rule proof independently of
  * the existing bracket-reference and display-equation admission guards. */
@@ -528,18 +659,52 @@ export async function readNativeNumberedPacketEvidence(
       item.transform[5] - next.transform[5] < next.height * 0.4
     )
   })
-  if (!algorithm && markers.length < 3)
+  const raised = items.filter((item, index) =>
+    isRaisedReferenceOrdinal(item, items[index + 1])
+  ).length
+  if (!algorithm && markers.length < 3 && raised < 4)
     return { complete: false, reason: 'no-numbered-native-packet' }
   if (reference.complete) return reference
   if (display.complete) return display
   if (reference.reason === 'incomplete-native-font' || display.reason === 'incomplete-native-font')
     return { complete: false, reason: 'incomplete-native-font' }
-  return readNativeLinearRuleEvidence(page, content)
+  return readNativeLinearRuleEvidence(page, content, false, undefined, raised >= 4)
+}
+
+// Opposite-column raster paint cannot cross a locally scoped algorithm.
+export async function readNativeCompactAlgorithmEvidence(
+  page: PDFPageProxy,
+  content: Awaited<ReturnType<PDFPageProxy['getTextContent']>>
+): Promise<NativeReferenceEvidence | undefined> {
+  const items = content.items.flatMap((item) => ('str' in item && item.str.trim() ? [item] : []))
+  const starts = items.filter((item) => /^Algorithm\s+[1-9]\d*\b/u.test(item.str))
+  if (
+    starts.length !== 1 ||
+    !items.some((item) => item.str === 'Initialization:') ||
+    !items.some((item) => item.str === 'Output:')
+  )
+    return
+  const viewport = page.getViewport({ scale: 1 })
+  const center = viewport.width / 2
+  const [a, , c, , e] = viewport.transform
+  const x = a * starts[0].transform[4] + c * starts[0].transform[5] + e
+  if (!Number.isFinite(x) || x === center) return
+  const side = x < center ? 'left' : 'right'
+  const evidence = await readNativeLinearRuleEvidence(page, content, false, side)
+  if (!evidence.complete) return
+  const rules = evidence.rules.filter((rule) =>
+    side === 'left' ? rule.right < center : rule.left > center
+  )
+  if (!rules.some((rule) => rule.right - rule.left >= viewport.width * 0.32)) return
+  return { ...evidence, rules }
 }
 
 async function readNativeLinearRuleEvidence(
   page: PDFPageProxy,
-  content: Awaited<ReturnType<PDFPageProxy['getTextContent']>>
+  content: Awaited<ReturnType<PDFPageProxy['getTextContent']>>,
+  allowOpaqueState = false,
+  compactAlgorithmSide?: 'left' | 'right',
+  allowSolidDivider = false
 ): Promise<NativeReferenceEvidence> {
   const fail = (reason: string): NativeReferenceEvidence => ({ complete: false, reason })
   try {
@@ -597,6 +762,24 @@ async function readNativeLinearRuleEvidence(
       const op = operators.fnArray[n],
         args = operators.argsArray[n] ?? []
       if (inert.has(op)) continue
+      // An explicit fully opaque fill/stroke is the default native paint state.
+      // The display reader accepts only that identity, with no other state keys.
+      if (
+        allowOpaqueState &&
+        op === OPS.setGState &&
+        args.length === 1 &&
+        Array.isArray(args[0]) &&
+        args[0].length === 2 &&
+        new Set(args[0].map((entry) => entry?.[0])).size === 2 &&
+        args[0].every(
+          (entry) =>
+            Array.isArray(entry) &&
+            entry.length === 2 &&
+            ['CA', 'ca'].includes(entry[0]) &&
+            entry[1] === 1
+        )
+      )
+        continue
       if (op === OPS.save) {
         stack.push({ ...state, matrix: [...state.matrix], dash: [...state.dash] })
         continue
@@ -609,7 +792,37 @@ async function readNativeLinearRuleEvidence(
       }
       if (op === OPS.transform) {
         state.matrix = Util.transform(state.matrix, args)
-        if (!upright(state.matrix)) return fail('non-upright-paint-transform')
+        if (!upright(state.matrix)) {
+          const [a, b, c, d, x, y] = Util.transform(virtual, state.matrix)
+          if (
+            !allowSolidDivider ||
+            operators.fnArray[n - 1] !== OPS.save ||
+            operators.fnArray[n + 1] !== OPS.paintSolidColorImageMask ||
+            operators.fnArray[n + 2] !== OPS.restore ||
+            state.fill !== '#000000' ||
+            ![a, b, c, d, x, y].every(Number.isFinite) ||
+            b !== 0 ||
+            c !== 0 ||
+            a < viewport.width * 0.08 ||
+            a > viewport.width * 0.5 ||
+            d < -2 ||
+            d > -0.1 ||
+            x < 0 ||
+            x + a > viewport.width ||
+            y + d < 0 ||
+            y > viewport.height
+          )
+            return fail('non-upright-paint-transform')
+          // A unit stencil can paint the same horizontal separator as a stroke.
+          rules.push({
+            left: x,
+            right: x + a,
+            baseline: y + d / 2,
+            halfHeight: -d / 2,
+            operators: [n + 1]
+          })
+          n++
+        }
         continue
       }
       if (op === OPS.setLineWidth) {
@@ -637,8 +850,24 @@ async function readNativeLinearRuleEvidence(
         if (args[0] !== 0) return fail('unsupported-text-paint-mode')
         continue
       }
-      // In particular, clipping, transparency, forms, images and unknown state
-      // are rejected. They are not silently ignored when certifying a rule.
+      // Unknown graphic state stays disallowed when certifying a rule.
+      // Only compact algorithms may skip bounded raster paint in the opposite column.
+      if (compactAlgorithmSide && op === OPS.paintImageXObject) {
+        const m = Util.transform(virtual, state.matrix)
+        if (
+          !upright(m) ||
+          typeof args[0] !== 'string' ||
+          !Number.isSafeInteger(args[1]) ||
+          !Number.isSafeInteger(args[2]) ||
+          args[1] <= 0 ||
+          args[2] <= 0 ||
+          (compactAlgorithmSide === 'left'
+            ? m[4] <= viewport.width / 2
+            : m[4] + m[0] >= viewport.width / 2)
+        )
+          return fail('image-intersects-algorithm-column')
+        continue
+      }
       if (op !== OPS.constructPath) return fail('unsupported-graphics-operator:' + op)
       if (args[1]?.length !== 1 || !args[1][0] || !Number.isSafeInteger(args[1][0].length))
         return fail('incomplete-native-path')

@@ -1,4 +1,10 @@
-import type { ArtifactFile } from '../../shared/artifacts'
+import type { ArtifactFile, WritePendingArtifactFileRequest } from '../../shared/artifacts'
+
+type PendingFileTransactionRequest = Omit<WritePendingArtifactFileRequest, 'source'> & {
+  source:
+    | WritePendingArtifactFileRequest['source']
+    | { kind: 'inline'; content: Buffer; encoding: 'base64' }
+}
 
 type PendingFileTransactionOptions = {
   allowedImportRoots?: string[]
@@ -16,6 +22,7 @@ type PendingFileTransactionOptions = {
 type PendingFileTransactionStorage = {
   getPendingRunDir: (projectId: string, sessionId: string, runId: string) => string
   getArtifactMetadataPath: (directory: string, filename: string) => string
+  resolveArtifactFilename: (directory: string, filename: string) => Promise<string>
   resolveAllowedImportFilePath: (
     path: string,
     allowedImportRoots: string[],
@@ -41,4 +48,8 @@ type PendingFileTransactionStorage = {
   }) => Promise<ArtifactFile>
 }
 
-export type { PendingFileTransactionOptions, PendingFileTransactionStorage }
+export type {
+  PendingFileTransactionOptions,
+  PendingFileTransactionRequest,
+  PendingFileTransactionStorage
+}

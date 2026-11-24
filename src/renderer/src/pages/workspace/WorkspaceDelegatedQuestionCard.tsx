@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Check, ChevronLeft, ChevronRight } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
+import { ElicitationOptionDetails } from './ElicitationOptionDetails'
 import { ChoiceKindChip } from './ChoiceKindChip'
 import type { ElicitationResponse } from '../../../../shared/acp'
 import type {
@@ -32,10 +33,13 @@ const WorkspaceDelegatedQuestionCard = ({
   onRespond
 }: Props): React.JSX.Element => {
   const { t } = useTranslation()
+  const optionDetailsId = useId()
   const [answers, setAnswers] = useState<DelegatedQuestionAnswer[]>(() => [...request.draftAnswers])
   const [questionIndex, setQuestionIndex] = useState(request.draftQuestionIndex)
   const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string>()
+  const [error, setError] = useState<{ detail: string; draft: boolean }>()
+  const confirming = useRef(false)
+  const confirmationCount = useRef(0)
   const mounted = useRef(true)
   const draftInFlight = useRef(false)
   const pendingDraft = useRef<ElicitationResponse | undefined>(undefined)
@@ -45,9 +49,9 @@ const WorkspaceDelegatedQuestionCard = ({
   const question = request.questions[questionIndex]
   const currentAnswer = answers.find((answer) => answer.questionIndex === questionIndex)?.value
 
-  const responseError = (caught: unknown): void => {
-    if (mounted.current) {
-      setError(caught instanceof Error ? caught.message : t('Could not save the response.'))
+  const responseError = (caught: unknown, draft: boolean): void => {
+    if (mounted.current && !(draft && confirming.current)) {
+      setError({ detail: caught instanceof Error ? caught.message : String(caught), draft })
     }
   }
 
@@ -57,9 +61,12 @@ const WorkspaceDelegatedQuestionCard = ({
     pendingDraft.current = undefined
     draftInFlight.current = true
     if (mounted.current) setError(undefined)
+    const generation = confirmationCount.current
     void Promise.resolve()
       .then(() => onRespond(response))
-      .catch(responseError)
+      .catch((error: unknown) => {
+        if (generation === confirmationCount.current) responseError(error, true)
+      })
       .finally(() => {
         draftInFlight.current = false
         drainDrafts()
@@ -128,8 +135,7 @@ const WorkspaceDelegatedQuestionCard = ({
     try {
       await onRespond(response)
     } catch (caught) {
-      responseError(caught)
-      throw caught
+      responseError(caught, false)
     }
   }
 
@@ -157,12 +163,15 @@ const WorkspaceDelegatedQuestionCard = ({
   }
 
   const confirm = async (): Promise<void> => {
-    if (submitting || answers.length !== request.questions.length) return
+    if (confirming.current || answers.length !== request.questions.length) return
+    confirmationCount.current++
+    confirming.current = true
     setSubmitting(true)
     cancelScheduledDraft()
     try {
       await send('confirm', answers)
     } finally {
+      confirming.current = false
       setSubmitting(false)
     }
   }
@@ -200,6 +209,11 @@ const WorkspaceDelegatedQuestionCard = ({
               key={option.label}
               type="button"
               aria-label={option.label}
+              aria-describedby={
+                option.description || option.pros || option.cons
+                  ? `${optionDetailsId}-${questionIndex}-${index}`
+                  : undefined
+              }
               aria-pressed={selected}
               className={cn(
                 'flex w-full items-start gap-3 border-b border-border-200 px-3 py-3 text-left hover:bg-bg-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40',
@@ -226,11 +240,11 @@ const WorkspaceDelegatedQuestionCard = ({
               >
                 {selected ? <Check className="size-4" aria-label={t('Selected')} /> : index + 1}
               </span>
-              <span>
-                <span className="block text-sm font-medium">{option.label}</span>
-                {option.description ? (
-                  <span className="mt-0.5 block text-sm text-text-100">{option.description}</span>
-                ) : null}
+              <span className="min-w-0 flex-1">
+                <span className="block break-words text-sm font-medium">{option.label}</span>
+                <span id={`${optionDetailsId}-${questionIndex}-${index}`}>
+                  <ElicitationOptionDetails option={option} />
+                </span>
               </span>
             </button>
           )
@@ -288,9 +302,17 @@ const WorkspaceDelegatedQuestionCard = ({
         ) : null}
       </div>
       {error ? (
-        <p className="mt-2 text-sm text-destructive" role="alert">
-          {error}
-        </p>
+        <div className="mt-2 text-sm">
+          <p role="alert">
+            {error.draft
+              ? t('Could not save the response.')
+              : t('Could not confirm that your response was submitted.')}
+          </p>
+          <details className="text-xs text-muted-foreground">
+            <summary>{t('Error details')}</summary>
+            {error.detail}
+          </details>
+        </div>
       ) : null}
     </section>
   )

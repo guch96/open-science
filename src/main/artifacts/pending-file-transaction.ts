@@ -1,16 +1,13 @@
 import type {
   PendingFileTransactionOptions,
+  PendingFileTransactionRequest,
   PendingFileTransactionStorage
 } from './pending-file-contract'
 import { mkdir, open, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 
-import type {
-  ArtifactFile,
-  ArtifactSourceFileObservation,
-  WritePendingArtifactFileRequest
-} from '../../shared/artifacts'
+import type { ArtifactFile, ArtifactSourceFileObservation } from '../../shared/artifacts'
 import { validateArtifactContentType } from './content-type'
 import {
   assertDiskReserve,
@@ -42,7 +39,7 @@ type BindPendingArtifactVersionRouting<Routing> = (
 ) => Promise<void>
 
 const runPendingFileTransaction = async <Result, Routing>(options: {
-  request: WritePendingArtifactFileRequest
+  request: PendingFileTransactionRequest
   writeOptions: PendingFileTransactionOptions
   storage: PendingFileTransactionStorage
   publishRouting: BindPendingArtifactVersionRouting<Routing>
@@ -58,11 +55,12 @@ const runPendingFileTransaction = async <Result, Routing>(options: {
   const { projectId, sessionId, runId, filename } = request
   const directory = storage.getPendingRunDir(projectId, sessionId, runId)
   const filePath = join(directory, filename)
-  const suffix = `${Date.now()}-${randomUUID()}`
-  const temporaryPath = `${filePath}.${suffix}.tmp`
-  const backupPath = `${filePath}.${suffix}.backup`
+  // Staging names must not extend a caller's already-valid, potentially maximum-length name.
+  const suffix = randomUUID()
+  const temporaryPath = join(directory, `.${suffix}.tmp`)
+  const backupPath = join(directory, `.${suffix}.backup`)
   const metadataPath = storage.getArtifactMetadataPath(directory, filename)
-  const metadataBackupPath = `${metadataPath}.${suffix}.backup`
+  const metadataBackupPath = join(dirname(metadataPath), `.${suffix}.backup`)
   let fileBackedUp = false
   let metadataBackedUp = false
   let preserveFileBackup = false

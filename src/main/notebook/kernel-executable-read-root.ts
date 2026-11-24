@@ -1,7 +1,21 @@
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { posix, win32 } from 'node:path'
 
 import type { NotebookLanguage } from '../../shared/notebook-language-contract'
+
+/** Conda Rscript loads its launcher, interpreter, and shared libraries from its own lib tree. */
+export const condaRLibraryReadRoot = (executable: string, platform: NodeJS.Platform): string => {
+  if (platform === 'win32' || !posix.isAbsolute(executable) || !executable.endsWith('/bin/Rscript'))
+    return ''
+  const prefix = posix.dirname(posix.dirname(executable))
+  const lib = posix.join(prefix, 'lib')
+  if (!existsSync(posix.join(prefix, 'conda-meta/history'))) return ''
+  try {
+    return realpathSync(posix.join(lib, 'R/bin/exec/R')).startsWith(`${lib}/`) ? lib : ''
+  } catch {
+    return ''
+  }
+}
 
 /** Shared read boundary for kernel and package-installer executables. */
 export const kernelExecutableReadRoot = (
@@ -10,6 +24,18 @@ export const kernelExecutableReadRoot = (
   platform: NodeJS.Platform
 ): string => {
   const platformPath = platform === 'win32' ? win32 : posix
+  if (kind === 'python' && platform !== 'win32') {
+    const bin = platformPath.dirname(executable)
+    const prefix = platformPath.dirname(bin)
+    // A registered environment needs its standard library beside bin, not just its executable.
+    // Keep ordinary/system interpreters scoped to their executable directory.
+    if (
+      platformPath.basename(bin) === 'bin' &&
+      (existsSync(platformPath.join(prefix, 'pyvenv.cfg')) ||
+        existsSync(platformPath.join(prefix, 'conda-meta')))
+    )
+      return prefix
+  }
   if (kind === 'repl' && platform === 'darwin' && executable.includes('/Contents/MacOS/')) {
     return platformPath.resolve(platformPath.dirname(executable), '../..')
   }

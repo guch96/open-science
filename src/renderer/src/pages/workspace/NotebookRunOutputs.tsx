@@ -39,42 +39,42 @@ type AnsiStyle = {
   opacity?: number
 }
 
-// Standard + bright 16-color foreground palette, tuned to read on the notebook's bg on light/dark.
+// Standard + bright 16-color foreground palette, resolved against the local Notebook presentation scheme.
 const ANSI_FG: Record<number, string> = {
-  30: '#555555',
-  31: '#d64545',
-  32: '#2e9e3b',
-  33: '#c08a00',
-  34: '#3b82c4',
-  35: '#a54ea5',
-  36: '#0a9a9a',
-  37: '#aaaaaa',
-  90: '#888888',
-  91: '#f06a6a',
-  92: '#4caf50',
-  93: '#d4a017',
-  94: '#6aa9f0',
-  95: '#d16ad1',
-  96: '#3fc0c0',
-  97: '#e8e8e8'
+  30: 'var(--notebook-ansi-30)',
+  31: 'var(--notebook-ansi-31)',
+  32: 'var(--notebook-ansi-32)',
+  33: 'var(--notebook-ansi-33)',
+  34: 'var(--notebook-ansi-34)',
+  35: 'var(--notebook-ansi-35)',
+  36: 'var(--notebook-ansi-36)',
+  37: 'var(--notebook-ansi-37)',
+  90: 'var(--notebook-ansi-90)',
+  91: 'var(--notebook-ansi-91)',
+  92: 'var(--notebook-ansi-92)',
+  93: 'var(--notebook-ansi-93)',
+  94: 'var(--notebook-ansi-94)',
+  95: 'var(--notebook-ansi-95)',
+  96: 'var(--notebook-ansi-96)',
+  97: 'var(--notebook-ansi-97)'
 }
 const ANSI_BG: Record<number, string> = {
-  40: '#555555',
-  41: '#d64545',
-  42: '#2e9e3b',
-  43: '#c08a00',
-  44: '#3b82c4',
-  45: '#a54ea5',
-  46: '#0a9a9a',
-  47: '#dddddd',
-  100: '#888888',
-  101: '#f06a6a',
-  102: '#4caf50',
-  103: '#d4a017',
-  104: '#6aa9f0',
-  105: '#d16ad1',
-  106: '#3fc0c0',
-  107: '#eeeeee'
+  40: 'var(--notebook-ansi-bg-40)',
+  41: 'var(--notebook-ansi-bg-41)',
+  42: 'var(--notebook-ansi-bg-42)',
+  43: 'var(--notebook-ansi-bg-43)',
+  44: 'var(--notebook-ansi-bg-44)',
+  45: 'var(--notebook-ansi-bg-45)',
+  46: 'var(--notebook-ansi-bg-46)',
+  47: 'var(--notebook-ansi-bg-47)',
+  100: 'var(--notebook-ansi-bg-100)',
+  101: 'var(--notebook-ansi-bg-101)',
+  102: 'var(--notebook-ansi-bg-102)',
+  103: 'var(--notebook-ansi-bg-103)',
+  104: 'var(--notebook-ansi-bg-104)',
+  105: 'var(--notebook-ansi-bg-105)',
+  106: 'var(--notebook-ansi-bg-106)',
+  107: 'var(--notebook-ansi-bg-107)'
 }
 
 // Applies one SGR sequence's codes to the running style. Reset (0/empty) clears everything.
@@ -83,7 +83,8 @@ const applySgr = (style: AnsiStyle, codes: number[]): AnsiStyle => {
   for (const code of codes) {
     if (code === 0) next = {}
     else if (code === 1) next.fontWeight = 'bold'
-    else if (code === 2) next.opacity = 0.7
+    // Faint output still needs text contrast; do not fade the entire ANSI span to 70%.
+    else if (code === 2) next.opacity = 0.9
     else if (code === 3) next.fontStyle = 'italic'
     else if (code === 4) next.textDecoration = 'underline'
     else if (code === 22) {
@@ -142,6 +143,30 @@ const renderAnsi = (text: string): React.ReactNode => {
 
 // --- output rendering ---
 
+const OutputTextBlock = ({
+  text,
+  tone = 'text-text-200',
+  testId
+}: {
+  text: string
+  tone?: string
+  testId?: string
+}): React.JSX.Element => {
+  const large = text.length >= 64 * 1024
+  // Freeze the container during a divider drag. Changing the pre's own width invalidates
+  // its line layout at pointer-down even when the measured width is identical.
+  return (
+    <div className={large ? 'notebook-large-text-output' : undefined}>
+      <pre
+        data-testid={testId}
+        className={`${notebookOutputTextClassName} ${tone} ${large ? '[content-visibility:auto] [contain-intrinsic-block-size:auto_16rem]' : ''}`}
+      >
+        {renderAnsi(text)}
+      </pre>
+    </div>
+  )
+}
+
 // Renders only the textual part of a display bundle. Figure mimes have a separate, always-visible
 // surface below the independently collapsible text output.
 const NotebookDisplayTextOutput = ({
@@ -156,13 +181,7 @@ const NotebookDisplayTextOutput = ({
   return (
     <>
       {textEntries.map(([mime, payload]) => (
-        <pre
-          key={mime}
-          data-testid="notebook-output-text"
-          className={`${notebookOutputTextClassName} text-text-200`}
-        >
-          {renderAnsi(payload)}
-        </pre>
+        <OutputTextBlock key={mime} text={payload} testId="notebook-output-text" />
       ))}
     </>
   )
@@ -181,12 +200,11 @@ const renderTextOutput = (
       if (text.trim().length === 0) return null
 
       return (
-        <pre
+        <OutputTextBlock
           key={index}
-          className={`${notebookOutputTextClassName} ${output.name === 'stderr' ? errorClassName : 'text-text-200'}`}
-        >
-          {renderAnsi(text)}
-        </pre>
+          text={text}
+          tone={output.name === 'stderr' ? errorClassName : undefined}
+        />
       )
     }
     case 'text': {
@@ -194,18 +212,12 @@ const renderTextOutput = (
 
       if (text.trim().length === 0) return null
 
-      return (
-        <pre key={index} className={`${notebookOutputTextClassName} text-text-200`}>
-          {renderAnsi(text)}
-        </pre>
-      )
+      return <OutputTextBlock key={index} text={text} />
     }
-    case 'json':
-      return (
-        <pre key={index} className={`${notebookOutputTextClassName} text-text-200`}>
-          {renderAnsi(safeJson(output.data))}
-        </pre>
-      )
+    case 'json': {
+      const text = safeJson(output.data)
+      return <OutputTextBlock key={index} text={text} />
+    }
     case 'error': {
       // The traceback already begins with the error type/message, so render it alone; only fall back
       // to name/message when there is no traceback. Prevents a doubled "Traceback …" header (the
@@ -218,11 +230,7 @@ const renderTextOutput = (
 
       if (body.trim().length === 0) return null
 
-      return (
-        <pre key={index} className={`${notebookOutputTextClassName} ${errorClassName}`}>
-          {renderAnsi(body)}
-        </pre>
-      )
+      return <OutputTextBlock key={index} text={body} tone={errorClassName} />
     }
     case 'display':
       return <NotebookDisplayTextOutput key={index} data={output.data} />
@@ -242,15 +250,12 @@ const LegacyTextOutput = ({ run }: { run: NotebookRunRecord }): React.JSX.Elemen
 
   return (
     <>
-      {stdout.trim().length > 0 ? (
-        <pre className={`${notebookOutputTextClassName} text-text-200`}>{renderAnsi(stdout)}</pre>
-      ) : null}
+      {stdout.trim().length > 0 ? <OutputTextBlock text={stdout} /> : null}
       {stderr.trim().length > 0 ? (
-        <pre
-          className={`${notebookOutputTextClassName} ${run.status === 'failed' ? 'text-danger-000' : 'text-text-200'}`}
-        >
-          {renderAnsi(stderr)}
-        </pre>
+        <OutputTextBlock
+          text={stderr}
+          tone={run.status === 'failed' ? 'text-danger-000' : undefined}
+        />
       ) : null}
     </>
   )

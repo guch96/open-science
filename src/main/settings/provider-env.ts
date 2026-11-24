@@ -1,10 +1,12 @@
+import type { CodeBuddyAuthMode, CodeBuddySite } from '../../shared/codebuddy-subscription'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import type {
-  ModelProtocol,
-  OfficialVendorId,
-  CustomReasoningEffortTransport
+import {
+  getOfficialVendor,
+  type ModelProtocol,
+  type OfficialVendorId,
+  type CustomReasoningEffortTransport
 } from '@aipoch/providers'
 
 import type {
@@ -23,6 +25,8 @@ export type ResolvedProvider = {
   // Framework-local provider id used only for a generation's pre-registered transport routes.
   // It is derived from the persisted provider/model identity and never contains a credential.
   agentProviderId?: string
+  codeBuddyAuthMode?: CodeBuddyAuthMode
+  codeBuddySite?: CodeBuddySite
   codexAuthMode?: CodexSubscriptionAuthMode
   codexTransport?: CodexSubscriptionTransport
   codexAutoUseHttps?: boolean
@@ -31,6 +35,8 @@ export type ResolvedProvider = {
   vendorId?: OfficialVendorId
   // Anthropic /v1/messages base (also the sole base for a custom provider). Claude always uses this.
   baseUrl?: string
+  // Exact Lab deployment address; host-owned credential resolution must match this address.
+  labServerUrl?: string
   // Distinct OpenAI /v1/chat/completions base for a dual-endpoint vendor (e.g. DeepSeek). Used only
   // when the chosen endpoint is chat-completions; falls back to baseUrl when absent.
   chatCompletionsBaseUrl?: string
@@ -38,6 +44,10 @@ export type ResolvedProvider = {
   // when the chosen endpoint is responses; falls back to chatCompletionsBaseUrl and then baseUrl.
   responsesBaseUrl?: string
   model?: string
+  modelAllowsAnonymousAccess?: boolean
+  // False only when the selected Lab model explicitly does not support streaming. Absent means the
+  // provider's model is assumed streaming-capable.
+  streaming?: boolean
   // Model token limits. Context is the shared request/response budget; input/output are independent
   // provider-reported caps and remain absent when unknown.
   contextWindow?: number
@@ -52,6 +62,20 @@ export type ResolvedProvider = {
   supportsImageInput?: boolean
   // Explicit only for user-defined gateways; official providers use vendorId for transport mapping.
   reasoningEffortTransport?: CustomReasoningEffortTransport
+}
+
+// A context window is not a model's output limit; leave unlisted models to their runtime.
+export const resolveProviderOutputLimit = (
+  provider: Pick<ResolvedProvider, 'vendorId' | 'model' | 'maxOutputTokens'>
+): number | undefined => {
+  const published = provider.vendorId
+    ? getOfficialVendor(provider.vendorId)?.models.find((entry) => entry.id === provider.model)
+        ?.maxOutputTokens
+    : undefined
+  const configured = provider.maxOutputTokens
+  return published === undefined || configured === undefined
+    ? (configured ?? published)
+    : Math.min(configured, published)
 }
 
 export type ProviderEnvOptions = {

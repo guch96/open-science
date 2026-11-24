@@ -46,7 +46,7 @@ export const getOfficePreviewTimeoutMs = (size: number, attempt: number): number
 
 export type OfficePreviewExtension = 'docx' | 'xls' | 'xlsx' | 'pptx'
 export type OfficePreviewRequestedExtension = OfficePreviewExtension | 'spreadsheet'
-export type OfficePreviewSource = OfficePreviewOpenRequest['source']
+export type OfficePreviewSource = Exclude<OfficePreviewOpenRequest['source'], 'staged-edit'>
 
 type OfficePreviewPresentation = {
   requestId: string
@@ -68,6 +68,7 @@ export type OfficePreviewOpenRequest = OfficePreviewPresentation &
         | { source: 'notebook-input' }
         | { source: 'literature' }
         | { source: 'local' }
+        | { source: 'staged-edit' }
       ))
   )
 
@@ -78,7 +79,8 @@ export const getOfficeManagedPreviewRequest = (
     request.source === 'compute-output' ||
     request.source === 'notebook-input' ||
     request.source === 'literature' ||
-    request.source === 'local'
+    request.source === 'local' ||
+    request.source === 'staged-edit'
   ) {
     return { source: request.source, path: request.path }
   }
@@ -94,6 +96,8 @@ export type OfficePreviewErrorCode =
   | 'FILE_TOO_LARGE'
   | 'UNSUPPORTED_FORMAT'
   | 'INVALID_PACKAGE'
+  | 'ENCRYPTED_PACKAGE'
+  | 'EXTERNAL_RESOURCES'
   | 'RESOURCE_LIMIT_EXCEEDED'
   | 'FILE_READ_FAILED'
   | 'PREVIEW_TIMEOUT'
@@ -161,6 +165,23 @@ export type OfficePreviewHostMessage =
       type: 'find'
       sessionId: string
     }
+  | {
+      channel: typeof OFFICE_PREVIEW_FRAME_MESSAGE_CHANNEL
+      version: typeof OFFICE_PREVIEW_FRAME_MESSAGE_VERSION
+      type: 'goto-slide'
+      sessionId: string
+      slideIndex: number
+    }
+
+export type OfficePreviewSlideView = {
+  sessionId: string
+  slideIndex: number
+  // Slide box in iframe viewport coordinates; the host maps model geometry onto it.
+  x: number
+  y: number
+  width: number
+  height: number
+}
 
 export type OfficePreviewRuntimeMessage =
   | {
@@ -174,6 +195,12 @@ export type OfficePreviewRuntimeMessage =
       version: typeof OFFICE_PREVIEW_FRAME_MESSAGE_VERSION
       type: 'context-menu'
       contextMenu: { sessionId: string; x: number; y: number }
+    }
+  | {
+      channel: typeof OFFICE_PREVIEW_FRAME_MESSAGE_CHANNEL
+      version: typeof OFFICE_PREVIEW_FRAME_MESSAGE_VERSION
+      type: 'slide-view'
+      slideView: OfficePreviewSlideView
     }
 
 const OFFICE_PREVIEW_PHASES = new Set<OfficePreviewPhase>([
@@ -190,6 +217,8 @@ const OFFICE_PREVIEW_ERRORS = new Set<OfficePreviewErrorCode>([
   'FILE_TOO_LARGE',
   'UNSUPPORTED_FORMAT',
   'INVALID_PACKAGE',
+  'ENCRYPTED_PACKAGE',
+  'EXTERNAL_RESOURCES',
   'RESOURCE_LIMIT_EXCEEDED',
   'FILE_READ_FAILED',
   'PREVIEW_TIMEOUT',
@@ -221,7 +250,8 @@ export const isOfficePreviewOpenRequest = (value: unknown): value is OfficePrevi
     (request.source === 'compute-output' ||
     request.source === 'notebook-input' ||
     request.source === 'literature' ||
-    request.source === 'local'
+    request.source === 'local' ||
+    request.source === 'staged-edit'
       ? isNonEmptyString(request.path)
       : (request.source === 'artifact' || request.source === 'upload') &&
         isNonEmptyString(request.projectId) &&
@@ -280,7 +310,26 @@ export const isOfficePreviewHostMessage = (value: unknown): value is OfficePrevi
     ((message.type === 'start' &&
       'start' in message &&
       isOfficePreviewRuntimeStart(message.start)) ||
-      (message.type === 'find' && 'sessionId' in message && isNonEmptyString(message.sessionId)))
+      (message.type === 'find' && 'sessionId' in message && isNonEmptyString(message.sessionId)) ||
+      (message.type === 'goto-slide' &&
+        'sessionId' in message &&
+        isNonEmptyString(message.sessionId) &&
+        'slideIndex' in message &&
+        Number.isInteger(message.slideIndex) &&
+        (message.slideIndex as number) >= 0))
+  )
+}
+
+const isOfficePreviewSlideView = (value: unknown): value is OfficePreviewSlideView => {
+  if (typeof value !== 'object' || value === null) return false
+  const view = value as Record<string, unknown>
+  return (
+    isNonEmptyString(view.sessionId) &&
+    Number.isInteger(view.slideIndex) &&
+    (view.slideIndex as number) >= 0 &&
+    ['x', 'y', 'width', 'height'].every(
+      (key) => typeof view[key] === 'number' && Number.isFinite(view[key])
+    )
   )
 }
 
@@ -298,6 +347,9 @@ export const isOfficePreviewRuntimeMessage = (
   }
   if (message.type === 'state' && 'state' in message) {
     return isOfficePreviewRuntimeState(message.state)
+  }
+  if (message.type === 'slide-view' && 'slideView' in message) {
+    return isOfficePreviewSlideView(message.slideView)
   }
   if (message.type === 'context-menu' && 'contextMenu' in message) {
     const contextMenu = message.contextMenu as

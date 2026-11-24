@@ -11,7 +11,7 @@ import {
 } from '../../../../../../shared/office-preview'
 import { PreviewRuntimeBoundary } from '../preview-runtime'
 import type { PreviewDownloadVersionContext } from '../preview-runtime-context'
-import { OfficePreviewRenderer } from './OfficePreview'
+import { OfficePreviewContent, OfficePreviewRenderer } from './OfficePreview'
 
 const previewActionSpies = vi.hoisted(() => {
   const openContextMenu = vi.fn()
@@ -260,6 +260,71 @@ describe('OfficePreviewRenderer', () => {
     )
 
     expect(previewActionSpies.openContextMenu).toHaveBeenCalledWith({ x: 117, y: 79 }, frame)
+  })
+
+  it('opens a staged edit revision, restores its slide and relays slide geometry', async () => {
+    const onSlideView = vi.fn()
+    await act(async () => {
+      root.render(
+        <OfficePreviewContent
+          item={createItem({ name: 'deck.pptx' })}
+          source="local"
+          staged={{ key: 'edit-1:2', slideIndex: 3, onSlideView }}
+        />
+      )
+      await flushMicrotasks()
+    })
+    expect(open).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'staged-edit', path: 'edit-1:2' })
+    )
+    const frame = container.querySelector<HTMLIFrameElement>('[data-office-preview-frame]')!
+    const postMessage = vi.spyOn(frame.contentWindow!, 'postMessage')
+    await act(async () => {
+      frame.dispatchEvent(new Event('load'))
+      await flushMicrotasks()
+    })
+    await act(async () => {
+      emitState({ sessionId: 'office-session-1', phase: 'ready' })
+      await flushMicrotasks()
+    })
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'goto-slide',
+        sessionId: 'office-session-1',
+        slideIndex: 3
+      }),
+      OFFICE_PREVIEW_RUNTIME_ORIGIN
+    )
+
+    const send = (sessionId: string): void => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          source: frame.contentWindow,
+          origin: OFFICE_PREVIEW_RUNTIME_ORIGIN,
+          data: {
+            channel: OFFICE_PREVIEW_FRAME_MESSAGE_CHANNEL,
+            version: OFFICE_PREVIEW_FRAME_MESSAGE_VERSION,
+            type: 'slide-view',
+            slideView: { sessionId, slideIndex: 3, x: 1, y: 2, width: 30, height: 40 }
+          }
+        })
+      )
+    }
+    send('another-session')
+    expect(onSlideView).not.toHaveBeenCalled()
+    send('office-session-1')
+    expect(onSlideView).toHaveBeenCalledWith(
+      expect.objectContaining({ slideIndex: 3, width: 30, height: 40 })
+    )
+    await act(async () => {
+      emitState({
+        sessionId: 'office-session-1',
+        phase: 'error',
+        error: 'PREVIEW_PROCESS_NOT_ISOLATED'
+      })
+    })
+    expect(container.textContent).toContain('The secure Office preview could not start.')
+    expect(container.textContent).not.toContain('Download')
   })
 
   it('keeps the attached runtime when the preview menu callback changes', async () => {
@@ -558,7 +623,7 @@ describe('OfficePreviewRenderer', () => {
     await renderPreview(createItem(), true)
 
     expect(container.textContent).toContain('File too large to preview')
-    expect(container.textContent).toContain('This file is larger than 40 MB. Download it to view.')
+    expect(container.textContent).toContain('This file is larger than 40 MB.')
     expect(container.textContent).toContain('Download')
     expect(container.textContent).not.toContain('Retry')
   })
@@ -612,11 +677,10 @@ describe('OfficePreviewRenderer', () => {
   })
 
   it.each([
-    ['INVALID_PACKAGE', 'This Office file is damaged or unsupported. Download it to view.'],
-    [
-      'RESOURCE_LIMIT_EXCEEDED',
-      'This Office file exceeds the safe preview limits. Download it to view.'
-    ]
+    ['ENCRYPTED_PACKAGE', 'This file contains encrypted content.'],
+    ['EXTERNAL_RESOURCES', 'This file uses external content that the preview cannot load.'],
+    ['INVALID_PACKAGE', 'This Office file is damaged or unsupported.'],
+    ['RESOURCE_LIMIT_EXCEEDED', 'This Office file exceeds the safe preview limits.']
   ])('shows a download-only fallback for %s', async (error, message) => {
     await renderPreview(createItem(), true)
 
@@ -700,7 +764,9 @@ describe('OfficePreviewRenderer', () => {
       await flushMicrotasks()
     })
 
-    expect(container.textContent).toContain("This Office file couldn't be rendered for preview")
+    expect(container.textContent).toContain(
+      'The Office file could not be read. Try opening it again.'
+    )
     expect(container.textContent).not.toContain('exceeds the safe preview limits')
   })
 

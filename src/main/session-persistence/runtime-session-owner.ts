@@ -12,7 +12,9 @@ import {
 import { hasDurableRuntimeSessionAdmission } from '../../shared/runtime-session-admission'
 import {
   applyRuntimeSessionEvents,
+  applyRuntimeSessionEventsWithChanges,
   attachRuntimeSessionArtifacts,
+  type RuntimeSessionChanges,
   type RuntimeSessionScope
 } from '../../shared/runtime-session-projection'
 import {
@@ -24,7 +26,9 @@ import {
   type PersistedChatSession
 } from '../../shared/session-persistence'
 import type { AgentFrameworkId } from '../../shared/settings'
+import { DelegationSettlementAdmissionError } from '../../shared/task-continuation'
 import { matchPlanDelivery } from '../session-plan/plan-delivery'
+import type { RuntimeSessionMutationOptions } from './runtime-session-mutation'
 
 const log = createLogger('session-persistence')
 
@@ -64,8 +68,14 @@ export type RuntimeSessionAdmission = {
   // Main-only identity of the fenced reliable message; never serialized as provider binding.
   delegatedMessageId?: string
   // Main-owned application turns create their prompt and execution authority in one commit.
-  applicationPrompt?: { text: string; attribution: MessageAttribution }
+  applicationPrompt?: {
+    text: string
+    attribution: MessageAttribution
+    beforeSessionWrite?: () => Promise<void>
+  }
   approvedHandoffContinuation?: boolean
+  // Set only for a wake emitted by Main's live child settlement dispatcher.
+  delegationSettlement?: boolean
 }
 
 export type RuntimeSessionContinuationAdmission = {
@@ -106,7 +116,7 @@ type RuntimeSessionOwnerDependencies = {
   mutateSession(
     scope: RuntimeSessionTurnScope,
     mutate: (latest: PersistedChatSession) => PersistedChatSession,
-    onJsonCommitted?: () => void
+    options?: RuntimeSessionMutationOptions
   ): Promise<PersistedChatSession>
   finalizeArtifacts(request: { claimId: string; messageId: string }): Promise<ArtifactFile[]>
   onCommitted?(session: PersistedChatSession): void
@@ -260,6 +270,21 @@ const admitApplicationPrompt = (
   if (!application) return session
   if (application.attribution.kind !== 'application')
     throw new Error('Runtime application prompt requires application attribution.')
+  if (application.attribution.feature === 'schedule') {
+    if (session.conversationGraph?.messages.some((message) => message.id === scope.promptMessageId))
+      throw new Error('Scheduled occurrence has already been admitted.')
+    if (
+      session.activeRun ||
+      session.status.startsWith('waiting-') ||
+      session.runtimeContext?.plan?.approval === 'pending' ||
+      session.runtimeContext?.permission?.state === 'pending' ||
+      hasPendingSandboxNetworkApproval(session) ||
+      session.resumeRecovery ||
+      session.promptPreparation ||
+      session.packageOrigin
+    )
+      throw new Error('The scheduled conversation needs attention before starting another turn.')
+  }
   if (session.archivedAt !== undefined)
     throw new Error('Cannot admit an application prompt to an archived Session.')
   if (session.activeRun && session.activeRun.promptMessageId !== scope.promptMessageId)
@@ -427,6 +452,51 @@ const continuationRunFor = (
   return {
     promptMessageId: scope.promptMessageId,
     startedAt: Math.max(now, (session.runtimeTranscriptLastRun?.startedAt ?? 0) + 1)
+  }
+}
+
+const delegationSettlementRunFor = (
+  session: PersistedChatSession,
+  scope: RuntimeSessionTurnScope,
+  now: number
+): PersistedActiveRun => {
+  const graph = session.conversationGraph
+  const previous = session.runtimeTranscriptLastRun
+  // The settlement scheduler captures the prompt's own Segment. Reliable message delivery can
+  // create a new Segment on the same branch; an older wake must not borrow that execution scope.
+  const segment = graph?.runtimeSegments.findLast(
+    ({ agentFrameId }) => agentFrameId === scope.agentFrameId
+  )
+  if (
+    !graph ||
+    graph.rootFrameId !== scope.agentFrameId ||
+    graph.activeFrameId !== scope.agentFrameId ||
+    graph.frames.find(({ id }) => id === scope.agentFrameId)?.activeBranchId !==
+      scope.messageBranchId ||
+    segment?.id !== scope.runtimeSegmentId ||
+    segment.endedAt !== undefined ||
+    previous?.promptMessageId !== scope.promptMessageId
+  )
+    throw new DelegationSettlementAdmissionError()
+  const prompt = resolveActiveConversationMessages(graph).findLast(({ role }) => role === 'user')
+  if (prompt?.id !== scope.promptMessageId) throw new DelegationSettlementAdmissionError()
+  if (hasPendingSandboxNetworkApproval(session))
+    throw new DelegationSettlementAdmissionError('network_approval_pending')
+  if (
+    prompt.turnOutcome?.kind !== 'completed' ||
+    session.activeRun ||
+    session.status !== 'idle' ||
+    session.archivedAt !== undefined ||
+    session.packageOrigin ||
+    session.resumeRecovery ||
+    session.promptPreparation ||
+    session.runtimeContext?.permission?.state === 'pending' ||
+    session.runtimeContext?.plan?.approval === 'pending'
+  )
+    throw new Error('The parent Session is not ready for a background continuation.')
+  return {
+    promptMessageId: scope.promptMessageId,
+    startedAt: Math.max(now, previous.startedAt + 1)
   }
 }
 
@@ -729,9 +799,14 @@ export class RuntimeSessionOwner {
       loaded = admitApplicationPrompt(loaded, scope, admission, this.now())
       loaded = admitDelegatedMessage(loaded, scope, admission, this.now())
     }
-    const continuationRun =
-      continuationRunFor(loaded, scope, this.now(), admission.planDeliveryCommandId) ??
-      this.approvedHandoffRunFor(loaded, scope, admission)
+    const resolveContinuationRun = (
+      session: PersistedChatSession
+    ): PersistedActiveRun | undefined =>
+      admission.delegationSettlement && !sameExecution
+        ? delegationSettlementRunFor(session, scope, this.now())
+        : (continuationRunFor(session, scope, this.now(), admission.planDeliveryCommandId) ??
+          this.approvedHandoffRunFor(session, scope, admission))
+    const continuationRun = resolveContinuationRun(loaded)
     const promptRuntimeSegmentId = sameExecution
       ? previousTurn.promptRuntimeSegmentId
       : admission.delegatedMessageId
@@ -771,6 +846,7 @@ export class RuntimeSessionOwner {
     // The coordinator stamps Main's runtime ownership in this identity mutation. Await it before
     // provider dispatch so a renderer save can never become the first durable writer for the turn.
     const admissionStarted = Promise.withResolvers<void>()
+    await admission.applicationPrompt?.beforeSessionWrite?.()
     assertCurrent()
     const committing = this.mutateSession(scope, 'begin-turn', (latest) => {
       // This callback can be queued behind a global operation. A rejected wait must never
@@ -780,11 +856,9 @@ export class RuntimeSessionOwner {
       for (const { turn, batch } of priorBatches) latest = this.applyTurnEvents(latest, turn, batch)
       latest = admitApplicationPrompt(latest, scope, admission, this.now())
       latest = admitDelegatedMessage(latest, scope, admission, this.now())
-      // Re-derive against the durable record Main is about to write: only a still-parked turn may
-      // be continued, and its re-armed run has to be newer than the run it replaces.
-      const resumedRun =
-        continuationRunFor(latest, scope, this.now(), admission.planDeliveryCommandId) ??
-        this.approvedHandoffRunFor(latest, scope, admission)
+      // Recheck against the durable record Main is about to write, including the parent path for
+      // a settlement wake. A re-armed run must be newer than the run it replaces.
+      const resumedRun = resolveContinuationRun(latest)
       if (
         !admission.delegatedMessageId &&
         resolvePromptRuntimeSegmentId(latest, scope) !== promptRuntimeSegmentId
@@ -797,12 +871,14 @@ export class RuntimeSessionOwner {
         delegatedMessageId: _delegatedMessageId,
         applicationPrompt: _applicationPrompt,
         approvedHandoffContinuation: _approvedHandoffContinuation,
+        delegationSettlement: _delegationSettlement,
         ...runtimeBinding
       } = admission
       void _planDeliveryCommandId
       void _delegatedMessageId
       void _applicationPrompt
       void _approvedHandoffContinuation
+      void _delegationSettlement
       const durableAdmission = {
         executionId: scope.executionId,
         promptMessageId: scope.promptMessageId,
@@ -1283,7 +1359,11 @@ export class RuntimeSessionOwner {
     while (turn.pending.length > 0 || turn.replayConsumptionPending) {
       const batch = turn.pending.slice()
       const consumeReplay = turn.replayConsumptionPending
+      let projection: PersistedChatSession | undefined
+      let changes: RuntimeSessionChanges | undefined
       const applyBatch = (latest: PersistedChatSession): PersistedChatSession => {
+        projection = undefined
+        changes = undefined
         if (this.turns.get(turnKey(turn.scope.sessionId, turn.scope.promptMessageId)) !== turn)
           return latest
         // Admission may have included this batch while an older physical write was waiting for
@@ -1303,7 +1383,14 @@ export class RuntimeSessionOwner {
           latest.activeRun.startedAt > turn.runStartedAt
         )
           return latest
-        const next = this.applyTurnEvents(latest, turn, remainingBatch)
+        // A guarded handoff batch may return latest unchanged. Replay receipt cleanup still
+        // owns a fresh root so the pure-mutation path never deletes fields from its input.
+        const reduced: { session: PersistedChatSession; changes?: RuntimeSessionChanges } =
+          consumeReplay || remainingBatch.some(({ id }) => turn.approvedHandoffFailures?.has(id))
+            ? { session: this.applyTurnEvents(latest, turn, remainingBatch) }
+            : applyRuntimeSessionEventsWithChanges(latest, turn.scope, remainingBatch)
+        const next = { ...reduced.session }
+        changes = reduced.changes
         if (consumeReplay) {
           delete next.pendingHistoryReplay
           delete next.branchContextResetRequired
@@ -1338,12 +1425,24 @@ export class RuntimeSessionOwner {
           }
           next.updatedAt = Math.max(next.updatedAt, this.now())
         }
+        projection = next
         return next
       }
       const receipt = turn.terminalReceipt
       const acknowledge =
         receipt && batch.some(({ id }) => id === receipt.eventId) ? receipt.resolve : undefined
-      committed = await this.mutateSession(turn.scope, 'flush-events', applyBatch, acknowledge)
+      committed = await this.mutateSession(turn.scope, 'flush-events', applyBatch, {
+        // The projection is produced by applyBatch during the mutation, so bind the hint lazily.
+        getChanges: (candidate) =>
+          projection &&
+          candidate.conversationGraph === projection.conversationGraph &&
+          candidate.messages === projection.messages &&
+          candidate.activities === projection.activities &&
+          candidate.activityGroups === projection.activityGroups
+            ? changes
+            : undefined,
+        ...(acknowledge ? { onJsonCommitted: acknowledge } : {})
+      })
       const committedIds = new Set(batch.map(({ id }) => id))
       turn.pending = turn.pending.filter(({ id }) => !committedIds.has(id))
       for (const id of committedIds) turn.approvedHandoffFailures?.delete(id)
@@ -1469,10 +1568,16 @@ export class RuntimeSessionOwner {
     phase:
       'begin-turn' | 'prepare-permission' | 'flush-events' | 'stage-artifacts' | 'attach-artifacts',
     mutate: (latest: PersistedChatSession) => PersistedChatSession,
-    onJsonCommitted?: () => void
+    options?: RuntimeSessionMutationOptions
   ): Promise<PersistedChatSession> {
     try {
-      return await this.dependencies.mutateSession(scope, mutate, onJsonCommitted)
+      return await this.dependencies.mutateSession(scope, mutate, {
+        ...(phase === 'flush-events' || phase === 'stage-artifacts' || phase === 'attach-artifacts'
+          ? { immutableCanonicalTranscript: true as const }
+          : {}),
+        ...(options?.getChanges ? { getChanges: options.getChanges } : {}),
+        ...(options?.onJsonCommitted ? { onJsonCommitted: options.onJsonCommitted } : {})
+      })
     } catch (error) {
       try {
         log.warn('Runtime Session mutation failed', {

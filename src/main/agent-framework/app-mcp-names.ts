@@ -11,6 +11,13 @@ type AppMcpServerDefinition = {
 // only at the agent-facing seam so permissions, grants, policy, and diagnostics keep one stable key.
 const APP_MCP_SERVERS: readonly AppMcpServerDefinition[] = [
   {
+    canonicalName: 'open-science-web',
+    openCodeName: 'open_science_web',
+    tools: ['web_search', 'web_fetch'],
+    // Host-route admission maps these to builtin capabilities, never remembered MCP grants.
+    rememberedPermission: false
+  },
+  {
     canonicalName: 'open-science-activity',
     openCodeName: 'open_science_activity',
     tools: ['begin_activity_group']
@@ -19,6 +26,11 @@ const APP_MCP_SERVERS: readonly AppMcpServerDefinition[] = [
     canonicalName: 'open-science-artifacts',
     openCodeName: 'open_science_artifacts',
     tools: ['write_artifact_file']
+  },
+  {
+    canonicalName: 'open-science-images',
+    openCodeName: 'open_science_images',
+    tools: ['generate_image', 'edit_image']
   },
   {
     canonicalName: 'open-science-notebook',
@@ -47,6 +59,17 @@ const APP_MCP_SERVERS: readonly AppMcpServerDefinition[] = [
     canonicalName: 'open-science-skills',
     openCodeName: 'open_science_skills',
     tools: ['request_skill_import']
+  },
+  {
+    canonicalName: 'open-science-schedule',
+    openCodeName: 'open_science_schedule',
+    tools: [
+      'list_schedules',
+      'create_schedule',
+      'update_schedule',
+      'close_schedule',
+      'manage_current_schedule'
+    ]
   },
   {
     canonicalName: 'open-science-plan',
@@ -78,6 +101,11 @@ const APP_MCP_SERVERS: readonly AppMcpServerDefinition[] = [
       'save_to_inbox',
       'acquire_pdf'
     ]
+  },
+  {
+    canonicalName: 'open-science-pptx',
+    openCodeName: 'open_science_pptx',
+    tools: ['read_pptx_outline', 'propose_pptx_operations']
   },
   {
     canonicalName: 'open-science-host-message',
