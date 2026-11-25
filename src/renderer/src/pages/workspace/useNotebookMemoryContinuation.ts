@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { create } from 'zustand'
 import type { WorkspaceAgentRuntime } from '@/lib/acp/useWorkspaceAgentRuntime'
@@ -5,8 +6,13 @@ import {
   dismissNotebookMemoryRejection,
   useNotebookMemoryNoticeStore
 } from '@/stores/notebook-memory-notice-store'
-import { useSessionStore } from '@/stores/session-store'
+import { useSessionStore, type ChatSession } from '@/stores/session-store'
+import {
+  NOTEBOOK_STATE_TARGET_RUN_LIMIT,
+  type NotebookSessionReference
+} from '../../../../shared/notebook'
 import type { NotebookPendingDecision } from '../../../../shared/notebook-resources'
+import type { ReplayRunIndex } from '../../../../shared/replay'
 
 type Entrance = 'notice' | 'compute'
 type Failure = 'pressured' | 'unavailable' | 'handoff'
@@ -14,6 +20,154 @@ type Attempt =
   { status: 'checking' | 'handed-off' } | { status: 'failed'; entrance: Entrance; failure: Failure }
 
 const useAttempts = create<Record<string, Attempt>>(() => ({}))
+
+type FeedbackStatus = 'continuing' | 'started' | 'not-executed' | 'unconfirmed'
+type Continuation = Pick<NotebookSessionReference, 'projectId' | 'sessionId' | 'workspaceCwd'> & {
+  promptMessageId: string
+  messageBranchId?: string
+  status: FeedbackStatus
+}
+
+const useContinuations = create<Record<string, Continuation>>(() => ({}))
+const continuationKey = (projectId: string, sessionId: string): string =>
+  JSON.stringify([projectId, sessionId])
+const activeBranchId = (session: ChatSession | undefined): string | undefined => {
+  const graph = session?.conversationGraph
+  return graph?.frames.find(({ id }) => id === graph.activeFrameId)?.activeBranchId
+}
+
+export const useNotebookMemoryContinuationStatus = (
+  session: ChatSession | undefined
+): FeedbackStatus | undefined => {
+  const key = session && continuationKey(session.projectId, session.id)
+  const continuation = useContinuations((state) => (key ? state[key] : undefined))
+  const admissions =
+    continuation?.status === 'continuing' &&
+    session?.runtimeSessionAdmissions?.filter(
+      (entry) =>
+        entry.promptMessageId === continuation.promptMessageId &&
+        (!continuation.messageBranchId || entry.messageBranchId === continuation.messageBranchId)
+    )
+  const admission = admissions ? admissions[0] : undefined
+  const { executionId, rootFrameId, agentFrameId, messageBranchId, runtimeSegmentId } =
+    admission ?? {}
+  const superseded = Boolean(
+    admissions && admissions.some((entry) => entry.executionId !== executionId)
+  )
+  const visible = (continuation?.messageBranchId ?? messageBranchId) === activeBranchId(session)
+  const turnSettled = Boolean(
+    continuation &&
+    (session?.conversationGraph?.messages ?? session?.messages)?.find(
+      ({ id }) => id === continuation.promptMessageId
+    )?.turnOutcome
+  )
+  useEffect(() => {
+    if (!key || continuation?.status !== 'continuing' || !visible || !executionId || superseded)
+      return
+    const notebook = window.api.notebook
+    if (!notebook?.runIndex || !notebook.state || !notebook.onChanged) return
+    const { projectId, sessionId, workspaceCwd, promptMessageId } = continuation
+    const reference = { projectId, sessionId, workspaceCwd }
+    const matches = (row: ReplayRunIndex): boolean =>
+      row.source === 'agent' &&
+      row.promptMessageId === promptMessageId &&
+      row.messageBranchId === messageBranchId &&
+      row.rootFrameId === rootFrameId &&
+      row.agentFrameId === agentFrameId &&
+      row.runtimeSegmentId === runtimeSegmentId
+    let current = true
+    let loading = false
+    let invalidated = false
+    const readStatus = async (): Promise<FeedbackStatus | undefined> => {
+      try {
+        const rows = (await notebook.runIndex(reference)).filter(matches)
+        let pending = false
+        let unconfirmed = false
+        for (
+          let offset = 0;
+          current && offset < rows.length;
+          offset += NOTEBOOK_STATE_TARGET_RUN_LIMIT
+        ) {
+          const batch = rows.slice(offset, offset + NOTEBOOK_STATE_TARGET_RUN_LIMIT)
+          const { runs } = await notebook.state({
+            ...reference,
+            runIds: batch.map(({ runId }) => runId),
+            deferImages: true
+          })
+          const byId = new Map(runs.filter(matches).map((run) => [run.runId, run]))
+          for (const row of batch) {
+            const run = byId.get(row.runId)
+            if (
+              run &&
+              run.status !== 'queued' &&
+              (run.executionStarted === true ||
+                (run.status === 'completed' &&
+                  run.executionStarted === undefined &&
+                  run.kernelDispatched !== false &&
+                  (run.kernelDispatched === true ||
+                    (run.kernelKind === 'bash' && run.exitCode === 0))))
+            )
+              return 'started'
+            const status = run?.status ?? row.status
+            if (status === 'queued' || status === 'running') pending = true
+            else if (run?.executionStarted !== false && run?.kernelDispatched !== false)
+              unconfirmed = true
+          }
+        }
+        if (turnSettled && !pending) return unconfirmed ? 'unconfirmed' : 'not-executed'
+      } catch (error) {
+        console.warn('Notebook continuation evidence could not be read', error)
+        if (turnSettled) return 'unconfirmed'
+      }
+      return undefined
+    }
+    const refresh = async (): Promise<void> => {
+      invalidated = true
+      if (loading) return
+      loading = true
+      while (current && invalidated) {
+        invalidated = false
+        const status = await readStatus()
+        if (
+          current &&
+          status &&
+          (status === 'started' || !invalidated) &&
+          useContinuations.getState()[key] === continuation
+        ) {
+          useContinuations.setState({ [key]: { ...continuation, messageBranchId, status } })
+          break
+        }
+      }
+      loading = false
+    }
+    const unsubscribe = notebook.onChanged((event) => {
+      if (
+        event.projectId === projectId &&
+        event.sessionId === sessionId &&
+        !event.codeAppendOnly &&
+        !event.codeWriteOnly
+      )
+        void refresh()
+    })
+    void refresh()
+    return () => {
+      current = false
+      unsubscribe()
+    }
+  }, [
+    key,
+    continuation,
+    visible,
+    executionId,
+    rootFrameId,
+    agentFrameId,
+    messageBranchId,
+    runtimeSegmentId,
+    turnSettled,
+    superseded
+  ])
+  return visible ? (superseded ? 'unconfirmed' : continuation?.status) : undefined
+}
 
 const keyFor = (decision: {
   projectId: string
@@ -88,6 +242,18 @@ export const useNotebookMemoryContinuation = (
       })
       if (result) {
         useAttempts.setState({ [key]: { status: 'handed-off' } })
+        if (session && result.sessionId === session.id) {
+          useContinuations.setState({
+            [continuationKey(session.projectId, session.id)]: {
+              projectId: session.projectId,
+              sessionId: result.sessionId,
+              workspaceCwd: session.cwd,
+              promptMessageId: result.messageId,
+              messageBranchId: decision.messageBranchId ?? activeBranchId(session),
+              status: 'continuing'
+            }
+          })
+        }
         const rejection = useNotebookMemoryNoticeStore.getState().rejection
         if (rejection && keyFor(rejection) === key) dismissNotebookMemoryRejection()
         return result

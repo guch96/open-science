@@ -3,8 +3,10 @@ import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ActionToast } from '@/components/ActionToast'
 import { ErrorNotice } from '@/components/error-notice'
+import { Notice } from '@/components/notice'
 import { Button } from '@/components/ui/button'
 import type { WorkspaceAgentRuntime } from '@/lib/acp/useWorkspaceAgentRuntime'
+import type { ChatSession } from '@/stores/session-store'
 import * as Dialog from '@/components/ui/dialog'
 import {
   dialogBodyClassName,
@@ -27,7 +29,37 @@ import {
   usePreviewWorkbenchStore
 } from '@/stores/preview-workbench-store'
 import type { NotebookMemoryRejectedEvent } from '../../../../shared/notebook-memory'
-import { useNotebookMemoryContinuation } from './useNotebookMemoryContinuation'
+import {
+  useNotebookMemoryContinuation,
+  useNotebookMemoryContinuationStatus
+} from './useNotebookMemoryContinuation'
+
+export const NotebookMemoryContinuationNotice = ({
+  session
+}: {
+  session?: ChatSession
+}): React.JSX.Element | null => {
+  const { t } = useTranslation()
+  const status = useNotebookMemoryContinuationStatus(isDesktopRenderer() ? session : undefined)
+  if (!status) return null
+  return (
+    <Notice
+      inline
+      className="mb-2"
+      role="status"
+      level={status === 'started' ? 'success' : 'info'}
+      description={
+        status === 'continuing'
+          ? t('Continuing Notebook work…')
+          : status === 'started'
+            ? t('Notebook execution started')
+            : status === 'not-executed'
+              ? t('Memory check passed. Notebook did not run this turn.')
+              : t('Memory check passed. Notebook execution could not be confirmed.')
+      }
+    />
+  )
+}
 
 type MemoryReading = NotebookMemoryRejectedEvent['memory']
 
