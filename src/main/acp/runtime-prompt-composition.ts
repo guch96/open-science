@@ -552,21 +552,32 @@ const composeAcpRuntimePromptOwners = (
             current?.recheckMemory
           ) {
             const createIntent = notebook.createExecutionIntent
-            return current.recheckMemory(signal).then(() => {
-              signal.throwIfAborted()
+            const admissionSignal = operation.admissionSignal
+              ? AbortSignal.any([signal, operation.admissionSignal])
+              : signal
+            const assertCurrent = (): void => {
+              admissionSignal.throwIfAborted()
               operation.assertCurrent()
               if (lookupCurrent() !== current || current.hasClaimedContinuation)
                 throw new Error(
                   'The Notebook refusal changed. Refresh it before continuing execution.'
                 )
-              return () => {
-                const continuation = createIntent({
-                  ...scope,
-                  continuedFromRefusalId: operation.refusalId
-                })
-                continuation.prepareUserExecution(operation.assertCurrent)
-                current.claimContinuation()
-                remember(continuation)
+            }
+            return current.recheckMemory(admissionSignal).then(() => {
+              assertCurrent()
+              return {
+                signal: admissionSignal,
+                assertCurrent,
+                commit: () => {
+                  assertCurrent()
+                  const continuation = createIntent({
+                    ...scope,
+                    continuedFromRefusalId: operation.refusalId
+                  })
+                  continuation.prepareUserExecution(operation.assertCurrent)
+                  current.claimContinuation()
+                  remember(continuation)
+                }
               }
             })
           }

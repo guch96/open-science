@@ -131,6 +131,7 @@ import { createProjectDbClient, migrateApplicationDatabase } from '../projects/p
 import { NotebookLocalRpcServer } from '../notebook/local-rpc-server'
 import { healthyNotebookMemoryPolicy } from '../notebook/memory-policy.test-support'
 import {
+  NotebookExecutionIntentOwner,
   notebookExecutionIntent,
   withNotebookUserOperation,
   withNotebookExecutionIntent
@@ -34232,6 +34233,110 @@ it.each([
       child.stdout.destroy()
       child.stderr.destroy()
       await rm(root, { recursive: true, force: true })
+    }
+  }
+)
+
+it.each(['Stop', 'caller revocation', 'refusal replacement'] as const)(
+  'does not consume a Notebook memory refusal when %s wins during the durable write',
+  async (change) => {
+    const child = new FakeAgentProcess()
+    const provider = startFakeAgent(child, ['notebook-continuation'])
+    const intents = new NotebookExecutionIntentOwner()
+    const writeStarted = Promise.withResolvers<void>()
+    const finishWrite = Promise.withResolvers<void>()
+    const promptMessageId = 'continue-notebook'
+    let persisted: PersistedChatSession
+    const runtimeSessions = new RuntimeSessionOwner({
+      loadSession: async () => structuredClone(persisted),
+      mutateSession: async (_scope, mutate) => {
+        const next = mutate(structuredClone(persisted))
+        if (!persisted.runtimeSessionAdmissions?.length) {
+          writeStarted.resolve()
+          await finishWrite.promise
+        }
+        persisted = next
+        return structuredClone(persisted)
+      },
+      finalizeArtifacts: async () => []
+    })
+    const onPromptStarted = vi.fn()
+    const runtime = new AcpRuntimeCoordinator(
+      (callbacks) =>
+        new AcpRuntime({
+          appVersion: 'test',
+          defaultCwd: '/workspace',
+          framework: opencodeFramework,
+          spawnAgent: () => asAgentProcess(child),
+          runtimeSessions,
+          callbacks,
+          notebook: {
+            projectId: 'project-1',
+            mcpEntryPath: '/app/main.js',
+            getRpcConnection: async () => ({ endpoint: 'http://127.0.0.1:4567', token: 'nb' }),
+            createExecutionIntent: (scope) => intents.create(scope),
+            currentExecutionIntent: (scope) => intents.current(scope)
+          }
+        }),
+      { onPromptStarted }
+    )
+    try {
+      const { sessionId } = await runtime.createSession({
+        projectId: 'project-1',
+        cwd: '/workspace'
+      })
+      persisted = {
+        ...createRestoredContinuationSession(promptMessageId, sessionId),
+        status: 'running',
+        activeRun: { promptMessageId, startedAt: 2 }
+      }
+      const provenanceContext = getActiveConversationContext(
+        persisted.conversationGraph!,
+        promptMessageId
+      )!
+      const scope = {
+        projectId: 'project-1',
+        sessionId,
+        messageBranchId: provenanceContext.messageBranchId
+      }
+      const refused = intents.create(scope)
+      const refusalId = refused.block('memory', async () => undefined)
+      let callerCurrent = true
+      const starting = runtime.startPrompt(
+        withNotebookUserOperation(
+          { sessionId, text: 'Continue the blocked Notebook work.', provenanceContext },
+          {
+            projectId: scope.projectId,
+            refusalId,
+            desktopContinuation: true,
+            assertCurrent: () => {
+              if (!callerCurrent) throw new Error('Notebook caller is no longer current')
+            }
+          }
+        )
+      )
+      const admission = starting.then(
+        () => 'accepted',
+        (error: Error) => error.message
+      )
+      await Promise.race([writeStarted.promise, starting])
+      let expected = refused
+      if (change === 'Stop') await runtime.cancelPrompt({ sessionId, userInitiated: true })
+      else if (change === 'caller revocation') callerCurrent = false
+      else expected = intents.create(scope)
+      finishWrite.resolve()
+      expect(await admission).not.toBe('accepted')
+      await vi.waitFor(() => expect(persisted.activeRun).toBeUndefined())
+      expect(persisted.messages[0].turnOutcome?.kind).toBe(
+        change === 'Stop' ? 'cancelled' : 'failed'
+      )
+      expect(onPromptStarted).not.toHaveBeenCalled()
+      expect(provider.prompts).toEqual([])
+      expect(refused.hasClaimedContinuation).toBe(false)
+      expect(intents.current(scope)).toBe(expected)
+    } finally {
+      finishWrite.resolve()
+      await runtime.disconnect()
     }
   }
 )

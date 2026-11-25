@@ -169,7 +169,7 @@ type AcpPromptTurnEnvironment = Readonly<{
     request: AcpPromptRequest,
     mode: AcpPromptTurnMode,
     signal: AbortSignal
-  ) => void | Promise<() => void>
+  ) => void | Promise<{ signal: AbortSignal; assertCurrent(): void; commit(): void }>
   observeNotebookExecutionLoop?: (input: {
     appSessionId: string
     providerSessionId: string
@@ -494,6 +494,7 @@ class AcpPromptTurnWorkflow {
     const traceThisRun =
       mode.kind === 'user' && mode.runtimeReviewOwner === 'task' && requiresTaskRunTracing(request)
     let admittedRequest = request
+    let preDispatchOutcome: AcpPromptFinalizationOutcome | undefined
     try {
       interaction = this.options.interactions.activatePrompt(reservation)
       // Activate the prompt before releasing startup protection so reconnect never sees an idle gap.
@@ -530,7 +531,12 @@ class AcpPromptTurnWorkflow {
         mode,
         interaction.signal
       )
-      const commitNotebookContinuation = notebookPreparation && (await notebookPreparation)
+      const notebookContinuation = notebookPreparation && (await notebookPreparation)
+      const assertInteractionCurrent = (): void => {
+        if (this.options.interactions.current(request.sessionId) !== interaction)
+          throw new Error('ACP prompt interaction is no longer active')
+        notebookContinuation?.assertCurrent()
+      }
       // The coordinator retains the original object for automatic Reviewer/settlement work.
       // Copy only Main-owned symbols, never wire metadata, onto that retained request.
       const intent = notebookExecutionIntent(admittedRequest)
@@ -553,13 +559,10 @@ class AcpPromptTurnWorkflow {
                 }
               : undefined,
             mode.kind === 'app-continuation',
-            mode.kind === 'app-continuation'
+            mode.kind === 'app-continuation' || notebookContinuation
               ? {
-                  signal: interaction.signal,
-                  assertCurrent: () => {
-                    if (this.options.interactions.current(request.sessionId) !== interaction)
-                      throw new Error('ACP prompt interaction is no longer active')
-                  }
+                  signal: notebookContinuation?.signal ?? interaction.signal,
+                  assertCurrent: assertInteractionCurrent
                 }
               : undefined
           )
@@ -571,13 +574,23 @@ class AcpPromptTurnWorkflow {
           throw error
         }
       }
-      if (commitNotebookContinuation) {
-        commitNotebookContinuation()
-        const continuation = notebookExecutionIntent(admittedRequest)
-        if (continuation) markNotebookExecutionIntent(request, continuation)
+      if (notebookContinuation) {
+        try {
+          assertInteractionCurrent()
+          notebookContinuation.commit()
+          const continuation = notebookExecutionIntent(admittedRequest)
+          if (continuation) markNotebookExecutionIntent(request, continuation)
+        } catch (error) {
+          if (!this.options.beginRuntimeSessionTurn) throw error
+          preDispatchOutcome = notebookContinuation.signal.aborted
+            ? { kind: 'not-dispatched' }
+            : { kind: 'failed', error }
+        }
       }
-      this.options.registry.select(admittedRequest.sessionId)
-      this.options.recordAdmittedPrompt(admittedRequest)
+      if (!preDispatchOutcome) {
+        this.options.registry.select(admittedRequest.sessionId)
+        this.options.recordAdmittedPrompt(admittedRequest)
+      }
     } catch (error) {
       notebookExecutionIntent(admittedRequest)?.abandonUserExecution()
       const scope = interaction ?? reservation
@@ -598,27 +611,35 @@ class AcpPromptTurnWorkflow {
       throw error
     }
 
-    this.safeCallback('prompt-start callback failed', () =>
-      this.options.onPromptStarted(request.sessionId, interaction.turnToken, mode.promptAttemptId)
+    if (!preDispatchOutcome) {
+      this.safeCallback('prompt-start callback failed', () =>
+        this.options.onPromptStarted(request.sessionId, interaction.turnToken, mode.promptAttemptId)
+      )
+      this.options.emitState()
+      log.info('prompt start', {
+        sessionId: request.sessionId,
+        textLength: request.text?.length ?? 0
+      })
+    }
+    return this.executeTurn(
+      {
+        request: admittedRequest,
+        traceThisRun,
+        connectionGeneration: this.options.environment.connectionGeneration?.() ?? 0,
+        mode,
+        session: activeSession,
+        interaction,
+        skill,
+        plan
+      },
+      preDispatchOutcome
     )
-    this.options.emitState()
-    log.info('prompt start', {
-      sessionId: request.sessionId,
-      textLength: request.text?.length ?? 0
-    })
-    return this.executeTurn({
-      request: admittedRequest,
-      traceThisRun,
-      connectionGeneration: this.options.environment.connectionGeneration?.() ?? 0,
-      mode,
-      session: activeSession,
-      interaction,
-      skill,
-      plan
-    })
   }
 
-  private async executeTurn(turn: AcpActivatedPromptTurn): Promise<PromptResponse> {
+  private async executeTurn(
+    turn: AcpActivatedPromptTurn,
+    preDispatchOutcome?: AcpPromptFinalizationOutcome
+  ): Promise<PromptResponse> {
     const { request, session, interaction, skill } = turn
     const {
       artifacts,
@@ -1061,7 +1082,8 @@ class AcpPromptTurnWorkflow {
     }
     let outcome: AcpPromptFinalizationOutcome
     try {
-      outcome = await execute()
+      if (preDispatchOutcome?.kind === 'not-dispatched') await this.checkpoint(interaction)
+      outcome = preDispatchOutcome ?? (await execute())
     } catch (error) {
       outcome = Object.freeze({ kind: 'failed', error })
     } finally {

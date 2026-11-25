@@ -313,6 +313,16 @@ const notebookBranchMatches = (
   )
 }
 
+export class NotebookContinuationBranchError extends Error {
+  constructor() {
+    super(
+      i18next.t(
+        'Return to the conversation branch where Notebook execution stopped before continuing.'
+      )
+    )
+  }
+}
+
 const ownsPrompt = (sessionId: string, messageId: string): boolean => {
   const session = useSessionStore.getState().sessions.find((item) => item.id === sessionId)
   return session?.status === 'running' && session.activeRun?.promptMessageId === messageId
@@ -1642,11 +1652,7 @@ const performSendWorkspaceMessage = async (
     }
     if (!notebookBranchMatches(sessionId, input.notebookContinuation?.messageBranchId)) {
       await rollbackWorkspacePrompt(promptPreparation)
-      throw new Error(
-        i18next.t(
-          'Return to the conversation branch where Notebook execution stopped before continuing.'
-        )
-      )
+      throw new NotebookContinuationBranchError()
     }
     if (input.truncateFromMessageId) {
       useSessionStore
@@ -1927,11 +1933,7 @@ const sendWorkspaceMessage = async (
   const sessionId = input.sessionId
   const previousSession = useSessionStore.getState().sessions.find(({ id }) => id === sessionId)
   if (!notebookBranchMatches(sessionId, input.notebookContinuation?.messageBranchId)) {
-    throw new Error(
-      i18next.t(
-        'Return to the conversation branch where Notebook execution stopped before continuing.'
-      )
-    )
+    throw new NotebookContinuationBranchError()
   }
   if (
     input.notebookContinuation &&

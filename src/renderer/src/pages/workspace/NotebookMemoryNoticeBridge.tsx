@@ -453,13 +453,15 @@ export const NotebookMemoryNoticeBridge = ({
                   }
                   onClick={() => void retry()}
                 >
-                  {memoryDecision
-                    ? recheck.busy
-                      ? t('Checking…')
-                      : t('Check and continue')
-                    : reproductionRejection
-                      ? t('Open reproducibility checks')
-                      : t('Recheck and retry')}
+                  {memoryDecision ? (
+                    <span key={String(recheck.busy)} className="button-feedback">
+                      {recheck.busy ? t('Checking…') : t('Check and continue')}
+                    </span>
+                  ) : reproductionRejection ? (
+                    t('Open reproducibility checks')
+                  ) : (
+                    t('Recheck and retry')
+                  )}
                 </Button>
               ) : null}
             </div>

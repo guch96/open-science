@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { create } from 'zustand'
 import type { WorkspaceAgentRuntime } from '@/lib/acp/useWorkspaceAgentRuntime'
+import { NotebookContinuationBranchError } from '@/lib/acp/workspace-runtime-command-owner'
 import {
   dismissNotebookMemoryRejection,
   useNotebookMemoryNoticeStore
@@ -15,7 +16,7 @@ import type { NotebookPendingDecision } from '../../../../shared/notebook-resour
 import type { ReplayRunIndex } from '../../../../shared/replay'
 
 type Entrance = 'notice' | 'compute'
-type Failure = 'pressured' | 'unavailable' | 'handoff'
+type Failure = 'pressured' | 'unavailable' | 'handoff' | NotebookContinuationBranchError
 type Attempt =
   { status: 'checking' | 'handed-off' } | { status: 'failed'; entrance: Entrance; failure: Failure }
 
@@ -42,7 +43,7 @@ export const useNotebookMemoryContinuationStatus = (
   const key = session && continuationKey(session.projectId, session.id)
   const continuation = useContinuations((state) => (key ? state[key] : undefined))
   const admissions =
-    continuation?.status === 'continuing' &&
+    continuation &&
     session?.runtimeSessionAdmissions?.filter(
       (entry) =>
         entry.promptMessageId === continuation.promptMessageId &&
@@ -61,10 +62,10 @@ export const useNotebookMemoryContinuationStatus = (
       ({ id }) => id === continuation.promptMessageId
     )?.turnOutcome
   )
+  const notebook = continuation && window.api?.notebook
   useEffect(() => {
     if (!key || continuation?.status !== 'continuing' || !visible || !executionId || superseded)
       return
-    const notebook = window.api.notebook
     if (!notebook?.runIndex || !notebook.state || !notebook.onChanged) return
     const { projectId, sessionId, workspaceCwd, promptMessageId } = continuation
     const reference = { projectId, sessionId, workspaceCwd }
@@ -97,20 +98,22 @@ export const useNotebookMemoryContinuationStatus = (
           const byId = new Map(runs.filter(matches).map((run) => [run.runId, run]))
           for (const row of batch) {
             const run = byId.get(row.runId)
+            if (!run) {
+              unconfirmed = true
+              continue
+            }
             if (
-              run &&
               run.status !== 'queued' &&
               (run.executionStarted === true ||
                 (run.status === 'completed' &&
                   run.executionStarted === undefined &&
                   run.kernelDispatched !== false &&
-                  (run.kernelDispatched === true ||
-                    (run.kernelKind === 'bash' && run.exitCode === 0))))
+                  run.kernelKind === 'bash' &&
+                  run.exitCode === 0))
             )
               return 'started'
-            const status = run?.status ?? row.status
-            if (status === 'queued' || status === 'running') pending = true
-            else if (run?.executionStarted !== false && run?.kernelDispatched !== false)
+            if (run.status === 'queued' || run.status === 'running') pending = true
+            else if (run.executionStarted !== false && run.kernelDispatched !== false)
               unconfirmed = true
           }
         }
@@ -164,9 +167,18 @@ export const useNotebookMemoryContinuationStatus = (
     messageBranchId,
     runtimeSegmentId,
     turnSettled,
-    superseded
+    superseded,
+    notebook
   ])
-  return visible ? (superseded ? 'unconfirmed' : continuation?.status) : undefined
+  if (!visible || !continuation) return undefined
+  if (
+    superseded ||
+    (continuation.status === 'continuing' &&
+      turnSettled &&
+      (!executionId || !notebook?.runIndex || !notebook.state || !notebook.onChanged))
+  )
+    return 'unconfirmed'
+  return continuation.status
 }
 
 const keyFor = (decision: {
@@ -182,7 +194,7 @@ const keyFor = (decision: {
     decision.refusalId
   ])
 
-const failureFor = (message: string): Failure =>
+const failureFor = (message: string): 'pressured' | 'unavailable' | 'handoff' =>
   message.includes('NOTEBOOK_MEMORY_PRESSURE:')
     ? 'pressured'
     : message.includes('NOTEBOOK_MEMORY_UNAVAILABLE:')
@@ -215,7 +227,7 @@ export const useNotebookMemoryContinuation = (
     )
       return undefined
     useAttempts.setState({ [key]: { status: 'checking' } })
-    let rejected: string | undefined
+    let failure: Failure = 'handoff'
     try {
       const session = useSessionStore
         .getState()
@@ -234,7 +246,7 @@ export const useNotebookMemoryContinuation = (
           kind: 'memory'
         },
         onPreparationRejected: (message) => {
-          rejected = message
+          failure = failureFor(message)
         },
         text: t(
           'Continue the blocked Notebook work. Keep completed results and ask before repeating completed steps.'
@@ -259,11 +271,12 @@ export const useNotebookMemoryContinuation = (
         return result
       }
     } catch (error) {
-      rejected = error instanceof Error ? error.message : String(error)
+      failure =
+        error instanceof NotebookContinuationBranchError
+          ? error
+          : failureFor(error instanceof Error ? error.message : String(error))
     }
-    useAttempts.setState({
-      [key]: { status: 'failed', entrance, failure: failureFor(rejected ?? '') }
-    })
+    useAttempts.setState({ [key]: { status: 'failed', entrance, failure } })
     return undefined
   }
   const failure = attempt?.status === 'failed' && attempt.entrance === entrance && attempt.failure
@@ -274,7 +287,9 @@ export const useNotebookMemoryContinuation = (
         ? t('Could not confirm memory status. This Notebook did not run.')
         : failure === 'handoff'
           ? t('Notebook continuation could not be started. The previous request remains stopped.')
-          : undefined
+          : failure instanceof NotebookContinuationBranchError
+            ? failure.message
+            : undefined
   return {
     busy: attempt?.status === 'checking',
     handedOff: attempt?.status === 'handed-off',

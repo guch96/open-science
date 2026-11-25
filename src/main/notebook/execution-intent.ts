@@ -202,6 +202,7 @@ type NotebookUserOperation = Readonly<{
   refusalId?: string
   projectId?: string
   desktopContinuation?: true
+  admissionSignal?: AbortSignal
   task?: NotebookTaskContinuationOperation['task']
   assertCurrent(): void
 }>

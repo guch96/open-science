@@ -114,12 +114,19 @@ export const createNotebookExecutionAdmission = (options: {
   executionScope?: string
   expectedScope?: string
   force?: boolean
+  freshAfterPending?: boolean
   signal?: AbortSignal
   assertHostCurrent?: (boundary: NotebookExecutionBoundary) => void
   onRejected?: (state: MemoryPolicyObservation, recheck: NotebookMemoryRecheck) => void
 }): NotebookExecutionAdmission => {
   let policy: NotebookMemoryPolicyPort | undefined
   const assertMemory = (state: MemoryPolicyObservation): void => {
+    if (options.freshAfterPending && state.reason.code === 'disposed')
+      throw new NotebookExecutionAdmissionError(
+        'NOTEBOOK_MEMORY_UNAVAILABLE',
+        'The original Notebook execution domain is no longer available. Execution was not started.',
+        state
+      )
     if (options.expectedScope !== undefined && state.executionScope !== options.expectedScope)
       throw new NotebookExecutionAdmissionError(
         'NOTEBOOK_MEMORY_UNAVAILABLE',
@@ -143,6 +150,7 @@ export const createNotebookExecutionAdmission = (options: {
         executionScope: options.executionScope,
         expectedScope: state.executionScope,
         force: true,
+        freshAfterPending: true,
         signal
       })
       await retry.prepare('submit')
@@ -184,7 +192,8 @@ export const createNotebookExecutionAdmission = (options: {
         state = await policy.getState({
           signal: options.signal,
           executionScope: options.executionScope,
-          force: options.force === true
+          force: options.force === true,
+          ...(options.freshAfterPending ? { freshAfterPending: true } : {})
         })
       } catch (error) {
         options.signal?.throwIfAborted()

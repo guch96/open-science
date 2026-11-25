@@ -2026,7 +2026,16 @@ afterEach(() => {
   container.remove()
 })
 
-it.each(['reply only', 'background run'] as const)(
+const notebookContinuationScenarios = [
+  'reply only',
+  'background run',
+  'completed without code-start evidence',
+  'missing run detail',
+  'settled without admission',
+  'successful Shell exit'
+] as const
+
+it.each(notebookContinuationScenarios)(
   'shows the admitted Notebook continuation outcome for %s',
   async (scenario) => {
     const session: ChatSession = {
@@ -2082,7 +2091,14 @@ it.each(['reply only', 'background run'] as const)(
       { ...run, runId: 'old', status: 'completed', promptMessageId: 'refused-prompt' },
       { ...run, runId: 'other-branch', status: 'completed', messageBranchId: 'other-branch' }
     ]
-    let currentRun: ReplayRunIndex & { executionStarted?: boolean } = run
+    let currentRun: ReplayRunIndex & {
+      executionStarted?: boolean
+      kernelDispatched?: boolean
+      exitCode?: number
+    } =
+      scenario === 'completed without code-start evidence'
+        ? { ...run, status: 'completed', kernelDispatched: true }
+        : run
     const publish = (next: ChatSession): void => {
       useSessionStore.setState({
         sessions: [
@@ -2121,9 +2137,12 @@ it.each(['reply only', 'background run'] as const)(
         })
     }
     window.api.notebook.runIndex = async () =>
-      scenario === 'background run' ? [...unrelated, currentRun] : unrelated
+      scenario === 'reply only' ? unrelated : [...unrelated, currentRun]
     window.api.notebook.state = vi.fn(async () => ({
-      runs: [...unrelated.map((row) => ({ ...row, executionStarted: true })), currentRun]
+      runs: [
+        ...unrelated.map((row) => ({ ...row, executionStarted: true })),
+        ...(scenario === 'missing run detail' ? [] : [currentRun])
+      ]
     })) as unknown as typeof window.api.notebook.state
     const sendMessage = vi.fn(async () => {
       publish({ ...session, messages: [...session.messages, prompt] })
@@ -2163,22 +2182,22 @@ it.each(['reply only', 'background run'] as const)(
     const admitted: ChatSession = {
       ...session,
       messages: [...session.messages, prompt],
-      runtimeSessionAdmissions: [admission]
+      runtimeSessionAdmissions: scenario === 'settled without admission' ? [] : [admission]
     }
     await act(async () => publish(admitted))
     expect(screen.getByText('Continuing Notebook work…')).toBeTruthy()
     expect(screen.queryByText('Notebook execution started')).toBeNull()
 
-    await act(async () =>
-      publish({
-        ...admitted,
-        messages: [
-          ...session.messages,
-          { ...prompt, turnOutcome: { kind: 'completed', settledAt: 4 } }
-        ]
-      })
-    )
-    if (scenario === 'background run') {
+    const settled: ChatSession = {
+      ...admitted,
+      messages: [
+        ...session.messages,
+        { ...prompt, turnOutcome: { kind: 'completed', settledAt: 4 } }
+      ]
+    }
+    await act(async () => publish(settled))
+    const unconfirmed = 'Memory check passed. Notebook execution could not be confirmed.'
+    if (scenario === 'background run' || scenario === 'successful Shell exit') {
       expect(screen.getByText('Continuing Notebook work…')).toBeTruthy()
       expect(screen.queryByText('Notebook execution started')).toBeNull()
       await act(async () => {
@@ -2188,12 +2207,25 @@ it.each(['reply only', 'background run'] as const)(
       expect(screen.getByText('Continuing Notebook work…')).toBeTruthy()
       expect(screen.queryByText('Notebook execution started')).toBeNull()
       await act(async () => {
-        currentRun = { ...run, status: 'completed', executionStarted: true }
+        currentRun =
+          scenario === 'background run'
+            ? { ...run, status: 'completed', executionStarted: true }
+            : { ...run, status: 'completed', kernelKind: 'bash', exitCode: 0 }
         notifyNotebookChanged()
       })
       expect(screen.getByText('Notebook execution started')).toBeTruthy()
-    } else {
+      await act(async () =>
+        publish({
+          ...settled,
+          runtimeSessionAdmissions: [admission, { ...admission, executionId: 'replacement' }]
+        })
+      )
+      expect(screen.queryByText('Notebook execution started')).toBeNull()
+      expect(screen.getByText(unconfirmed)).toBeTruthy()
+    } else if (scenario === 'reply only') {
       expect(screen.getByText('Memory check passed. Notebook did not run this turn.')).toBeTruthy()
+    } else {
+      expect(screen.getByText(unconfirmed)).toBeTruthy()
     }
     expect(screen.queryByText('Continuing Notebook work…')).toBeNull()
     expect(sendMessage).toHaveBeenCalledOnce()

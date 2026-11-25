@@ -128,7 +128,9 @@ const NotebookContinuation = ({
           aria-busy={recheck.busy || undefined}
           onClick={() => void recheck.checkAndContinue().then(refresh)}
         >
-          {recheck.busy ? t('Checking…') : t('Check and continue')}
+          <span key={String(recheck.busy)} className="button-feedback">
+            {recheck.busy ? t('Checking…') : t('Check and continue')}
+          </span>
         </Button>
       ) : canContinue ? (
         <Button
