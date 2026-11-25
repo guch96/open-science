@@ -18,6 +18,124 @@ const scenarios = [
   { action: 'permission-deny', restart: true }
 ] as const
 
+test.describe('Notebook memory recheck', () => {
+  test.skip(
+    process.platform !== 'win32' || Boolean(process.env.OPEN_SCIENCE_E2E_EXECUTABLE),
+    'Uses the isolated Windows source-build memory sampler'
+  )
+
+  for (const entrance of ['notice', 'compute'] as const) {
+    test(`checks and continues a Notebook memory refusal from ${entrance}`, async ({ app }) => {
+      await app.completeOnboarding()
+      const page = await app.configureFakeAgent()
+      await createProjectViaUi(page, 'Notebook memory recheck')
+      const compute = page.getByRole('button', { name: 'Compute', exact: true })
+      if (entrance === 'notice') await compute.click()
+      await app.setNotebookMemorySample('pressured')
+      const original = 'Verify a Notebook memory refusal.'
+      await submitPromptViaUi(page, original)
+
+      const notice = page.getByTestId('notebook-memory-notice')
+      await expect(notice).toBeVisible()
+      await expect(
+        page.getByText('The original Notebook request was refused.', { exact: true })
+      ).toBeVisible()
+      const readSession = (): Promise<PersistedChatSession> =>
+        page.evaluate(async () => (await window.api.sessions.loadAll()).sessions[0])
+      await expect.poll(async () => (await readSession()).activeRun).toBeUndefined()
+      const session = await readSession()
+      const readRuns = (): Promise<NotebookRunRecord[]> =>
+        app.readNotebookFixtureRuns(session.projectId, session.id)
+      const runsBefore = await readRuns()
+      expect(runsBefore).toEqual([])
+
+      const decision = page.getByRole('region', {
+        name: 'Waiting for your decision',
+        includeHidden: true
+      })
+      const actionName = 'Check and continue'
+      const continuationPrompts = async (): ReturnType<typeof app.readFakeAgentPrompts> =>
+        (await app.readFakeAgentPrompts()).filter(({ prompt }) =>
+          prompt.includes('Continue the blocked Notebook work. Keep completed results')
+        )
+      const entranceSurface = entrance === 'notice' ? notice : decision
+      if (entrance === 'compute') {
+        await notice.getByRole('button', { name: 'Manage resources', exact: true }).click()
+        await expect(notice).toBeHidden()
+        await expect(page.getByText('No running Notebooks', { exact: true })).toBeVisible()
+        expect(await continuationPrompts()).toEqual([])
+      }
+      const action = entranceSurface.getByRole('button', { name: actionName, exact: true })
+      await expect(action).toBeEnabled()
+      if (entrance === 'notice') {
+        await expect(
+          decision.getByRole('button', {
+            name: actionName,
+            exact: true,
+            includeHidden: true
+          })
+        ).toBeEnabled()
+      }
+
+      await app.setNotebookMemorySample(entrance === 'notice' ? 'pressured' : 'unavailable', 3000)
+      await action.click()
+      await expect(
+        entranceSurface.getByRole('button', { name: 'Checking…', exact: true })
+      ).toBeDisabled()
+      if (entrance === 'notice') {
+        await expect(notice.getByRole('button', { name: 'Later', exact: true })).toBeDisabled()
+        await expect(
+          notice.getByRole('button', { name: 'Manage resources', exact: true })
+        ).toBeDisabled()
+        await expect(
+          decision.getByRole('button', {
+            name: 'Checking…',
+            exact: true,
+            includeHidden: true
+          })
+        ).toBeDisabled()
+        await page.keyboard.press('Escape')
+        await expect(notice).toBeVisible()
+      }
+      const failure =
+        entrance === 'notice'
+          ? 'Memory is still too low. This Notebook did not run.'
+          : 'Could not confirm memory status. This Notebook did not run.'
+      await expect(entranceSurface.getByRole('alert')).toContainText(failure)
+      await expect(action).toBeEnabled()
+      if (entrance === 'compute') await expect(notice).toBeHidden()
+      expect(await continuationPrompts()).toEqual([])
+      expect(await readRuns()).toEqual(runsBefore)
+
+      await app.setNotebookMemorySample('healthy')
+      await action.click()
+      await expect(
+        entranceSurface.getByRole('button', { name: /^(Check and continue|Checking…)$/ })
+      ).toHaveCount(0)
+      await expect(notice).toBeHidden()
+      const turnReply = page.getByText('The Notebook continuation reached the original session.', {
+        exact: true
+      })
+      await expect(turnReply).not.toBeVisible()
+      const originalTurn = (await app.readFakeAgentPrompts()).find(({ prompt }) =>
+        prompt.includes(original)
+      )
+      expect(originalTurn).toBeDefined()
+      await expect.poll(continuationPrompts).toEqual([
+        expect.objectContaining({
+          sessionId: originalTurn!.sessionId,
+          role: 'main'
+        })
+      ])
+      await expect(turnReply).toBeVisible()
+      expect(await readRuns()).toEqual(runsBefore)
+      await expect(
+        page.getByText('The original Notebook request was refused.', { exact: true })
+      ).toBeVisible()
+    })
+  }
+})
+
 for (const transition of ['live', 'restart', 'crash'] as const) {
   test(`keeps native questions answerable after ${transition}`, async ({ app }, testInfo) => {
     test.setTimeout(180_000)

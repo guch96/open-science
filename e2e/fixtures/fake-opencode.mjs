@@ -3210,6 +3210,22 @@ if (process.argv.includes('--version')) {
           reply = await verifyComputeMonitor(context.params.sessionId)
         } else if (prompt.includes('Read Compute stop feedback.')) {
           reply = await verifyComputeMonitor(context.params.sessionId, true)
+        } else if (prompt.includes('Continue the blocked Notebook work. Keep completed results')) {
+          await new Promise((resolve) => setTimeout(resolve, 8000))
+          reply = 'The Notebook continuation reached the original session.'
+        } else if (prompt.includes('Verify a Notebook memory refusal.')) {
+          await withMcpClient(context.params.sessionId, 'open-science-notebook', async (client) => {
+            const refused = await client.callTool({
+              name: 'repl_execute',
+              arguments: { code: 'return { marker: "memory-refusal-must-not-run" }' }
+            })
+            if (
+              !refused.isError ||
+              !JSON.stringify(refused.content).includes('NOTEBOOK_MEMORY_PRESSURE')
+            )
+              throw new Error(`Expected a real Notebook memory refusal: ${JSON.stringify(refused)}`)
+          })
+          reply = 'The original Notebook request was refused.'
         } else if (prompt.includes(NOTEBOOK_LIFECYCLE_PROMPT)) {
           reply = await verifyNotebookLifecycle(context.params.sessionId)
         } else if (prompt.includes(PERFORMANCE_NOTEBOOK_LIFECYCLE_PROMPT)) {

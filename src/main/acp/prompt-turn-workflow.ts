@@ -165,7 +165,11 @@ type AcpPromptTurnEnvironment = Readonly<{
     signal: AbortSignal
   ) => Promise<void>
   commitNotebookDispatch?: (appSessionId: string) => void
-  prepareNotebookIntent?: (request: AcpPromptRequest, mode: AcpPromptTurnMode) => void
+  prepareNotebookIntent?: (
+    request: AcpPromptRequest,
+    mode: AcpPromptTurnMode,
+    signal: AbortSignal
+  ) => void | Promise<() => void>
   observeNotebookExecutionLoop?: (input: {
     appSessionId: string
     providerSessionId: string
@@ -521,7 +525,12 @@ class AcpPromptTurnWorkflow {
         )
         admittedRequest = { ...request, provenanceContext: admittedProvenanceContext }
       }
-      this.options.environment.prepareNotebookIntent?.(admittedRequest, mode)
+      const notebookPreparation = this.options.environment.prepareNotebookIntent?.(
+        admittedRequest,
+        mode,
+        interaction.signal
+      )
+      const commitNotebookContinuation = notebookPreparation && (await notebookPreparation)
       // The coordinator retains the original object for automatic Reviewer/settlement work.
       // Copy only Main-owned symbols, never wire metadata, onto that retained request.
       const intent = notebookExecutionIntent(admittedRequest)
@@ -561,6 +570,11 @@ class AcpPromptTurnWorkflow {
             })
           throw error
         }
+      }
+      if (commitNotebookContinuation) {
+        commitNotebookContinuation()
+        const continuation = notebookExecutionIntent(admittedRequest)
+        if (continuation) markNotebookExecutionIntent(request, continuation)
       }
       this.options.registry.select(admittedRequest.sessionId)
       this.options.recordAdmittedPrompt(admittedRequest)

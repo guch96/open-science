@@ -372,28 +372,39 @@ describe('Compute Notebook resource controls', () => {
       memory: { ...memory, status: 'healthy', reason: 'memory-available', checkedAt: 2 }
     })
     expect(useNotebookMemoryNoticeStore.getState().rejection).toBeUndefined()
+    const decision = {
+      projectId: 'project-1',
+      sessionId: 'session-1',
+      refusalId: 'refusal-original'
+    }
     view = {
       groups: [],
-      releases: [],
-      pendingDecisions: [
-        { projectId: 'project-1', sessionId: 'session-1', refusalId: 'refusal-original' }
-      ]
+      releases: [release({ status: 'released', continuations: [decision] })],
+      pendingDecisions: [{ ...decision, kind: 'memory' }]
     }
+    sendMessage.mockRejectedValueOnce(new Error('NOTEBOOK_MEMORY_UNAVAILABLE: sample timed out'))
     await render()
     expect(container.textContent).toContain('No running Notebooks')
     expect(container.textContent).toContain('Waiting for your decision')
     expect(container.textContent).not.toContain('Interpreters: 1')
     expect(sendMessage).not.toHaveBeenCalled()
-    await act(async () => button('Continue Notebook work').click())
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith({
-      projectId: 'project-1',
-      sessionId: 'session-1',
-      cwd: '/workspace',
-      requireExistingSession: true,
-      preserveSelection: true,
-      notebookContinuation: { refusalId: 'refusal-original' },
-      text: 'Recheck memory and reconsider the blocked Notebook work. Keep completed results and ask before repeating completed steps.'
-    })
+    await act(async () => button('Check and continue').click())
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Could not confirm memory status. This Notebook did not run.'
+    )
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    await act(async () => button('Check and continue').click())
+    expect(sendMessage).toHaveBeenCalledTimes(2)
+    expect(sendMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        projectId: 'project-1',
+        sessionId: 'session-1',
+        cwd: '/workspace',
+        requireExistingSession: true,
+        preserveSelection: true,
+        notebookContinuation: { refusalId: 'refusal-original', kind: 'memory' }
+      })
+    )
     expect(releaseSessionResources).not.toHaveBeenCalled()
   })
 

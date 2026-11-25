@@ -34366,6 +34366,29 @@ it('pins each trusted Notebook user intent before provider dispatch and keeps re
     pressured = true
     expect(await run(old)).toContain('NOTEBOOK_MEMORY_PRESSURE')
     expect(forcedSamples).not.toContain(true)
+    const continuedScope = { projectId: 'project', sessionId: session.sessionId }
+    const stopped = service.currentExecutionIntent(continuedScope)!
+    const continueFromDesktop = (): ReturnType<typeof runtime.sendPrompt> =>
+      runtime.sendPrompt(
+        withNotebookUserOperation(
+          {
+            sessionId: session.sessionId,
+            text: 'Continue the blocked Notebook work.',
+            provenanceContext: { promptMessageId: 'desktop-notebook-continuation' }
+          },
+          {
+            projectId: 'project',
+            refusalId: stopped.refusalId,
+            desktopContinuation: true,
+            assertCurrent
+          }
+        )
+      )
+    await expect(continueFromDesktop()).rejects.toThrow('NOTEBOOK_MEMORY_PRESSURE')
+    expect(forcedSamples.at(-1)).toBe(true)
+    expect(agent.prompts).toHaveLength(1)
+    expect(service.currentExecutionIntent(continuedScope)).toBe(stopped)
+    expect(stopped.hasClaimedContinuation).toBe(false)
     pressured = false
     await runtime.sendPrompt(
       withNotebookUserOperation(

@@ -46,6 +46,7 @@ import {
 } from '../delegation/execution-port'
 import type { RootDelegatedWorkControl } from '../delegation/production-composition'
 import type { ShutdownStepOutcome } from '../lifecycle-shutdown'
+import { notebookUserOperation } from '../notebook/execution-intent'
 import { ConversationPermissionGrantStore, type AppPermissionRequest } from './permission-broker'
 import { AcpRuntime } from './runtime'
 import {
@@ -222,6 +223,7 @@ class AcpRuntimeCoordinator {
   private delegatedWorkRevision = 0
   private promptAttemptSequence = 0
   private readonly pendingPromptStarts = new Map<string, PendingPromptStart[]>()
+  private readonly startingNotebookContinuations = new Set<string>()
   private readonly activePromptRequests = new Map<string, ActivePromptRequest>()
   private readonly activePromptCounts = new Map<string, number>()
   private readonly interactionReleaseWaiters = new Map<string, Set<() => void>>()
@@ -1338,6 +1340,13 @@ class AcpRuntimeCoordinator {
   // matching prompt start after its durable Session turn is admitted. Provider output and later
   // human approval waits must not retain a Web request until their own lifecycle completes.
   startPrompt(request: AcpPromptRequest): Promise<void> {
+    const operation = notebookUserOperation(request)
+    const refusalId = operation?.desktopContinuation ? operation.refusalId : undefined
+    if (refusalId) {
+      if (this.startingNotebookContinuations.has(refusalId))
+        return Promise.reject(new Error('This Notebook continuation is already in progress.'))
+      this.startingNotebookContinuations.add(refusalId)
+    }
     let resolve!: () => void
     let reject!: (error: unknown) => void
     const accepted = new Promise<void>((promiseResolve, promiseReject) => {
@@ -1374,7 +1383,9 @@ class AcpRuntimeCoordinator {
         ),
       admission.reject
     )
-    return accepted
+    return refusalId
+      ? accepted.finally(() => this.startingNotebookContinuations.delete(refusalId))
+      : accepted
   }
 
   sendApplicationPrompt(

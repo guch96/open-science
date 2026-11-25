@@ -751,8 +751,7 @@ const createPanelDefaults = (): PanelProps => ({
     actions: {
       submit: {
         draft: vi.fn(),
-        restoredPlan: vi.fn().mockResolvedValue(undefined),
-        notebookContinuation: vi.fn()
+        restoredPlan: vi.fn().mockResolvedValue(undefined)
       },
       revise: vi.fn(),
       branch: vi.fn(),
