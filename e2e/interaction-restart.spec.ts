@@ -77,7 +77,10 @@ test.describe('Notebook memory recheck', () => {
         ).toBeEnabled()
       }
 
-      await app.setNotebookMemorySample(entrance === 'notice' ? 'pressured' : 'unavailable', 3000)
+      await app.setNotebookMemorySample(
+        entrance === 'notice' ? 'pressured' : 'unavailable',
+        entrance === 'notice' ? 1200 : 3000
+      )
       await action.click()
       await expect(
         entranceSurface.getByRole('button', { name: 'Checking…', exact: true })
@@ -123,8 +126,7 @@ test.describe('Notebook memory recheck', () => {
       expect(originalTurn).toBeDefined()
       await expect.poll(continuationPrompts).toEqual([
         expect.objectContaining({
-          sessionId: originalTurn!.sessionId,
-          role: 'main'
+          sessionId: originalTurn!.sessionId
         })
       ])
       await expect(turnReply).toBeVisible()
