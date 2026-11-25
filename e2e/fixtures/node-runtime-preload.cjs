@@ -110,38 +110,35 @@ if (process.versions.electron) {
   ) {
     const Module = require('node:module')
     const load = Module._load
-    const wrapped = new WeakMap()
+    const wrapped = new WeakSet()
     const control = join(root, 'e2e-notebook-memory-sample.json')
     Module._load = function (request, ...args) {
       const binding = Reflect.apply(load, this, [request, ...args])
-      if (request !== '@aipoch/process-tree-native') return binding
-      if (!wrapped.has(binding)) {
-        wrapped.set(binding, {
-          ...binding,
-          sampleWindowsResources: async (includeProcesses, retained) => {
-            if (includeProcesses || retained.length || !existsSync(control))
-              return binding.sampleWindowsResources(includeProcesses, retained)
-            const { status, delayMs } = JSON.parse(readFileSync(control, 'utf8'))
-            const startedAt = Date.now()
-            if (delayMs) await require('node:timers/promises').setTimeout(delayMs)
-            const gibibyte = 1024 ** 3
-            return {
-              supported: true,
-              complete: status !== 'unavailable',
-              startedAt,
-              endedAt: Date.now(),
-              system: {
-                availableBytes: status === 'pressured' ? 128 * 1024 ** 2 : 8 * gibibyte,
-                totalPhysicalBytes: 16 * gibibyte,
-                commitLimitBytes: 20 * gibibyte,
-                committedBytes: 8 * gibibyte
-              },
-              processes: []
-            }
-          }
-        })
+      if (request !== '@aipoch/process-tree-native' || wrapped.has(binding)) return binding
+      const sample = binding.sampleWindowsResources
+      binding.sampleWindowsResources = async (includeProcesses, retained) => {
+        if (includeProcesses || retained.length || !existsSync(control))
+          return sample(includeProcesses, retained)
+        const { status, delayMs } = JSON.parse(readFileSync(control, 'utf8'))
+        const startedAt = Date.now()
+        if (delayMs) await require('node:timers/promises').setTimeout(delayMs)
+        const gibibyte = 1024 ** 3
+        return {
+          supported: true,
+          complete: status !== 'unavailable',
+          startedAt,
+          endedAt: Date.now(),
+          system: {
+            availableBytes: status === 'pressured' ? 128 * 1024 ** 2 : 8 * gibibyte,
+            totalPhysicalBytes: 16 * gibibyte,
+            commitLimitBytes: 20 * gibibyte,
+            committedBytes: 8 * gibibyte
+          },
+          processes: []
+        }
       }
-      return wrapped.get(binding)
+      wrapped.add(binding)
+      return binding
     }
   }
   const fs = require('node:fs/promises')
